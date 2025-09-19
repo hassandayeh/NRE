@@ -1,0 +1,28 @@
+/* Tailwind entrypoints */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base tweaks (safe defaults) */
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply antialiased text-gray-900 bg-white;
+  }
+}
+
+/* Example component layer (handy for future design tokens)
+@layer components {
+  .container-padded {
+    @apply max-w-5xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
+*/
