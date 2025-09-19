@@ -2,28 +2,30 @@
   "name": "nre",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "description": "NRE project bootstrap: clean Node project metadata and scripts.",
-  "keywords": [],
-  "author": "Hassan Dayeh",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+ssh://git@github.com/hassandayeh/NRE.git"
-  },
-  "bugs": {
-    "url": "https://github.com/hassandayeh/NRE/issues"
-  },
-  "homepage": "https://github.com/hassandayeh/NRE#readme",
+  "description": "Expert Booker MVP – Next.js + React + TypeScript scaffold",
   "engines": {
-    "node": ">=20.12.0",
-    "npm": ">=10.5.0"
+    "node": ">=20"
   },
-  "packageManager": "npm@10.5.0",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node -e \"console.log('NRE dev check OK')\"",
-    "check:node": "node -v && npm -v",
-    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "eslint . --max-warnings=0",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^14.2.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.0.0",
+    "postcss": "^8.4.41",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.6.2"
   }
 }
