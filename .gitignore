@@ -1,0 +1,18 @@
+﻿# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Dependencies / builds
+node_modules/
+dist/
+build/
+.next/
+
+# Envs & local files
+.env
+.env.*
+*.local
+
+# Python virtualenvs (if used later)
+.venv/
