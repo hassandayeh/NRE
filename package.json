@@ -22,5 +22,9 @@
   "scripts": {
     "dev": "node -e \"console.log('NRE dev check OK')\"",
     "check:node": "node -v && npm -v"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "eslint": "^9.36.0"
   }
 }
