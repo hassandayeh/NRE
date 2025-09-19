@@ -1,10 +1,16 @@
 ﻿# NRE
 
-Initial repository for the NRE project.
+Minimal Node scaffolding for the NRE project.
 
-## What is this?
-A clean start. We’ll add code files incrementally, one file at a time, with PR-ready drops.
+## Getting Started
 
-## Conventions
-- Main branch: `main`
-- Use SSH for Git operations
+### Prerequisites
+
+- Node 20+ and npm 10+ (already installed)
+- Git (already installed)
+
+### Install
+
+```bash
+npm install
+```

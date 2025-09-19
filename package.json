@@ -2,6 +2,7 @@
   "name": "nre",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "NRE project bootstrap: clean Node project metadata and scripts.",
   "keywords": [],
   "author": "Hassan Dayeh",
@@ -20,11 +21,9 @@
   },
   "packageManager": "npm@10.5.0",
   "scripts": {
+    "start": "node src/index.js",
     "dev": "node -e \"console.log('NRE dev check OK')\"",
-    "check:node": "node -v && npm -v"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.36.0",
-    "eslint": "^9.36.0"
+    "check:node": "node -v && npm -v",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
   }
 }
