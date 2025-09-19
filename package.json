@@ -1,0 +1,26 @@
+{
+  "name": "nre",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NRE project bootstrap: clean Node project metadata and scripts.",
+  "keywords": [],
+  "author": "Hassan Dayeh",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/hassandayeh/NRE.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hassandayeh/NRE/issues"
+  },
+  "homepage": "https://github.com/hassandayeh/NRE#readme",
+  "engines": {
+    "node": ">=20.12.0",
+    "npm": ">=10.5.0"
+  },
+  "packageManager": "npm@10.5.0",
+  "scripts": {
+    "dev": "node -e \"console.log('NRE dev check OK')\"",
+    "check:node": "node -v && npm -v"
+  }
+}
