@@ -1,0 +1,89 @@
+// prisma/schema.prisma
+// Initial Prisma schema for Expert Booker MVP
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Will read from DATABASE_URL in .env (we’ll add/setup next)
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Booking appearance mode
+enum AppearanceType {
+  IN_PERSON
+  ONLINE
+}
+
+/// Booking workflow status
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+/// Organizations (newsrooms or companies)
+model Organization {
+  id        String                 @id @default(cuid())
+  name      String                 @db.VarChar(200)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  // Feature toggles owned by this organization
+  toggles   OrgFeatureToggle[]
+
+  // Optional: bookings scoped to an org (we’ll wire this later)
+  bookings  Booking[]
+}
+
+/// DB-backed feature flags per organization
+/// Example flags (start small; we can add more in follow-up migrations):
+/// - showProgramName: whether bookings expose program name field
+/// - showHostName: whether bookings expose host name field
+/// - showTalkingPoints: whether bookings include talking points field
+model OrgFeatureToggle {
+  id             String       @id @default(cuid())
+  orgId          String
+  organization   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  // Core toggles (can grow over time)
+  showProgramName   Boolean   @default(true)
+  showHostName      Boolean   @default(true)
+  showTalkingPoints Boolean   @default(true)
+
+  // Audit
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([orgId]) // one toggle row per org (acts like a settings record)
+}
+
+/// Bookings table (matches current UI fields; can expand later)
+model Booking {
+  id            String         @id @default(cuid())
+  subject       String         @db.VarChar(300)
+  expertName    String         @db.VarChar(200)
+  newsroomName  String         @db.VarChar(200)
+
+  appearanceType AppearanceType
+  status         BookingStatus  @default(PENDING)
+
+  startAt       DateTime
+  durationMins  Int
+
+  // Optional location fields
+  locationName  String?        @db.VarChar(300)
+  locationUrl   String?        @db.Text
+
+  // Org scope (optional for now)
+  orgId         String?
+  organization  Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([orgId])
+  @@index([startAt])
+}
