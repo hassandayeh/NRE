@@ -1,5 +1,5 @@
 // prisma/schema.prisma
-// Org & Tenancy foundation + existing Booking schema retained
+// Org & Tenancy foundation + Booking extras (programName, hostName, talkingPoints)
 
 generator client {
   provider = "prisma-client-js"
@@ -40,27 +40,29 @@ model Organization {
   updatedAt DateTime @updatedAt
 
   // Feature toggles owned by this organization
-  toggles OrgFeatureToggle?
+  toggles   OrgFeatureToggle?
 
   // Optional: bookings scoped to an org (wired via orgId on Booking)
-  bookings Booking[]
+  bookings  Booking[]
 
   // Tenancy relations
   memberships OrganizationMembership[]
+
   // Reverse side of User.activeOrg
-  activeUsers User[]                   @relation("ActiveOrg")
+  activeUsers User[] @relation("ActiveOrg")
 }
 
 /// DB-backed feature flags per organization
 /// One row per org controls conditional fields in UI
 model OrgFeatureToggle {
-  id           String       @id @default(cuid())
-  orgId        String
+  id     String @id @default(cuid())
+  orgId  String
+
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // Core toggles (can grow over time)
-  showProgramName   Boolean @default(true)
-  showHostName      Boolean @default(true)
+  showProgramName  Boolean @default(true)
+  showHostName     Boolean @default(true)
   showTalkingPoints Boolean @default(true)
 
   // Audit
@@ -70,45 +72,54 @@ model OrgFeatureToggle {
   @@unique([orgId]) // one toggle row per org (acts like a settings record)
 }
 
-/// Bookings table (current UI fields; can expand later)
+/// Bookings table (current UI fields; expanded with extras)
 model Booking {
-  id             String         @id @default(cuid())
-  subject        String         @db.VarChar(300)
-  expertName     String         @db.VarChar(200)
-  newsroomName   String         @db.VarChar(200)
+  id            String         @id @default(cuid())
+
+  subject       String         @db.VarChar(300)
+  expertName    String         @db.VarChar(200)
+  newsroomName  String         @db.VarChar(200)
+
   appearanceType AppearanceType
   status         BookingStatus  @default(PENDING)
-  startAt        DateTime
-  durationMins   Int
+
+  startAt       DateTime
+  durationMins  Int
 
   // Optional location fields
-  locationName String? @db.VarChar(300)
-  locationUrl  String? @db.Text
+  locationName  String?        @db.VarChar(300)
+  locationUrl   String?        @db.Text
+
+  // NEW optional extras (tenant-flagged in UI)
+  programName   String?        @db.VarChar(200) // e.g. show when toggled for org
+  hostName      String?        @db.VarChar(200) // e.g. show when toggled for org
+  talkingPoints String?        @db.Text         // longer free text; optional
 
   // Org scope (optional for now)
-  orgId        String?
-  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  orgId         String?
+  organization  Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@index([orgId])
   @@index([startAt])
 }
 
-/// Application user (for local credentials auth soon)
+/// Application user (for local credentials auth)
 model User {
-  id             String  @id @default(cuid())
-  email          String  @unique @db.VarChar(320)
-  name           String? @db.VarChar(200)
+  id             String   @id @default(cuid())
+  email          String   @unique @db.VarChar(320)
+  name           String?  @db.VarChar(200)
+
   // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword String  @db.VarChar(255)
+  hashedPassword String    @db.VarChar(255)
 
   // Optional “active org” for scoping the UI/session
   activeOrgId String?
   activeOrg   Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
 
-  // Tenancy
+  // Tenancy memberships
   memberships OrganizationMembership[]
 
   createdAt DateTime @default(now())
@@ -123,6 +134,7 @@ model OrganizationMembership {
   userId    String
   orgId     String
   role      Role
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
