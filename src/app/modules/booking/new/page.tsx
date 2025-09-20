@@ -1,20 +1,21 @@
 "use client";
 
 /**
- * Booking Create Form (DB-flag aware) — now submits to /api/bookings
- * - Reads feature flags from <body data-*="..."> (set by Root Layout)
- * - Validates with Zod (discriminated union) before submit
- * - POSTs to /api/bookings and redirects to /modules/booking on success
+ * Booking Create Form — Real fields + backward-compatible payload
+ * - Adds Subject, Newsroom name, Start date/time, Duration (mins)
+ * - Client-side validation (Zod)
+ * - Sends legacy API fields as well so /api/bookings accepts it today
+ * - On success, redirects to /modules/booking?created=1 (for banner)
  */
 
 import React from "react";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
 
-/** ---------- Flag reading ---------- */
+/** ---------- Helpers: read server-driven feature flags ---------- */
 function readBooleanDataset(key: string, fallback = true): boolean {
   if (typeof document === "undefined") return fallback;
-  const raw = document.body.dataset[key as keyof DOMStringMap];
+  const raw = (document.body.dataset as DOMStringMap)[key];
   if (raw == null) return fallback;
   return raw === "true";
 }
@@ -29,13 +30,58 @@ type Flags = {
 const AppearanceType = z.enum(["ONLINE", "IN_PERSON"]);
 type TAppearanceType = z.infer<typeof AppearanceType>;
 
-/** ---------- Dynamic schema builder ---------- */
+/** ---------- Datetime helpers ---------- */
+function nextFullHourLocalISO(): string {
+  const d = new Date();
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.toISOString();
+}
+function toDatetimeLocalValue(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+/** ---------- Dynamic schema builder (respects flags) ---------- */
 function buildSchema(flags: Flags) {
-  const common = z.object({
+  const base = z.object({
+    subject: z
+      .string({ required_error: "Subject is required" })
+      .trim()
+      .min(2, "Please enter a longer subject")
+      .max(300, "Subject is too long"),
+    newsroomName: z
+      .string({ required_error: "Newsroom name is required" })
+      .trim()
+      .min(2, "Please enter a longer newsroom name")
+      .max(200, "Newsroom name is too long"),
+    startAt: z
+      .preprocess((v) => {
+        if (typeof v === "string") return new Date(v);
+        if (v instanceof Date) return v;
+        return v;
+      }, z.date({ required_error: "Start date/time is required" }))
+      .refine((d) => d.getTime() > Date.now(), {
+        message: "Start time must be in the future",
+      }),
+    durationMins: z
+      .number({ required_error: "Duration is required" })
+      .int("Duration must be a whole number")
+      .min(5, "Duration must be at least 5 minutes")
+      .max(600, "Duration seems too long"),
+  });
+
+  const legacyCommon = z.object({
     guestName: z
       .string({ required_error: "Guest name is required" })
+      .trim()
       .min(2, "Please enter at least 2 characters"),
-
     programName: flags.showProgramName
       ? z.string().trim().max(120, "Program name is too long").optional()
       : z.undefined(),
@@ -48,23 +94,26 @@ function buildSchema(flags: Flags) {
   });
 
   const Online = z.object({
-    appearanceType: z.literal("ONLINE"),
+    appearanceType: z.literal(AppearanceType.Enum.ONLINE),
     meetingLink: z
       .string({ required_error: "Meeting link is required" })
       .url("Please enter a valid URL"),
   });
 
   const InPerson = z.object({
-    appearanceType: z.literal("IN_PERSON"),
+    appearanceType: z.literal(AppearanceType.Enum.IN_PERSON),
     venueAddress: z
       .string({ required_error: "Venue/address is required" })
       .min(5, "Please enter a longer address"),
   });
 
-  return z.discriminatedUnion("appearanceType", [
-    common.merge(Online),
-    common.merge(InPerson),
-  ]);
+  return z.intersection(
+    base,
+    z.discriminatedUnion("appearanceType", [
+      legacyCommon.merge(Online),
+      legacyCommon.merge(InPerson),
+    ])
+  );
 }
 
 type FormShape = z.infer<ReturnType<typeof buildSchema>>;
@@ -73,7 +122,7 @@ type FormShape = z.infer<ReturnType<typeof buildSchema>>;
 export default function NewBookingPage() {
   const router = useRouter();
 
-  // Flags from server (<body data-*>)
+  // Flags from server (RootLayout writes them to <body data-*>)
   const [flags, setFlags] = React.useState<Flags>({
     showProgramName: true,
     showHostName: true,
@@ -89,7 +138,13 @@ export default function NewBookingPage() {
 
   const schema = React.useMemo(() => buildSchema(flags), [flags]);
 
-  // Local form state
+  // Local form state — new fields
+  const [subject, setSubject] = React.useState("TV Interview");
+  const [newsroomName, setNewsroomName] = React.useState("");
+  const [startAtISO, setStartAtISO] = React.useState(nextFullHourLocalISO());
+  const [durationMins, setDurationMins] = React.useState<number>(30);
+
+  // Legacy fields (kept to satisfy today’s API)
   const [appearanceType, setAppearanceType] =
     React.useState<TAppearanceType>("ONLINE");
   const [guestName, setGuestName] = React.useState("");
@@ -106,8 +161,15 @@ export default function NewBookingPage() {
 
   function currentPayload(): unknown {
     const base = {
+      // New DB-aligned fields
+      subject: subject.trim(),
+      newsroomName: newsroomName.trim(),
+      startAt: new Date(startAtISO).toISOString(),
+      durationMins,
+
+      // Legacy (for today’s API)
       appearanceType,
-      guestName,
+      guestName: guestName.trim(),
       ...(flags.showProgramName && programName.trim()
         ? { programName: programName.trim() }
         : {}),
@@ -117,17 +179,17 @@ export default function NewBookingPage() {
       ...(flags.showTalkingPoints && talkingPoints.trim()
         ? { talkingPoints: talkingPoints.trim() }
         : {}),
+      ...(appearanceType === "ONLINE"
+        ? { meetingLink: meetingLink.trim() }
+        : { venueAddress: venueAddress.trim() }),
     };
 
-    return appearanceType === "ONLINE"
-      ? { ...base, meetingLink }
-      : { ...base, venueAddress };
+    return base;
   }
 
   function validateAndPreview(e?: React.FormEvent) {
     if (e) e.preventDefault();
     const payload = currentPayload();
-
     const res = schema.safeParse(payload);
     if (!res.success) {
       const fieldErrors: Record<string, string> = {};
@@ -139,7 +201,6 @@ export default function NewBookingPage() {
       setPreview(null);
       return;
     }
-
     setErrors({});
     setPreview(res.data);
   }
@@ -148,7 +209,6 @@ export default function NewBookingPage() {
     e.preventDefault();
     setSubmitError(null);
 
-    // Validate first
     const payload = currentPayload();
     const parsed = schema.safeParse(payload);
     if (!parsed.success) {
@@ -171,19 +231,22 @@ export default function NewBookingPage() {
       });
 
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        const message =
-          body?.error ||
-          (res.status === 400
-            ? "Validation error"
-            : "Failed to create booking");
+        // Try to surface granular server error if present
+        let message = "Failed to create booking";
+        try {
+          const body = await res.json();
+          message =
+            body?.error || (res.status === 400 ? "Validation error" : message);
+        } catch {
+          // ignore JSON parse error
+        }
         setSubmitError(message);
         return;
       }
 
-      // Success → redirect to list
-      router.push("/modules/booking");
-    } catch (err) {
+      // Success → redirect to list with success banner
+      router.push("/modules/booking?created=1");
+    } catch {
       setSubmitError("Network error. Please try again.");
     } finally {
       setSubmitting(false);
@@ -203,59 +266,141 @@ export default function NewBookingPage() {
   }, [appearanceType]);
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold">New Booking</h1>
-        <p className="text-sm text-gray-600">
-          Fields are shown/hidden based on organization feature toggles (from
-          the database).
-        </p>
-      </header>
+    <main className="mx-auto max-w-3xl space-y-6 p-6">
+      <h1 className="text-2xl font-bold">New Booking</h1>
+      <p className="text-sm text-gray-600">
+        Real fields added. Flags still control optional fields. Validation runs
+        on blur / preview / submit.
+      </p>
 
       <form onSubmit={handleSubmit} className="space-y-5">
+        {/* Subject */}
+        <div>
+          <label className="mb-1 block text-sm font-medium">
+            Subject <span className="text-red-600">*</span>
+          </label>
+          <input
+            type="text"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            onBlur={validateAndPreview}
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            placeholder="e.g., TV Interview"
+            maxLength={300}
+            required
+          />
+          {errors.subject && (
+            <p className="text-sm text-red-600">{errors.subject}</p>
+          )}
+        </div>
+
+        {/* Newsroom name */}
+        <div>
+          <label className="mb-1 block text-sm font-medium">
+            Newsroom name <span className="text-red-600">*</span>
+          </label>
+          <input
+            type="text"
+            value={newsroomName}
+            onChange={(e) => setNewsroomName(e.target.value)}
+            onBlur={validateAndPreview}
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            placeholder="e.g., Global Newsroom"
+            maxLength={200}
+            required
+          />
+          {errors.newsroomName && (
+            <p className="text-sm text-red-600">{errors.newsroomName}</p>
+          )}
+        </div>
+
+        {/* Start date/time & Duration */}
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-sm font-medium">
+              Start date/time <span className="text-red-600">*</span>
+            </label>
+            <input
+              type="datetime-local"
+              value={toDatetimeLocalValue(startAtISO)}
+              onChange={(e) => {
+                const v = e.target.value; // "YYYY-MM-DDTHH:mm"
+                const asDate = new Date(v);
+                setStartAtISO(asDate.toISOString());
+              }}
+              onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              required
+            />
+            {errors.startAt && (
+              <p className="text-sm text-red-600">{errors.startAt}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium">
+              Duration (minutes) <span className="text-red-600">*</span>
+            </label>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={5}
+              max={600}
+              step={5}
+              value={Number.isFinite(durationMins) ? durationMins : 30}
+              onChange={(e) => setDurationMins(parseInt(e.target.value, 10))}
+              onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              required
+            />
+            {errors.durationMins && (
+              <p className="text-sm text-red-600">{errors.durationMins}</p>
+            )}
+          </div>
+        </div>
+
         {/* Appearance */}
-        <div className="space-y-2">
-          <label className="block text-sm font-medium">Appearance Type</label>
-          <div className="flex gap-3">
+        <fieldset>
+          <legend className="mb-1 block text-sm font-medium">
+            Appearance Type
+          </legend>
+          <div className="flex gap-2">
             <button
               type="button"
-              className={`rounded-lg border px-3 py-1 text-sm ${
-                appearanceType === "ONLINE"
-                  ? "bg-gray-900 text-white"
-                  : "bg-white"
-              }`}
               onClick={() => setAppearanceType("ONLINE")}
               aria-pressed={appearanceType === "ONLINE"}
+              className={`rounded-lg border px-3 py-2 text-sm ${
+                appearanceType === "ONLINE" ? "bg-gray-900 text-white" : ""
+              }`}
             >
               Online
             </button>
             <button
               type="button"
-              className={`rounded-lg border px-3 py-1 text-sm ${
-                appearanceType === "IN_PERSON"
-                  ? "bg-gray-900 text-white"
-                  : "bg-white"
-              }`}
               onClick={() => setAppearanceType("IN_PERSON")}
               aria-pressed={appearanceType === "IN_PERSON"}
+              className={`rounded-lg border px-3 py-2 text-sm ${
+                appearanceType === "IN_PERSON" ? "bg-gray-900 text-white" : ""
+              }`}
             >
               In-person
             </button>
           </div>
-        </div>
+        </fieldset>
 
         {/* Guest name */}
-        <div className="space-y-1">
-          <label htmlFor="guestName" className="block text-sm font-medium">
+        <div>
+          <label className="mb-1 block text-sm font-medium">
             Guest name <span className="text-red-600">*</span>
           </label>
           <input
-            id="guestName"
             type="text"
-            className="w-full rounded-md border px-3 py-2"
             value={guestName}
             onChange={(e) => setGuestName(e.target.value)}
             onBlur={validateAndPreview}
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            placeholder="e.g., Dr. Jane Doe"
+            required
           />
           {errors.guestName && (
             <p className="text-sm text-red-600">{errors.guestName}</p>
@@ -264,35 +409,36 @@ export default function NewBookingPage() {
 
         {/* Online vs In-person specific */}
         {appearanceType === "ONLINE" ? (
-          <div className="space-y-1">
-            <label htmlFor="meetingLink" className="block text-sm font-medium">
+          <div>
+            <label className="mb-1 block text-sm font-medium">
               Meeting link <span className="text-red-600">*</span>
             </label>
             <input
-              id="meetingLink"
               type="url"
-              placeholder="https://…"
-              className="w-full rounded-md border px-3 py-2"
               value={meetingLink}
               onChange={(e) => setMeetingLink(e.target.value)}
               onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              placeholder="https://…"
+              required
             />
             {errors.meetingLink && (
               <p className="text-sm text-red-600">{errors.meetingLink}</p>
             )}
           </div>
         ) : (
-          <div className="space-y-1">
-            <label htmlFor="venueAddress" className="block text-sm font-medium">
+          <div>
+            <label className="mb-1 block text-sm font-medium">
               Venue / address <span className="text-red-600">*</span>
             </label>
             <input
-              id="venueAddress"
               type="text"
-              className="w-full rounded-md border px-3 py-2"
               value={venueAddress}
               onChange={(e) => setVenueAddress(e.target.value)}
               onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              placeholder="123 Main St, City…"
+              required
             />
             {errors.venueAddress && (
               <p className="text-sm text-red-600">{errors.venueAddress}</p>
@@ -302,17 +448,17 @@ export default function NewBookingPage() {
 
         {/* Conditional (DB-flagged) fields */}
         {flags.showProgramName && (
-          <div className="space-y-1">
-            <label htmlFor="programName" className="block text-sm font-medium">
+          <div>
+            <label className="mb-1 block text-sm font-medium">
               Program name (optional)
             </label>
             <input
-              id="programName"
               type="text"
-              className="w-full rounded-md border px-3 py-2"
               value={programName}
               onChange={(e) => setProgramName(e.target.value)}
               onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              placeholder="e.g., Nightly News"
             />
             {errors.programName && (
               <p className="text-sm text-red-600">{errors.programName}</p>
@@ -321,17 +467,17 @@ export default function NewBookingPage() {
         )}
 
         {flags.showHostName && (
-          <div className="space-y-1">
-            <label htmlFor="hostName" className="block text-sm font-medium">
+          <div>
+            <label className="mb-1 block text-sm font-medium">
               Host name (optional)
             </label>
             <input
-              id="hostName"
               type="text"
-              className="w-full rounded-md border px-3 py-2"
               value={hostName}
               onChange={(e) => setHostName(e.target.value)}
               onBlur={validateAndPreview}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              placeholder="e.g., John Smith"
             />
             {errors.hostName && (
               <p className="text-sm text-red-600">{errors.hostName}</p>
@@ -340,20 +486,16 @@ export default function NewBookingPage() {
         )}
 
         {flags.showTalkingPoints && (
-          <div className="space-y-1">
-            <label
-              htmlFor="talkingPoints"
-              className="block text-sm font-medium"
-            >
+          <div>
+            <label className="mb-1 block text-sm font-medium">
               Talking points (optional)
             </label>
             <textarea
-              id="talkingPoints"
-              rows={5}
-              className="w-full rounded-md border px-3 py-2"
               value={talkingPoints}
               onChange={(e) => setTalkingPoints(e.target.value)}
               onBlur={validateAndPreview}
+              className="h-28 w-full rounded-lg border px-3 py-2 text-sm"
+              placeholder="Bullet points for the segment…"
             />
             {errors.talkingPoints && (
               <p className="text-sm text-red-600">{errors.talkingPoints}</p>
@@ -361,7 +503,7 @@ export default function NewBookingPage() {
           </div>
         )}
 
-        {/* Submit / Validate */}
+        {/* Actions */}
         <div className="flex items-center gap-3">
           <button
             type="submit"
@@ -370,6 +512,7 @@ export default function NewBookingPage() {
           >
             {submitting ? "Submitting…" : "Submit"}
           </button>
+
           <button
             type="button"
             className="rounded-lg border px-4 py-2 text-sm"
@@ -377,10 +520,15 @@ export default function NewBookingPage() {
           >
             Validate & Preview
           </button>
+
           <button
             type="button"
             className="rounded-lg border px-4 py-2 text-sm"
             onClick={() => {
+              setSubject("TV Interview");
+              setNewsroomName("");
+              setStartAtISO(nextFullHourLocalISO());
+              setDurationMins(30);
               setGuestName("");
               setMeetingLink("");
               setVenueAddress("");
@@ -412,8 +560,8 @@ export default function NewBookingPage() {
           </pre>
         ) : (
           <p className="text-sm text-gray-600">
-            Fill the form and click “Validate &amp; Preview” (or blur a field)
-            to see validated data here.
+            Fill the form and click “Validate & Preview” (or blur a field) to
+            see validated data here.
           </p>
         )}
       </section>

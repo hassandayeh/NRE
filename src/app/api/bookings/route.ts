@@ -1,130 +1,126 @@
-// src/app/api/bookings/route.ts
-// GET  /api/bookings  -> list bookings (most recent first)
-// POST /api/bookings  -> accept current form payload, map to Booking model, insert
-
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
+import { PrismaClient } from "@prisma/client";
 
-/** Prisma singleton (safe for dev hot-reload) */
-const g = globalThis as unknown as { prisma?: PrismaClient };
-export const prisma = g.prisma ?? new PrismaClient();
-if (process.env.NODE_ENV !== "production") g.prisma = prisma;
+const prisma = new PrismaClient();
 
-/** Zod schema that matches the CURRENT client form payload */
+// ----- Validation -----
 const AppearanceType = z.enum(["ONLINE", "IN_PERSON"]);
 
-const Common = z.object({
-  guestName: z.string().min(2, "Guest name is required"),
+const baseSchema = z.object({
+  subject: z.string().trim().min(2).max(300),
+  newsroomName: z.string().trim().min(2).max(200),
+  // Accept either expertName OR guestName (legacy); we'll normalize below.
+  expertName: z.string().trim().min(2).max(200).optional(),
+  guestName: z.string().trim().min(2).max(200).optional(),
+  startAt: z.preprocess((v) => {
+    if (typeof v === "string") return new Date(v);
+    if (v instanceof Date) return v;
+    return v;
+  }, z.date()),
+  durationMins: z.number().int().min(5).max(600),
+  // Optional (may not exist in schema yet; accepted but not persisted)
   programName: z.string().trim().max(120).optional(),
   hostName: z.string().trim().max(120).optional(),
   talkingPoints: z.string().trim().max(2000).optional(),
 });
 
-const Online = z.object({
+const onlineSchema = baseSchema.extend({
   appearanceType: z.literal(AppearanceType.Enum.ONLINE),
-  meetingLink: z.string().url("Meeting link must be a valid URL"),
+  meetingLink: z.string().url(), // accepted, not persisted (schema missing)
 });
 
-const InPerson = z.object({
+const inPersonSchema = baseSchema.extend({
   appearanceType: z.literal(AppearanceType.Enum.IN_PERSON),
-  venueAddress: z.string().min(5, "Venue/address is required"),
+  venueAddress: z.string().min(5), // accepted, not persisted (schema missing)
 });
 
-const FormSchema = z.discriminatedUnion("appearanceType", [
-  Common.merge(Online),
-  Common.merge(InPerson),
+const createSchema = z.discriminatedUnion("appearanceType", [
+  onlineSchema,
+  inPersonSchema,
 ]);
-type FormInput = z.infer<typeof FormSchema>;
 
-/** Helper: get the Default Organization's id (seed created it) */
-async function getDefaultOrgId(): Promise<string | null> {
-  const byName = await prisma.organization.findFirst({
-    where: { name: "Default Organization" },
-    select: { id: true },
-  });
-  if (byName) return byName.id;
-  const any = await prisma.organization.findFirst({ select: { id: true } });
-  return any?.id ?? null;
-}
-
-/** GET: list bookings */
+// ----- GET /api/bookings -----
 export async function GET() {
   try {
-    const items = await prisma.booking.findMany({
-      orderBy: { createdAt: "desc" },
+    const bookings = await prisma.booking.findMany({
+      orderBy: { startAt: "desc" },
+      select: {
+        id: true,
+        subject: true,
+        newsroomName: true,
+        expertName: true,
+        appearanceType: true,
+        startAt: true,
+        durationMins: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
-    return NextResponse.json({ ok: true, items });
+
+    return NextResponse.json({ bookings });
   } catch (err) {
-    console.error("GET /api/bookings failed:", err);
+    console.error("GET /api/bookings error:", err);
     return NextResponse.json(
-      { ok: false, error: "Failed to fetch bookings" },
+      { error: "Failed to load bookings" },
       { status: 500 }
     );
   }
 }
 
-/** POST: create booking (form payload -> DB shape) */
+// ----- POST /api/bookings -----
 export async function POST(req: Request) {
   try {
-    const json = (await req.json()) as unknown;
+    const json = await req.json();
 
-    const parsed = FormSchema.safeParse(json);
+    // Normalize legacy -> new before validation (so errors are cleaner)
+    if (!json.expertName && json.guestName) {
+      json.expertName = json.guestName;
+    }
+
+    const parsed = createSchema.safeParse(json);
     if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const path = issue.path.join(".");
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Validation error",
-          issues: parsed.error.issues.map((i) => ({
-            path: i.path.join("."),
-            message: i.message,
-          })),
-        },
+        { error: `${path || "payload"}: ${issue.message}` },
         { status: 400 }
       );
     }
 
-    const data = parsed.data as FormInput;
+    const data = parsed.data;
 
-    // Map the CURRENT form fields to your Booking model (per schema.prisma)
-    // Required by DB: subject, expertName, newsroomName, appearanceType, startAt, durationMins
-    const now = new Date();
-    const mapped = {
-      appearanceType: data.appearanceType, // enum matches
-      subject:
-        ("programName" in data &&
-          data.programName &&
-          data.programName.trim()) ||
-        `General Booking`,
-      expertName: data.guestName,
-      newsroomName: "Default Newsroom", // placeholder until newsroom selection exists
-      startAt: now, // TODO: replace with real date/time from UI in a later slice
-      durationMins: 30, // TODO: replace with user input later
-      // Location mapping
-      locationName:
-        data.appearanceType === "IN_PERSON"
-          ? data.venueAddress
-          : "Online meeting",
-      locationUrl: data.appearanceType === "ONLINE" ? data.meetingLink : null,
-      // Optional org scope
-      orgId: await getDefaultOrgId(),
-      // NOTE: hostName/talkingPoints aren't in the DB model yet. We'll add columns later
-      // if we want to persist them; for now they are ignored server-side.
-    };
+    // Persist only fields known to exist in your current schema
+    const created = await prisma.booking.create({
+      data: {
+        subject: data.subject,
+        newsroomName: data.newsroomName,
+        expertName: data.expertName!, // guaranteed after normalization
+        appearanceType: data.appearanceType,
+        startAt: data.startAt,
+        durationMins: data.durationMins,
+        // NOTE: meetingLink / venueAddress / programName / hostName / talkingPoints
+        // are accepted by the API but intentionally NOT persisted until the
+        // schema migration adds these columns.
+      },
+      select: {
+        id: true,
+        subject: true,
+        newsroomName: true,
+        expertName: true,
+        appearanceType: true,
+        startAt: true,
+        durationMins: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
 
-    const created = await prisma.booking.create({ data: mapped });
-    return NextResponse.json({ ok: true, item: created }, { status: 201 });
-  } catch (err: any) {
-    // Surface the actual error in dev to speed up fixes
-    if (process.env.NODE_ENV !== "production") {
-      console.error("POST /api/bookings error:", err);
-      return NextResponse.json(
-        { ok: false, error: String(err?.message ?? err) },
-        { status: 500 }
-      );
-    }
+    return NextResponse.json({ ok: true, booking: created }, { status: 201 });
+  } catch (err) {
+    console.error("POST /api/bookings error:", err);
     return NextResponse.json(
-      { ok: false, error: "Failed to create booking" },
+      { error: "Failed to create booking" },
       { status: 500 }
     );
   }
