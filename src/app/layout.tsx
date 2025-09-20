@@ -5,6 +5,10 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "./api/auth/[...nextauth]/route";
 import "./globals.css";
 
+// NEW: fetch org name server-side
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
+
 export const metadata: Metadata = {
   title: "NRE",
   description: "Expert Booker MVP",
@@ -13,6 +17,24 @@ export const metadata: Metadata = {
 async function HeaderBar() {
   const session = await getServerSession(authOptions);
   const email = session?.user?.email;
+
+  // Resolve active org name (safe & optional)
+  let orgName: string | null = null;
+  try {
+    const activeOrgId =
+      (session?.user as any)?.activeOrgId || (session as any)?.activeOrgId;
+
+    if (activeOrgId) {
+      const org = await prisma.organization.findUnique({
+        where: { id: String(activeOrgId) },
+        select: { name: true },
+      });
+      orgName = org?.name ?? null;
+    }
+  } catch {
+    // Avoid throwing in header; leave orgName null if anything goes wrong
+    orgName = null;
+  }
 
   return (
     <header className="border-b bg-white">
@@ -33,6 +55,12 @@ async function HeaderBar() {
             <>
               <span className="hidden sm:inline text-gray-700">
                 Signed in as <strong>{email}</strong>
+                {orgName ? (
+                  <>
+                    {" "}
+                    — Org: <strong>{orgName}</strong>
+                  </>
+                ) : null}
               </span>
               <Link
                 href="/api/auth/signout"
