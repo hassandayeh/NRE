@@ -1,360 +1,438 @@
 "use client";
 
-import React from "react";
-import { z } from "zod";
-
 /**
- * /modules/booking/new
- * Zod-powered form for creating a booking with in-person & online appearances.
- * No backend yet: on submit we validate and render a confirmation preview.
- *
- * Accessibility:
- * - Labels connect to inputs via htmlFor / id
- * - aria-invalid on invalid fields
- * - role="alert" for error messages
+ * Booking Create Form (DB-flag aware) — now submits to /api/bookings
+ * - Reads feature flags from <body data-*="..."> (set by Root Layout)
+ * - Validates with Zod (discriminated union) before submit
+ * - POSTs to /api/bookings and redirects to /modules/booking on success
  */
 
-const AppearanceEnum = z.enum(["IN_PERSON", "ONLINE"]);
-type AppearanceType = z.infer<typeof AppearanceEnum>;
+import React from "react";
+import { z } from "zod";
+import { useRouter } from "next/navigation";
 
-const BaseSchema = z.object({
-  subject: z.string().min(2, "Subject must be at least 2 characters"),
-  expertName: z.string().min(2, "Expert name is required"),
-  newsroomName: z.string().min(2, "Newsroom name is required"),
-  startAt: z
-    .string()
-    .refine((v) => !!v, "Start date & time is required")
-    .transform((v) => new Date(v))
-    .refine((d) => !isNaN(d.getTime()), "Invalid date/time")
-    .refine(
-      (d) => d.getTime() > Date.now() - 60_000,
-      "Start time must be in the future"
-    ),
-  durationMins: z
-    .string()
-    .refine((v) => /^\d+$/.test(v), "Duration must be a number")
-    .transform((v) => parseInt(v, 10))
-    .refine(
-      (n) => n >= 5 && n <= 240,
-      "Duration must be between 5 and 240 minutes"
-    ),
-});
+/** ---------- Flag reading ---------- */
+function readBooleanDataset(key: string, fallback = true): boolean {
+  if (typeof document === "undefined") return fallback;
+  const raw = document.body.dataset[key as keyof DOMStringMap];
+  if (raw == null) return fallback;
+  return raw === "true";
+}
 
-const InPersonSchema = BaseSchema.extend({
-  appearanceType: z.literal("IN_PERSON"),
-  locationName: z.string().min(2, "Location name is required for in-person"),
-  locationUrl: z
-    .string()
-    .url("Provide a valid URL (e.g., Google Maps link)")
-    .optional()
-    .or(z.literal("")),
-});
+type Flags = {
+  showProgramName: boolean;
+  showHostName: boolean;
+  showTalkingPoints: boolean;
+};
 
-const OnlineSchema = BaseSchema.extend({
-  appearanceType: z.literal("ONLINE"),
-  locationUrl: z
-    .string()
-    .url("Provide a valid meeting URL (e.g., https://)")
-    .min(3),
-  locationName: z.string().optional(),
-});
+/** ---------- Appearance types ---------- */
+const AppearanceType = z.enum(["ONLINE", "IN_PERSON"]);
+type TAppearanceType = z.infer<typeof AppearanceType>;
 
-const BookingSchema = z.discriminatedUnion("appearanceType", [
-  InPersonSchema,
-  OnlineSchema,
-]);
-type BookingInput = z.infer<typeof BookingSchema>;
+/** ---------- Dynamic schema builder ---------- */
+function buildSchema(flags: Flags) {
+  const common = z.object({
+    guestName: z
+      .string({ required_error: "Guest name is required" })
+      .min(2, "Please enter at least 2 characters"),
 
+    programName: flags.showProgramName
+      ? z.string().trim().max(120, "Program name is too long").optional()
+      : z.undefined(),
+    hostName: flags.showHostName
+      ? z.string().trim().max(120, "Host name is too long").optional()
+      : z.undefined(),
+    talkingPoints: flags.showTalkingPoints
+      ? z.string().trim().max(2000, "Talking points are too long").optional()
+      : z.undefined(),
+  });
+
+  const Online = z.object({
+    appearanceType: z.literal("ONLINE"),
+    meetingLink: z
+      .string({ required_error: "Meeting link is required" })
+      .url("Please enter a valid URL"),
+  });
+
+  const InPerson = z.object({
+    appearanceType: z.literal("IN_PERSON"),
+    venueAddress: z
+      .string({ required_error: "Venue/address is required" })
+      .min(5, "Please enter a longer address"),
+  });
+
+  return z.discriminatedUnion("appearanceType", [
+    common.merge(Online),
+    common.merge(InPerson),
+  ]);
+}
+
+type FormShape = z.infer<ReturnType<typeof buildSchema>>;
+
+/** ---------- Page ---------- */
 export default function NewBookingPage() {
-  const [appearanceType, setAppearanceType] =
-    React.useState<AppearanceType>("ONLINE");
-  const [errors, setErrors] = React.useState<Record<string, string>>({});
-  const [result, setResult] = React.useState<BookingInput | null>(null);
+  const router = useRouter();
 
-  // Provide a default datetime-local value ~ tomorrow 10:00
-  const defaultStart = React.useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    d.setHours(10, 0, 0, 0);
-    const pad = (n: number) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(
-      d.getDate()
-    )}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  // Flags from server (<body data-*>)
+  const [flags, setFlags] = React.useState<Flags>({
+    showProgramName: true,
+    showHostName: true,
+    showTalkingPoints: true,
+  });
+  React.useEffect(() => {
+    setFlags({
+      showProgramName: readBooleanDataset("showProgramName", true),
+      showHostName: readBooleanDataset("showHostName", true),
+      showTalkingPoints: readBooleanDataset("showTalkingPoints", true),
+    });
   }, []);
 
-  function handleSubmit(form: HTMLFormElement) {
-    const formData = new FormData(form);
+  const schema = React.useMemo(() => buildSchema(flags), [flags]);
 
-    const shape: Record<string, unknown> = {
+  // Local form state
+  const [appearanceType, setAppearanceType] =
+    React.useState<TAppearanceType>("ONLINE");
+  const [guestName, setGuestName] = React.useState("");
+  const [meetingLink, setMeetingLink] = React.useState("");
+  const [venueAddress, setVenueAddress] = React.useState("");
+  const [programName, setProgramName] = React.useState("");
+  const [hostName, setHostName] = React.useState("");
+  const [talkingPoints, setTalkingPoints] = React.useState("");
+
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [preview, setPreview] = React.useState<FormShape | null>(null);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  function currentPayload(): unknown {
+    const base = {
       appearanceType,
-      subject: String(formData.get("subject") || ""),
-      expertName: String(formData.get("expertName") || ""),
-      newsroomName: String(formData.get("newsroomName") || ""),
-      startAt: String(formData.get("startAt") || ""),
-      durationMins: String(formData.get("durationMins") || ""),
-      locationName: String(formData.get("locationName") || ""),
-      locationUrl: String(formData.get("locationUrl") || ""),
+      guestName,
+      ...(flags.showProgramName && programName.trim()
+        ? { programName: programName.trim() }
+        : {}),
+      ...(flags.showHostName && hostName.trim()
+        ? { hostName: hostName.trim() }
+        : {}),
+      ...(flags.showTalkingPoints && talkingPoints.trim()
+        ? { talkingPoints: talkingPoints.trim() }
+        : {}),
     };
 
-    const parsed = BookingSchema.safeParse(shape);
-    if (!parsed.success) {
-      // Map Zod issues into a flat record
-      const e: Record<string, string> = {};
-      for (const issue of parsed.error.issues) {
-        const key = issue.path.join(".") || "form";
-        if (!e[key]) e[key] = issue.message;
+    return appearanceType === "ONLINE"
+      ? { ...base, meetingLink }
+      : { ...base, venueAddress };
+  }
+
+  function validateAndPreview(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    const payload = currentPayload();
+
+    const res = schema.safeParse(payload);
+    if (!res.success) {
+      const fieldErrors: Record<string, string> = {};
+      for (const issue of res.error.issues) {
+        const path = issue.path.join(".") || "form";
+        if (!fieldErrors[path]) fieldErrors[path] = issue.message;
       }
-      setErrors(e);
-      setResult(null);
+      setErrors(fieldErrors);
+      setPreview(null);
       return;
     }
 
     setErrors({});
-    setResult(parsed.data);
+    setPreview(res.data);
   }
 
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitError(null);
+
+    // Validate first
+    const payload = currentPayload();
+    const parsed = schema.safeParse(payload);
+    if (!parsed.success) {
+      const fieldErrors: Record<string, string> = {};
+      for (const issue of parsed.error.issues) {
+        const path = issue.path.join(".") || "form";
+        if (!fieldErrors[path]) fieldErrors[path] = issue.message;
+      }
+      setErrors(fieldErrors);
+      setPreview(null);
+      return;
+    }
+
+    try {
+      setSubmitting(true);
+      const res = await fetch("/api/bookings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const message =
+          body?.error ||
+          (res.status === 400
+            ? "Validation error"
+            : "Failed to create booking");
+        setSubmitError(message);
+        return;
+      }
+
+      // Success → redirect to list
+      router.push("/modules/booking");
+    } catch (err) {
+      setSubmitError("Network error. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Clear opposite-side field + errors on appearance switch
+  React.useEffect(() => {
+    setErrors((prev) => {
+      const copy = { ...prev };
+      delete copy.meetingLink;
+      delete copy.venueAddress;
+      return copy;
+    });
+    if (appearanceType === "ONLINE") setVenueAddress("");
+    if (appearanceType === "IN_PERSON") setMeetingLink("");
+  }, [appearanceType]);
+
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">New booking</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          Create an expert appearance (online or in-person).
+    <main className="mx-auto max-w-3xl p-6 space-y-6">
+      <header className="space-y-1">
+        <h1 className="text-2xl font-semibold">New Booking</h1>
+        <p className="text-sm text-gray-600">
+          Fields are shown/hidden based on organization feature toggles (from
+          the database).
         </p>
       </header>
 
-      <form
-        className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
-        onSubmit={(e) => {
-          e.preventDefault();
-          handleSubmit(e.currentTarget);
-        }}
-        noValidate
-      >
-        {/* Appearance type */}
-        <fieldset className="mb-6">
-          <legend className="mb-2 text-sm font-medium text-gray-900">
-            Appearance type
-          </legend>
+      <form onSubmit={handleSubmit} className="space-y-5">
+        {/* Appearance */}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium">Appearance Type</label>
           <div className="flex gap-3">
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                name="appearanceType"
-                value="ONLINE"
-                checked={appearanceType === "ONLINE"}
-                onChange={() => setAppearanceType("ONLINE")}
-                className="h-4 w-4"
-                aria-describedby="appearance-help"
-              />
-              <span>Online</span>
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                name="appearanceType"
-                value="IN_PERSON"
-                checked={appearanceType === "IN_PERSON"}
-                onChange={() => setAppearanceType("IN_PERSON")}
-                className="h-4 w-4"
-                aria-describedby="appearance-help"
-              />
-              <span>In-person</span>
-            </label>
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1 text-sm ${
+                appearanceType === "ONLINE"
+                  ? "bg-gray-900 text-white"
+                  : "bg-white"
+              }`}
+              onClick={() => setAppearanceType("ONLINE")}
+              aria-pressed={appearanceType === "ONLINE"}
+            >
+              Online
+            </button>
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1 text-sm ${
+                appearanceType === "IN_PERSON"
+                  ? "bg-gray-900 text-white"
+                  : "bg-white"
+              }`}
+              onClick={() => setAppearanceType("IN_PERSON")}
+              aria-pressed={appearanceType === "IN_PERSON"}
+            >
+              In-person
+            </button>
           </div>
-          <p id="appearance-help" className="mt-1 text-xs text-gray-500">
-            Choose the appearance mode to see the relevant fields.
-          </p>
-        </fieldset>
-
-        {/* Subject */}
-        <Field
-          label="Subject"
-          name="subject"
-          placeholder="Segment title (e.g., Inflation outlook Q4)"
-          error={errors.subject}
-          required
-        />
-
-        {/* Names */}
-        <div className="grid gap-4 md:grid-cols-2">
-          <Field
-            label="Expert name"
-            name="expertName"
-            placeholder="e.g., Dr. Lina Haddad"
-            error={errors.expertName}
-            required
-          />
-          <Field
-            label="Newsroom name"
-            name="newsroomName"
-            placeholder="e.g., City Newsroom"
-            error={errors.newsroomName}
-            required
-          />
         </div>
 
-        {/* Timing */}
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Field
-            label="Start date & time"
-            name="startAt"
-            type="datetime-local"
-            defaultValue={defaultStart}
-            error={errors.startAt}
-            required
+        {/* Guest name */}
+        <div className="space-y-1">
+          <label htmlFor="guestName" className="block text-sm font-medium">
+            Guest name <span className="text-red-600">*</span>
+          </label>
+          <input
+            id="guestName"
+            type="text"
+            className="w-full rounded-md border px-3 py-2"
+            value={guestName}
+            onChange={(e) => setGuestName(e.target.value)}
+            onBlur={validateAndPreview}
           />
-          <Field
-            label="Duration (mins)"
-            name="durationMins"
-            type="number"
-            inputMode="numeric"
-            placeholder="20"
-            min={5}
-            max={240}
-            error={errors.durationMins}
-            required
-          />
+          {errors.guestName && (
+            <p className="text-sm text-red-600">{errors.guestName}</p>
+          )}
         </div>
 
-        {/* Conditional fields */}
-        {appearanceType === "IN_PERSON" ? (
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <Field
-              label="Location name"
-              name="locationName"
-              placeholder="Studio A — Downtown HQ"
-              error={errors.locationName}
-              required
+        {/* Online vs In-person specific */}
+        {appearanceType === "ONLINE" ? (
+          <div className="space-y-1">
+            <label htmlFor="meetingLink" className="block text-sm font-medium">
+              Meeting link <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="meetingLink"
+              type="url"
+              placeholder="https://…"
+              className="w-full rounded-md border px-3 py-2"
+              value={meetingLink}
+              onChange={(e) => setMeetingLink(e.target.value)}
+              onBlur={validateAndPreview}
             />
-            <Field
-              label="Location URL (optional)"
-              name="locationUrl"
-              placeholder="Google Maps link"
-              error={errors.locationUrl}
-            />
+            {errors.meetingLink && (
+              <p className="text-sm text-red-600">{errors.meetingLink}</p>
+            )}
           </div>
         ) : (
-          <div className="mt-4">
-            <Field
-              label="Meeting link"
-              name="locationUrl"
-              placeholder="https://meet.example.com/xyz"
-              error={errors.locationUrl}
-              required
+          <div className="space-y-1">
+            <label htmlFor="venueAddress" className="block text-sm font-medium">
+              Venue / address <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="venueAddress"
+              type="text"
+              className="w-full rounded-md border px-3 py-2"
+              value={venueAddress}
+              onChange={(e) => setVenueAddress(e.target.value)}
+              onBlur={validateAndPreview}
             />
+            {errors.venueAddress && (
+              <p className="text-sm text-red-600">{errors.venueAddress}</p>
+            )}
           </div>
         )}
 
-        {/* Form-level error (fallback) */}
-        {"form" in errors && (
-          <p role="alert" className="mt-4 text-sm text-rose-600">
-            {errors.form}
-          </p>
+        {/* Conditional (DB-flagged) fields */}
+        {flags.showProgramName && (
+          <div className="space-y-1">
+            <label htmlFor="programName" className="block text-sm font-medium">
+              Program name (optional)
+            </label>
+            <input
+              id="programName"
+              type="text"
+              className="w-full rounded-md border px-3 py-2"
+              value={programName}
+              onChange={(e) => setProgramName(e.target.value)}
+              onBlur={validateAndPreview}
+            />
+            {errors.programName && (
+              <p className="text-sm text-red-600">{errors.programName}</p>
+            )}
+          </div>
         )}
 
-        <div className="mt-6 flex items-center gap-3">
+        {flags.showHostName && (
+          <div className="space-y-1">
+            <label htmlFor="hostName" className="block text-sm font-medium">
+              Host name (optional)
+            </label>
+            <input
+              id="hostName"
+              type="text"
+              className="w-full rounded-md border px-3 py-2"
+              value={hostName}
+              onChange={(e) => setHostName(e.target.value)}
+              onBlur={validateAndPreview}
+            />
+            {errors.hostName && (
+              <p className="text-sm text-red-600">{errors.hostName}</p>
+            )}
+          </div>
+        )}
+
+        {flags.showTalkingPoints && (
+          <div className="space-y-1">
+            <label
+              htmlFor="talkingPoints"
+              className="block text-sm font-medium"
+            >
+              Talking points (optional)
+            </label>
+            <textarea
+              id="talkingPoints"
+              rows={5}
+              className="w-full rounded-md border px-3 py-2"
+              value={talkingPoints}
+              onChange={(e) => setTalkingPoints(e.target.value)}
+              onBlur={validateAndPreview}
+            />
+            {errors.talkingPoints && (
+              <p className="text-sm text-red-600">{errors.talkingPoints}</p>
+            )}
+          </div>
+        )}
+
+        {/* Submit / Validate */}
+        <div className="flex items-center gap-3">
           <button
             type="submit"
-            className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            disabled={submitting}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
           >
-            Validate & preview
+            {submitting ? "Submitting…" : "Submit"}
           </button>
-          <a
-            href="/modules/booking"
-            className="rounded-2xl border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          <button
+            type="button"
+            className="rounded-lg border px-4 py-2 text-sm"
+            onClick={validateAndPreview}
           >
-            Cancel
-          </a>
+            Validate & Preview
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border px-4 py-2 text-sm"
+            onClick={() => {
+              setGuestName("");
+              setMeetingLink("");
+              setVenueAddress("");
+              setProgramName("");
+              setHostName("");
+              setTalkingPoints("");
+              setErrors({});
+              setPreview(null);
+              setSubmitError(null);
+            }}
+          >
+            Reset
+          </button>
         </div>
+
+        {submitError && (
+          <p className="text-sm text-red-600" role="alert">
+            {submitError}
+          </p>
+        )}
       </form>
 
-      {/* Preview card */}
-      {result && (
-        <section
-          aria-label="Validated booking preview"
-          className="mt-6 rounded-2xl border border-green-200 bg-green-50 p-5"
-        >
-          <h2 className="text-base font-semibold text-green-800">
-            Looks good ✓
-          </h2>
-          <p className="mt-1 text-sm text-green-900">
-            This is a preview. Next step will be wiring it to persistence
-            (Prisma/DB).
-          </p>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-white p-4 text-xs leading-relaxed text-gray-800 ring-1 ring-green-200">
-            {JSON.stringify(
-              {
-                ...result,
-                startAt: result.startAt.toISOString(),
-              },
-              null,
-              2
-            )}
+      {/* Preview */}
+      <section className="rounded-xl border p-4">
+        <h2 className="mb-2 text-lg font-semibold">Preview</h2>
+        {preview ? (
+          <pre className="overflow-auto rounded bg-gray-50 p-3 text-xs">
+            {JSON.stringify(preview, null, 2)}
           </pre>
-        </section>
-      )}
-    </main>
-  );
-}
-
-/** Reusable text/number/date field */
-function Field(props: {
-  label: string;
-  name: string;
-  placeholder?: string;
-  type?: string;
-  inputMode?: React.InputHTMLAttributes<HTMLInputElement>["inputMode"];
-  defaultValue?: string | number;
-  min?: number;
-  max?: number;
-  required?: boolean;
-  error?: string;
-}) {
-  const id = React.useId();
-  const {
-    label,
-    name,
-    placeholder,
-    type = "text",
-    inputMode,
-    defaultValue,
-    min,
-    max,
-    required,
-    error,
-  } = props;
-  return (
-    <div>
-      <label htmlFor={id} className="block text-sm font-medium text-gray-900">
-        {label}{" "}
-        {required && (
-          <span className="text-rose-600" aria-hidden="true">
-            *
-          </span>
+        ) : (
+          <p className="text-sm text-gray-600">
+            Fill the form and click “Validate &amp; Preview” (or blur a field)
+            to see validated data here.
+          </p>
         )}
-      </label>
-      <input
-        id={id}
-        name={name}
-        type={type}
-        inputMode={inputMode}
-        defaultValue={defaultValue}
-        placeholder={placeholder}
-        min={min}
-        max={max}
-        className="mt-1 block w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        aria-invalid={!!error}
-        aria-describedby={error ? `${id}-error` : undefined}
-      />
-      {error && (
-        <p
-          id={`${id}-error`}
-          role="alert"
-          className="mt-1 text-xs text-rose-600"
-        >
-          {error}
-        </p>
-      )}
-    </div>
+      </section>
+
+      {/* Flags debug (non-interactive) */}
+      <details className="rounded-xl border p-3 text-sm">
+        <summary className="cursor-pointer font-medium">Flags</summary>
+        <div className="mt-2 grid grid-cols-1 gap-1 md:grid-cols-3">
+          <div>
+            Program name: <strong>{String(flags.showProgramName)}</strong>
+          </div>
+          <div>
+            Host name: <strong>{String(flags.showHostName)}</strong>
+          </div>
+          <div>
+            Talking points: <strong>{String(flags.showTalkingPoints)}</strong>
+          </div>
+        </div>
+      </details>
+    </main>
   );
 }
