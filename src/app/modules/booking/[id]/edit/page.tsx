@@ -1,9 +1,11 @@
 // src/app/modules/booking/[id]/edit/page.tsx
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { PrismaClient, AppearanceType } from "@prisma/client";
 
 export const runtime = "nodejs";
 
+// ---- Prisma singleton (no excess clients)
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 const prisma =
   globalForPrisma.prisma ??
@@ -12,6 +14,7 @@ const prisma =
   });
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
+// util: Date -> value for <input type="datetime-local">
 function toDatetimeLocalValue(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const yyyy = d.getFullYear();
@@ -27,6 +30,7 @@ export default async function EditBookingPage({
 }: {
   params: { id: string };
 }) {
+  // Load current record (Server Component -> no client JS needed)
   const booking = await prisma.booking.findUnique({
     where: { id: params.id },
     select: {
@@ -45,20 +49,67 @@ export default async function EditBookingPage({
 
   if (!booking) {
     return (
-      <main className="mx-auto max-w-2xl space-y-6 p-6">
-        <h1 className="text-2xl font-semibold">Edit Booking</h1>
-        <div className="rounded-lg border border-yellow-300 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
-          Booking not found.
-        </div>
-        <p>
-          <Link href="/modules/booking" className="text-sm underline">
-            ← Back to bookings
-          </Link>
-        </p>
+      <main className="mx-auto max-w-3xl p-6 space-y-4">
+        <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
+        <p>Booking not found.</p>
+        <Link href="/modules/booking" className="text-sm underline">
+          ← Back to bookings
+        </Link>
       </main>
     );
   }
 
+  // --- Server Action: runs on the server on submit (no client JS, no GET) ---
+  async function updateBooking(formData: FormData) {
+    "use server";
+
+    const id = String(formData.get("id") || "");
+    if (!id) return;
+
+    const subject = (formData.get("subject") as string | null)?.trim() || "";
+    const startAtRaw = (formData.get("startAt") as string | null) || "";
+    const durationRaw = (formData.get("durationMins") as string | null) || "0";
+    const appearanceTypeRaw =
+      (formData.get("appearanceType") as string | null) || "ONLINE";
+
+    const locationName =
+      (formData.get("locationName") as string | null)?.trim() || "";
+    const locationUrl =
+      (formData.get("locationUrl") as string | null)?.trim() || "";
+    const programName =
+      (formData.get("programName") as string | null)?.trim() || "";
+    const hostName = (formData.get("hostName") as string | null)?.trim() || "";
+    const talkingPoints =
+      (formData.get("talkingPoints") as string | null)?.trim() || "";
+
+    // Parse & coerce
+    const durationMins = Number.parseInt(durationRaw, 10) || 0;
+    const startAt = startAtRaw ? new Date(startAtRaw) : null;
+    const appearanceType =
+      appearanceTypeRaw === "IN_PERSON"
+        ? AppearanceType.IN_PERSON
+        : AppearanceType.ONLINE;
+
+    // Update (send explicit values; coerce empty strings to null for optional fields)
+    await prisma.booking.update({
+      where: { id },
+      data: {
+        subject,
+        startAt: startAt ?? undefined,
+        durationMins: durationMins > 0 ? durationMins : undefined,
+        appearanceType,
+        locationName: locationName || null,
+        locationUrl: locationUrl || null,
+        programName: programName || null,
+        hostName: hostName || null,
+        talkingPoints: talkingPoints || null,
+      },
+    });
+
+    redirect("/modules/booking?updated=1");
+  }
+
+  // Pre-fill defaults
   const subject = booking.subject ?? "";
   const durationMins = booking.durationMins ?? 30;
   const startAt = booking.startAt ? new Date(booking.startAt) : new Date();
@@ -69,257 +120,163 @@ export default async function EditBookingPage({
   const hostName = booking.hostName ?? "";
   const talkingPoints = booking.talkingPoints ?? "";
 
-  const patchScript = `
-    (function () {
-      var form = document.getElementById("edit-booking-form");
-      var errorBox = document.getElementById("form-error");
-      var submitBtn = document.getElementById("submit-btn");
-
-      if (!form) {
-        document.addEventListener("DOMContentLoaded", bind, { once: true });
-      } else {
-        bind();
-      }
-
-      function bind() {
-        form = form || document.getElementById("edit-booking-form");
-        errorBox = errorBox || document.getElementById("form-error");
-        submitBtn = submitBtn || document.getElementById("submit-btn");
-        if (!form) return;
-
-        form.addEventListener("submit", function (e) {
-          e.preventDefault();
-          save();
-        });
-
-        if (submitBtn) {
-          submitBtn.addEventListener("click", function (e) {
-            e.preventDefault();
-            save();
-          });
-        }
-      }
-
-      function changedOnly(form) {
-        var out = {};
-        var el = form.elements;
-
-        function addIfChanged(name, value) {
-          var input = form.querySelector("[name='" + name + "']");
-          if (!input) return;
-          var init = input.getAttribute("data-initial");
-          if (init === null) {
-            if (value !== "" && value !== null && value !== undefined) out[name] = value;
-            return;
-          }
-          if (String(value ?? "") !== String(init ?? "")) out[name] = value;
-        }
-
-        addIfChanged("subject", el.namedItem("subject")?.value ?? "");
-
-        var dt = el.namedItem("startAt")?.value;
-        if (dt) addIfChanged("startAt", new Date(dt).toISOString());
-
-        var durRaw = el.namedItem("durationMins")?.value;
-        if (durRaw) {
-          var dur = parseInt(durRaw, 10);
-          if (!Number.isNaN(dur)) addIfChanged("durationMins", dur);
-        }
-
-        var ap = form.querySelector("input[name='appearanceType']:checked");
-        if (ap) addIfChanged("appearanceType", ap.value);
-
-        addIfChanged("locationName", el.namedItem("locationName")?.value ?? "");
-        addIfChanged("locationUrl", el.namedItem("locationUrl")?.value ?? "");
-
-        addIfChanged("programName", el.namedItem("programName")?.value ?? "");
-        addIfChanged("hostName", el.namedItem("hostName")?.value ?? "");
-        addIfChanged("talkingPoints", el.namedItem("talkingPoints")?.value ?? "");
-
-        return out;
-      }
-
-      async function save() {
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Saving…"; }
-        errorBox.textContent = "";
-        try {
-          var payload = changedOnly(form);
-          if (!payload || Object.keys(payload).length === 0) {
-            window.location.href = "/modules/booking?updated=1";
-            return;
-          }
-          var id = form.getAttribute("data-id");
-          var res = await fetch("/api/bookings/" + id, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          if (!res.ok) {
-            var data = null;
-            try { data = await res.json(); } catch (_){}
-            throw new Error((data && data.error) || "Failed to update booking");
-          }
-          window.location.href = "/modules/booking?updated=1";
-        } catch (err) {
-          errorBox.textContent = (err && err.message) || "Failed to update booking";
-        } finally {
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Save changes"; }
-        }
-      }
-    })();
-  `;
-
   return (
-    <main className="mx-auto max-w-2xl space-y-6 p-6">
-      <h1 className="text-2xl font-semibold">Edit Booking</h1>
-      <p className="text-sm text-gray-600">
+    <main className="mx-auto max-w-3xl p-6 space-y-6">
+      <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
+      <p className="text-gray-600">
         Update the minimal fields: subject, time, location, and extras.
       </p>
 
-      {/* CHANGED: method="post" + action="#" to prevent the GET-with-query fallback */}
+      {/* No client JS. Server Action handles everything on first click/Enter. */}
       <form
-        id="edit-booking-form"
-        data-id={booking.id}
+        action={updateBooking}
         method="post"
-        action="#"
         className="space-y-4"
+        noValidate
       >
-        <label className="block text-sm font-medium" htmlFor="subject">
-          Subject *
-        </label>
-        <input
-          id="subject"
-          name="subject"
-          defaultValue={subject}
-          data-initial={subject}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-          required
-          maxLength={300}
-        />
+        {/* Important: include id so the action knows which record */}
+        <input type="hidden" name="id" value={booking.id} />
 
-        <label className="block text-sm font-medium" htmlFor="startAt">
-          Start date/time *
-        </label>
-        <input
-          id="startAt"
-          name="startAt"
-          type="datetime-local"
-          defaultValue={toDatetimeLocalValue(startAt)}
-          data-initial={toDatetimeLocalValue(startAt)}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-          required
-        />
+        <div>
+          <label htmlFor="subject" className="block text-sm font-medium">
+            Subject <span className="text-red-600">*</span>
+          </label>
+          <input
+            id="subject"
+            name="subject"
+            type="text"
+            required
+            defaultValue={subject}
+            className="mt-1 w-full rounded-lg border p-2"
+          />
+        </div>
 
-        <label className="block text-sm font-medium" htmlFor="durationMins">
-          Duration (minutes) *
-        </label>
-        <input
-          id="durationMins"
-          name="durationMins"
-          type="number"
-          min={5}
-          max={600}
-          step={5}
-          defaultValue={durationMins}
-          data-initial={String(durationMins)}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-          required
-        />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div>
+            <label htmlFor="startAt" className="block text-sm font-medium">
+              Start date/time <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="startAt"
+              name="startAt"
+              type="datetime-local"
+              required
+              defaultValue={toDatetimeLocalValue(startAt)}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
+          </div>
 
-        <div className="space-y-2">
-          <span className="block text-sm font-medium">Appearance Type</span>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm">
+          <div>
+            <label htmlFor="durationMins" className="block text-sm font-medium">
+              Duration (minutes) <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="durationMins"
+              name="durationMins"
+              type="number"
+              min={1}
+              required
+              defaultValue={durationMins}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
+          </div>
+        </div>
+
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium">Appearance Type</legend>
+          <div className="flex gap-6">
+            <label className="flex items-center gap-2">
               <input
                 type="radio"
                 name="appearanceType"
                 value="ONLINE"
-                defaultChecked={appearanceType === AppearanceType.ONLINE}
-                data-initial={
-                  appearanceType === AppearanceType.ONLINE
-                    ? "ONLINE"
-                    : undefined
-                }
+                defaultChecked={appearanceType === "ONLINE"}
               />
-              Online
+              <span>Online</span>
             </label>
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex items-center gap-2">
               <input
                 type="radio"
                 name="appearanceType"
                 value="IN_PERSON"
-                defaultChecked={appearanceType === AppearanceType.IN_PERSON}
-                data-initial={
-                  appearanceType === AppearanceType.IN_PERSON
-                    ? "IN_PERSON"
-                    : undefined
-                }
+                defaultChecked={appearanceType === "IN_PERSON"}
               />
-              In-person
+              <span>In-person</span>
             </label>
+          </div>
+        </fieldset>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label htmlFor="locationName" className="block text-sm font-medium">
+              Location name
+            </label>
+            <input
+              id="locationName"
+              name="locationName"
+              type="text"
+              defaultValue={locationName}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="locationUrl" className="block text-sm font-medium">
+              Location URL (map / meeting link)
+            </label>
+            <input
+              id="locationUrl"
+              name="locationUrl"
+              type="url"
+              defaultValue={locationUrl}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
           </div>
         </div>
 
-        <label className="block text-sm font-medium" htmlFor="locationName">
-          Location name
-        </label>
-        <input
-          id="locationName"
-          name="locationName"
-          defaultValue={locationName}
-          data-initial={locationName}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-          placeholder="e.g., Studio A"
-        />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label htmlFor="programName" className="block text-sm font-medium">
+              Program name (optional)
+            </label>
+            <input
+              id="programName"
+              name="programName"
+              type="text"
+              defaultValue={programName}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
+          </div>
 
-        <label className="block text-sm font-medium" htmlFor="locationUrl">
-          Location URL (map / meeting link)
-        </label>
-        <input
-          id="locationUrl"
-          name="locationUrl"
-          defaultValue={locationUrl}
-          data-initial={locationUrl}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-          placeholder="https://…"
-        />
+          <div>
+            <label htmlFor="hostName" className="block text-sm font-medium">
+              Host name (optional)
+            </label>
+            <input
+              id="hostName"
+              name="hostName"
+              type="text"
+              defaultValue={hostName}
+              className="mt-1 w-full rounded-lg border p-2"
+            />
+          </div>
+        </div>
 
-        <label className="block text-sm font-medium" htmlFor="programName">
-          Program name (optional)
-        </label>
-        <input
-          id="programName"
-          name="programName"
-          defaultValue={programName}
-          data-initial={programName}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-        />
-
-        <label className="block text-sm font-medium" htmlFor="hostName">
-          Host name (optional)
-        </label>
-        <input
-          id="hostName"
-          name="hostName"
-          defaultValue={hostName}
-          data-initial={hostName}
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-        />
-
-        <label className="block text-sm font-medium" htmlFor="talkingPoints">
-          Talking points (optional)
-        </label>
-        <textarea
-          id="talkingPoints"
-          name="talkingPoints"
-          defaultValue={talkingPoints}
-          data-initial={talkingPoints}
-          className="h-28 w-full rounded-lg border px-3 py-2 text-sm"
-        />
+        <div>
+          <label htmlFor="talkingPoints" className="block text-sm font-medium">
+            Talking points (optional)
+          </label>
+          <textarea
+            id="talkingPoints"
+            name="talkingPoints"
+            rows={4}
+            defaultValue={talkingPoints}
+            className="mt-1 w-full rounded-lg border p-2"
+          />
+        </div>
 
         <div className="mt-2 flex items-center gap-3">
           <button
-            id="submit-btn"
             type="submit"
             className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
           >
@@ -332,14 +289,7 @@ export default async function EditBookingPage({
             Cancel
           </Link>
         </div>
-
-        <p id="form-error" className="text-sm text-red-600" role="alert" />
       </form>
-
-      <script
-        // eslint-disable-next-line react/no-danger
-        dangerouslySetInnerHTML={{ __html: patchScript }}
-      />
     </main>
   );
 }

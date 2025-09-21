@@ -4,15 +4,24 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
-// Minimal Prisma singleton to avoid hot-reload duplication in dev
-const globalForPrisma = global as unknown as { prisma?: PrismaClient };
-export const prisma = globalForPrisma.prisma ?? new PrismaClient();
+// ---- Prisma singleton (dev-safe; avoids multiple clients)
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  });
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export const authOptions: NextAuthOptions = {
+  // Use JWT sessions (no DB adapter needed for auth)
   session: { strategy: "jwt" },
-  // NOTE: No `pages.signIn` override in App Router.
-  // NextAuth will serve its built-in sign-in UI at /api/auth/signin.
+
+  // IMPORTANT: point NextAuth to our custom sign-in page
+  pages: {
+    signIn: "/auth/signin",
+    error: "/auth/signin", // surface ?error=... on the same page
+  },
 
   providers: [
     Credentials({
@@ -26,9 +35,10 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       authorize: async (creds: Record<string, unknown> | undefined) => {
-        const email = ((creds?.email as string) || "").toLowerCase().trim();
-        const password = (creds?.password as string) || "";
-
+        const email = String(creds?.email || "")
+          .toLowerCase()
+          .trim();
+        const password = String(creds?.password || "");
         if (!email || !password) return null;
 
         const user = await prisma.user.findUnique({
@@ -57,28 +67,33 @@ export const authOptions: NextAuthOptions = {
   ],
 
   callbacks: {
-    async jwt({ token, user }: any) {
+    async jwt({ token, user }) {
       if (user) {
-        token.userId = (user as any).id;
-        token.email = (user as any).email;
-        token.activeOrgId = (user as any).activeOrgId ?? null;
+        // Persist minimal user data in the JWT
+        const u = user as any;
+        token.userId = u.id;
+        token.email = u.email;
+        token.activeOrgId = u.activeOrgId ?? null;
       }
       return token;
     },
-    async session({ session, token }: any) {
-      session.userId = token.userId;
+    async session({ session, token }) {
+      (session as any).userId = (token as any).userId;
       if (session.user) {
-        session.user.email = token.email as string;
+        session.user.email = (token as any).email as string;
       } else {
-        session.user = { email: token.email as string };
+        session.user = { email: (token as any).email as string };
       }
-      session.activeOrgId = token.activeOrgId ?? null;
+      (session as any).activeOrgId = (token as any).activeOrgId ?? null;
       return session;
     },
   },
 
-  // Use env; NextAuth requires a secret for JWT signing
+  // Required for JWT signing (set in .env)
   secret: process.env.NEXTAUTH_SECRET,
+
+  // Helpful logs during dev
+  debug: process.env.NODE_ENV === "development",
 };
 
 const handler = NextAuth(authOptions);
