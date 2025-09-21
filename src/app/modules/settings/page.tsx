@@ -1,20 +1,74 @@
 "use client";
 
+/**
+ * Settings — resilient save feedback
+ * - Preserves: /api/toggles (GET/PUT), <body data-*> sync, and useTheme()
+ * - Standardizes: Button, Alert
+ * - Feedback: portal ToastBox + inline chip + ARIA live region
+ */
+
 import * as React from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { useTheme } from "../../../components/theme-provider";
 
+/** ---------- Shared UI components (default or named exports) ---------- */
+import * as ButtonModule from "../../../components/ui/Button";
+const Button: React.ElementType =
+  (ButtonModule as any).Button ?? (ButtonModule as any).default;
+
+import * as AlertModule from "../../../components/ui/Alert";
+const Alert: React.ElementType =
+  (AlertModule as any).Alert ?? (AlertModule as any).default;
+
+/** ---------- Types ---------- */
 type Toggles = {
   showProgramName: boolean;
   showHostName: boolean;
   showTalkingPoints: boolean;
 };
 
+/** ---------- Minimal in-file Toast (works even if shared Toast is non-renderable) ---------- */
+function ToastBox(props: {
+  kind?: "success" | "error";
+  children: React.ReactNode;
+  onClose?: () => void;
+}) {
+  const kind = props.kind ?? "success";
+  return (
+    <div
+      role="status"
+      className="pointer-events-auto min-w-[220px] max-w-[360px] rounded-xl border bg-white/95 p-3 shadow-2xl backdrop-blur"
+      style={{ borderColor: kind === "success" ? "#16a34a" : "#dc2626" }}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+            kind === "success" ? "bg-green-600" : "bg-red-600"
+          }`}
+          aria-hidden
+        />
+        <div className="text-sm text-gray-900">{props.children}</div>
+        {props.onClose && (
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={props.onClose}
+            className="ml-auto rounded px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [success, setSuccess] = React.useState<string | null>(null);
+  const [success, setSuccess] = React.useState<string | null>(null); // drives toast/chip
 
   const [toggles, setToggles] = React.useState<Toggles>({
     showProgramName: true,
@@ -25,7 +79,7 @@ export default function SettingsPage() {
   // === User-level theme (light by default) ===
   const { theme, setTheme } = useTheme();
 
-  // Load current toggles from API
+  // Load current toggles from API (preserved)
   React.useEffect(() => {
     let ignore = false;
     (async () => {
@@ -52,6 +106,7 @@ export default function SettingsPage() {
     };
   }, []);
 
+  // Sync flags into <body data-*> so booking pages can read them on mount (preserved)
   function setBodyDatasets(next: Toggles) {
     if (typeof document === "undefined") return;
     const ds = document.body.dataset as DOMStringMap;
@@ -60,7 +115,9 @@ export default function SettingsPage() {
     ds.showTalkingPoints = String(next.showTalkingPoints);
   }
 
-  async function handleSave() {
+  // Save toggles (preserved logic) + resilient feedback
+  async function handleSave(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     try {
       setSaving(true);
       setSuccess(null);
@@ -71,46 +128,71 @@ export default function SettingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(toggles),
       });
-      const data = await res.json();
+      // Some setups return empty body; handle safely.
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // ignore empty body
+      }
       if (!res.ok) throw new Error(data?.error || "Failed to save toggles");
 
-      // Sync so the Booking form will see fresh values on mount
       setBodyDatasets(toggles);
+
+      // Visible feedback
       setSuccess("Saved!");
     } catch (e: any) {
       setError(e?.message || "Failed to save toggles");
+      setSuccess(null);
     } finally {
       setSaving(false);
-      setTimeout(() => setSuccess(null), 1500);
     }
   }
 
+  // Auto-hide success toast after 1.8s
+  React.useEffect(() => {
+    if (!success) return;
+    const t = setTimeout(() => setSuccess(null), 1800);
+    return () => clearTimeout(t);
+  }, [success]);
+
+  // Portal root (mounted only in browser)
+  const [portalReady, setPortalReady] = React.useState(false);
+  React.useEffect(() => setPortalReady(true), []);
+
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-      <Link
-        href="/modules/booking"
-        className="inline-flex w-fit items-center text-sm text-gray-600 hover:text-gray-900"
-      >
-        ← Back to bookings
-      </Link>
+      {/* SR live region for success messages */}
+      <div aria-live="polite" className="sr-only">
+        {success ? "Saved" : ""}
+      </div>
+
+      <header className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+        <Link
+          href="/modules/booking"
+          className="text-sm text-blue-600 underline"
+        >
+          ← Back to bookings
+        </Link>
+      </header>
 
       {/* ========== Org Feature Toggles (existing) ========== */}
-      <section className="rounded-lg border p-4">
-        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
-        <p className="mb-4 text-sm text-gray-600">
+      <form onSubmit={handleSave} className="space-y-3 rounded-xl border p-4">
+        <h2 className="text-lg font-medium">Org Feature Toggles</h2>
+        <p className="text-sm text-gray-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <p>Loading…</p>
+          <p className="text-sm text-gray-600">Loading…</p>
         ) : error ? (
-          <p className="text-red-600">{error}</p>
+          <Alert variant="error">{error}</Alert>
         ) : (
           <>
             <ToggleRow
               label="Program name"
-              description="Show a free-text Program name field on the booking form."
+              description="Show 'Program name' on booking form"
               checked={toggles.showProgramName}
               onChange={(v) =>
                 setToggles((t) => ({ ...t, showProgramName: v }))
@@ -118,57 +200,71 @@ export default function SettingsPage() {
             />
             <ToggleRow
               label="Host name"
-              description="Show a free-text Host name field on the booking form."
+              description="Show 'Host name' on booking form"
               checked={toggles.showHostName}
               onChange={(v) => setToggles((t) => ({ ...t, showHostName: v }))}
             />
             <ToggleRow
               label="Talking points"
-              description="Show a multi-line Talking points field on the booking form."
+              description="Show 'Talking points' on booking form"
               checked={toggles.showTalkingPoints}
               onChange={(v) =>
                 setToggles((t) => ({ ...t, showTalkingPoints: v }))
               }
             />
 
-            <div className="mt-4 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={handleSave}
+            <div className="mt-3 flex items-center gap-3">
+              <Button
+                type="submit"
                 disabled={saving}
-                className="rounded-md border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+                className="px-4 py-2 text-sm"
               >
                 {saving ? "Saving…" : "Save changes"}
-              </button>
+              </Button>
+
+              <Button
+                type="button"
+                className="border px-4 py-2 text-sm"
+                onClick={() =>
+                  setToggles({
+                    showProgramName: true,
+                    showHostName: true,
+                    showTalkingPoints: true,
+                  })
+                }
+              >
+                Reset to defaults
+              </Button>
+
+              {/* Inline chip so there is ALWAYS a visible signal even if a toast is clipped */}
               {success && (
-                <span className="text-sm text-green-700">{success}</span>
+                <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-medium text-green-700 ring-1 ring-green-200">
+                  Saved!
+                </span>
               )}
             </div>
           </>
         )}
 
-        <h3 className="mt-6 text-sm font-medium">Tip</h3>
-        <p className="text-sm text-gray-600">
-          Changes apply immediately. The Booking form reads flags from{" "}
-          <code className="rounded bg-gray-100 px-1 py-0.5">
-            &lt;body data-*&gt;
-          </code>{" "}
-          on mount. After saving, just navigate to the form and it will use the
-          new values.
-        </p>
-      </section>
+        <div className="pt-2">
+          <h3 className="mb-1 text-sm font-semibold">Tip</h3>
+          <p className="text-sm text-gray-600">
+            Changes apply immediately. The Booking form reads flags from{" "}
+            <code>&lt;body data-*&gt;</code> on mount. After saving, navigate to
+            the form and it will use the new values.
+          </p>
+        </div>
+      </form>
 
-      {/* ========== User Theme (new) ========== */}
-      <section className="rounded-lg border p-4">
-        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
-        <p className="mb-4 text-sm text-gray-600">
+      {/* ========== User Theme (existing) ========== */}
+      <section className="space-y-3 rounded-xl border p-4">
+        <h2 className="text-lg font-medium">Appearance</h2>
+        <p className="text-sm text-gray-600">
           Choose your theme for this device.
         </p>
 
-        <fieldset className="space-y-2">
-          <legend className="sr-only">Theme</legend>
-
-          <label className="flex items-center gap-2">
+        <div className="flex items-center gap-4">
+          <label className="inline-flex items-center gap-2">
             <input
               type="radio"
               name="theme"
@@ -178,8 +274,7 @@ export default function SettingsPage() {
             />
             <span>Light (default)</span>
           </label>
-
-          <label className="flex items-center gap-2">
+          <label className="inline-flex items-center gap-2">
             <input
               type="radio"
               name="theme"
@@ -189,17 +284,28 @@ export default function SettingsPage() {
             />
             <span>Dark</span>
           </label>
+        </div>
 
-          <p className="mt-3 text-sm text-gray-600">
-            This preference is saved locally in your browser. We can move it to
-            a DB-backed user setting later.
-          </p>
-        </fieldset>
+        <p className="text-sm text-gray-600">
+          This preference is saved locally in your browser. We can move it to a
+          DB-backed user setting later.
+        </p>
       </section>
+
+      {/* Portal toast (escapes stacking/overflow issues) */}
+      {portalReady && success
+        ? createPortal(
+            <div className="pointer-events-none fixed bottom-4 right-4 z-[9999]">
+              <ToastBox onClose={() => setSuccess(null)}>{success}</ToastBox>
+            </div>,
+            document.body
+          )
+        : null}
     </main>
   );
 }
 
+/** ---------- Small presentational toggle row (preserved) ---------- */
 function ToggleRow(props: {
   label: string;
   description?: string;
@@ -208,9 +314,9 @@ function ToggleRow(props: {
 }) {
   const id = React.useId();
   return (
-    <div className="flex items-start justify-between gap-4 border-t py-3 first:border-t-0">
-      <div className="min-w-0">
-        <label htmlFor={id} className="block text-sm font-medium">
+    <div className="flex items-center justify-between rounded-lg border p-3">
+      <div className="mr-4">
+        <label htmlFor={id} className="font-medium">
           {props.label}
         </label>
         {props.description && (
@@ -231,7 +337,7 @@ function ToggleRow(props: {
       >
         <span
           className={`absolute left-0 top-0 h-6 w-6 rounded-full bg-white shadow transition ${
-            props.checked ? "translate-x-5" : ""
+            props.checked ? "translate-x-5" : "translate-x-0"
           }`}
         />
       </button>

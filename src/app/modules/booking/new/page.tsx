@@ -1,11 +1,9 @@
 "use client";
 
 /**
- * Booking Create Form — Real fields + backward-compatible payload
- * - Adds Subject, Newsroom name, Start date/time, Duration (mins)
- * - Client-side validation (Zod)
- * - Sends legacy API fields as well so /api/bookings accepts it today
- * - On success, redirects to /modules/booking?created=1 (for banner)
+ * Booking Create Form — standardized UI (Button + Alert)
+ * - Keeps existing schema & logic
+ * - Redirects to /modules/booking?created=1 on success (Toast handled there)
  */
 
 import React from "react";
@@ -19,7 +17,6 @@ function readBooleanDataset(key: string, fallback = true): boolean {
   if (raw == null) return fallback;
   return raw === "true";
 }
-
 type Flags = {
   showProgramName: boolean;
   showHostName: boolean;
@@ -116,7 +113,15 @@ function buildSchema(flags: Flags) {
   );
 }
 
-type FormShape = z.infer<ReturnType<typeof buildSchema>>;
+/** ---------- UI components (namespace import + runtime fallback) ---------- */
+// Works whether the module exports `default` or a named export.
+import * as ButtonModule from "../../../../components/ui/Button";
+const UIButton: React.ElementType =
+  (ButtonModule as any).Button ?? (ButtonModule as any).default;
+
+import * as AlertModule from "../../../../components/ui/Alert";
+const UIAlert: React.ElementType =
+  (AlertModule as any).Alert ?? (AlertModule as any).default;
 
 /** ---------- Page ---------- */
 export default function NewBookingPage() {
@@ -142,7 +147,7 @@ export default function NewBookingPage() {
   const [subject, setSubject] = React.useState("TV Interview");
   const [newsroomName, setNewsroomName] = React.useState("");
   const [startAtISO, setStartAtISO] = React.useState(nextFullHourLocalISO());
-  const [durationMins, setDurationMins] = React.useState<number>(30);
+  const [durationMins, setDurationMins] = React.useState(30);
 
   // Legacy fields (kept to satisfy today’s API)
   const [appearanceType, setAppearanceType] =
@@ -155,7 +160,7 @@ export default function NewBookingPage() {
   const [talkingPoints, setTalkingPoints] = React.useState("");
 
   const [errors, setErrors] = React.useState<Record<string, string>>({});
-  const [preview, setPreview] = React.useState<FormShape | null>(null);
+  const [preview, setPreview] = React.useState<unknown | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -183,7 +188,6 @@ export default function NewBookingPage() {
         ? { meetingLink: meetingLink.trim() }
         : { venueAddress: venueAddress.trim() }),
     };
-
     return base;
   }
 
@@ -231,20 +235,19 @@ export default function NewBookingPage() {
       });
 
       if (!res.ok) {
-        // Try to surface granular server error if present
         let message = "Failed to create booking";
         try {
           const body = await res.json();
           message =
             body?.error || (res.status === 400 ? "Validation error" : message);
         } catch {
-          // ignore JSON parse error
+          // ignore
         }
         setSubmitError(message);
         return;
       }
 
-      // Success → redirect to list with success banner
+      // Success → redirect to list with success toast/banner
       router.push("/modules/booking?created=1");
     } catch {
       setSubmitError("Network error. Please try again.");
@@ -257,8 +260,8 @@ export default function NewBookingPage() {
   React.useEffect(() => {
     setErrors((prev) => {
       const copy = { ...prev };
-      delete copy.meetingLink;
-      delete copy.venueAddress;
+      delete (copy as any).meetingLink;
+      delete (copy as any).venueAddress;
       return copy;
     });
     if (appearanceType === "ONLINE") setVenueAddress("");
@@ -266,60 +269,50 @@ export default function NewBookingPage() {
   }, [appearanceType]);
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 p-6">
-      <h1 className="text-2xl font-bold">New Booking</h1>
+    <main className="mx-auto max-w-2xl space-y-5 p-6">
+      <h1 className="text-2xl font-semibold">New Booking</h1>
       <p className="text-sm text-gray-600">
         Real fields added. Flags still control optional fields. Validation runs
         on blur / preview / submit.
       </p>
 
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form className="space-y-4" onSubmit={handleSubmit}>
         {/* Subject */}
-        <div>
-          <label className="mb-1 block text-sm font-medium">
-            Subject <span className="text-red-600">*</span>
-          </label>
+        <label className="block text-sm font-medium">
+          Subject *
           <input
-            type="text"
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
             onBlur={validateAndPreview}
-            className="w-full rounded-lg border px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
             placeholder="e.g., TV Interview"
             maxLength={300}
             required
           />
-          {errors.subject && (
-            <p className="text-sm text-red-600">{errors.subject}</p>
-          )}
-        </div>
+        </label>
+        {errors.subject && <UIAlert variant="error">{errors.subject}</UIAlert>}
 
         {/* Newsroom name */}
-        <div>
-          <label className="mb-1 block text-sm font-medium">
-            Newsroom name <span className="text-red-600">*</span>
-          </label>
+        <label className="block text-sm font-medium">
+          Newsroom name *
           <input
-            type="text"
             value={newsroomName}
             onChange={(e) => setNewsroomName(e.target.value)}
             onBlur={validateAndPreview}
-            className="w-full rounded-lg border px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
             placeholder="e.g., Global Newsroom"
             maxLength={200}
             required
           />
-          {errors.newsroomName && (
-            <p className="text-sm text-red-600">{errors.newsroomName}</p>
-          )}
-        </div>
+        </label>
+        {errors.newsroomName && (
+          <UIAlert variant="error">{errors.newsroomName}</UIAlert>
+        )}
 
         {/* Start date/time & Duration */}
         <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm font-medium">
-              Start date/time <span className="text-red-600">*</span>
-            </label>
+          <label className="block text-sm font-medium">
+            Start date/time *
             <input
               type="datetime-local"
               value={toDatetimeLocalValue(startAtISO)}
@@ -329,201 +322,186 @@ export default function NewBookingPage() {
                 setStartAtISO(asDate.toISOString());
               }}
               onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
               required
             />
-            {errors.startAt && (
-              <p className="text-sm text-red-600">{errors.startAt}</p>
-            )}
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-medium">
-              Duration (minutes) <span className="text-red-600">*</span>
-            </label>
+          </label>
+          <label className="block text-sm font-medium">
+            Duration (minutes) *
             <input
               type="number"
-              inputMode="numeric"
               min={5}
               max={600}
               step={5}
-              value={Number.isFinite(durationMins) ? durationMins : 30}
+              value={durationMins}
               onChange={(e) => setDurationMins(parseInt(e.target.value, 10))}
               onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
               required
             />
-            {errors.durationMins && (
-              <p className="text-sm text-red-600">{errors.durationMins}</p>
-            )}
-          </div>
+          </label>
         </div>
+        {errors.startAt && <UIAlert variant="error">{errors.startAt}</UIAlert>}
+        {errors.durationMins && (
+          <UIAlert variant="error">{errors.durationMins}</UIAlert>
+        )}
 
         {/* Appearance */}
-        <fieldset>
-          <legend className="mb-1 block text-sm font-medium">
-            Appearance Type
-          </legend>
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium">Appearance Type</legend>
           <div className="flex gap-2">
-            <button
+            <UIButton
               type="button"
-              onClick={() => setAppearanceType("ONLINE")}
               aria-pressed={appearanceType === "ONLINE"}
               className={`rounded-lg border px-3 py-2 text-sm ${
                 appearanceType === "ONLINE" ? "bg-gray-900 text-white" : ""
               }`}
+              onClick={() => setAppearanceType("ONLINE")}
             >
               Online
-            </button>
-            <button
+            </UIButton>
+            <UIButton
               type="button"
-              onClick={() => setAppearanceType("IN_PERSON")}
               aria-pressed={appearanceType === "IN_PERSON"}
               className={`rounded-lg border px-3 py-2 text-sm ${
                 appearanceType === "IN_PERSON" ? "bg-gray-900 text-white" : ""
               }`}
+              onClick={() => setAppearanceType("IN_PERSON")}
             >
               In-person
-            </button>
+            </UIButton>
           </div>
         </fieldset>
 
         {/* Guest name */}
-        <div>
-          <label className="mb-1 block text-sm font-medium">
-            Guest name <span className="text-red-600">*</span>
-          </label>
+        <label className="block text-sm font-medium">
+          Guest name *
           <input
-            type="text"
             value={guestName}
             onChange={(e) => setGuestName(e.target.value)}
             onBlur={validateAndPreview}
-            className="w-full rounded-lg border px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
             placeholder="e.g., Dr. Jane Doe"
             required
           />
-          {errors.guestName && (
-            <p className="text-sm text-red-600">{errors.guestName}</p>
-          )}
-        </div>
+        </label>
+        {errors.guestName && (
+          <UIAlert variant="error">{errors.guestName}</UIAlert>
+        )}
 
         {/* Online vs In-person specific */}
         {appearanceType === "ONLINE" ? (
-          <div>
-            <label className="mb-1 block text-sm font-medium">
-              Meeting link <span className="text-red-600">*</span>
+          <>
+            <label className="block text-sm font-medium">
+              Meeting link *
+              <input
+                value={meetingLink}
+                onChange={(e) => setMeetingLink(e.target.value)}
+                onBlur={validateAndPreview}
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                placeholder="https://…"
+                required
+              />
             </label>
-            <input
-              type="url"
-              value={meetingLink}
-              onChange={(e) => setMeetingLink(e.target.value)}
-              onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="https://…"
-              required
-            />
             {errors.meetingLink && (
-              <p className="text-sm text-red-600">{errors.meetingLink}</p>
+              <UIAlert variant="error">{errors.meetingLink}</UIAlert>
             )}
-          </div>
+          </>
         ) : (
-          <div>
-            <label className="mb-1 block text-sm font-medium">
-              Venue / address <span className="text-red-600">*</span>
+          <>
+            <label className="block text-sm font-medium">
+              Venue / address *
+              <input
+                value={venueAddress}
+                onChange={(e) => setVenueAddress(e.target.value)}
+                onBlur={validateAndPreview}
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                placeholder="123 Main St, City…"
+                required
+              />
             </label>
-            <input
-              type="text"
-              value={venueAddress}
-              onChange={(e) => setVenueAddress(e.target.value)}
-              onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="123 Main St, City…"
-              required
-            />
             {errors.venueAddress && (
-              <p className="text-sm text-red-600">{errors.venueAddress}</p>
+              <UIAlert variant="error">{errors.venueAddress}</UIAlert>
             )}
-          </div>
+          </>
         )}
 
         {/* Conditional (DB-flagged) fields */}
         {flags.showProgramName && (
-          <div>
-            <label className="mb-1 block text-sm font-medium">
+          <>
+            <label className="block text-sm font-medium">
               Program name (optional)
+              <input
+                value={programName}
+                onChange={(e) => setProgramName(e.target.value)}
+                onBlur={validateAndPreview}
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                placeholder="e.g., Nightly News"
+              />
             </label>
-            <input
-              type="text"
-              value={programName}
-              onChange={(e) => setProgramName(e.target.value)}
-              onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="e.g., Nightly News"
-            />
             {errors.programName && (
-              <p className="text-sm text-red-600">{errors.programName}</p>
+              <UIAlert variant="error">{errors.programName}</UIAlert>
             )}
-          </div>
+          </>
         )}
 
         {flags.showHostName && (
-          <div>
-            <label className="mb-1 block text-sm font-medium">
+          <>
+            <label className="block text-sm font-medium">
               Host name (optional)
+              <input
+                value={hostName}
+                onChange={(e) => setHostName(e.target.value)}
+                onBlur={validateAndPreview}
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                placeholder="e.g., John Smith"
+              />
             </label>
-            <input
-              type="text"
-              value={hostName}
-              onChange={(e) => setHostName(e.target.value)}
-              onBlur={validateAndPreview}
-              className="w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="e.g., John Smith"
-            />
             {errors.hostName && (
-              <p className="text-sm text-red-600">{errors.hostName}</p>
+              <UIAlert variant="error">{errors.hostName}</UIAlert>
             )}
-          </div>
+          </>
         )}
 
         {flags.showTalkingPoints && (
-          <div>
-            <label className="mb-1 block text-sm font-medium">
+          <>
+            <label className="block text-sm font-medium">
               Talking points (optional)
+              <textarea
+                value={talkingPoints}
+                onChange={(e) => setTalkingPoints(e.target.value)}
+                onBlur={validateAndPreview}
+                className="mt-1 h-28 w-full rounded-lg border px-3 py-2 text-sm"
+                placeholder="Bullet points for the segment…"
+              />
             </label>
-            <textarea
-              value={talkingPoints}
-              onChange={(e) => setTalkingPoints(e.target.value)}
-              onBlur={validateAndPreview}
-              className="h-28 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="Bullet points for the segment…"
-            />
             {errors.talkingPoints && (
-              <p className="text-sm text-red-600">{errors.talkingPoints}</p>
+              <UIAlert variant="error">{errors.talkingPoints}</UIAlert>
             )}
-          </div>
+          </>
         )}
 
         {/* Actions */}
         <div className="flex items-center gap-3">
-          <button
+          <UIButton
             type="submit"
             disabled={submitting}
-            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+            className="px-4 py-2 text-sm"
           >
             {submitting ? "Submitting…" : "Submit"}
-          </button>
+          </UIButton>
 
-          <button
+          <UIButton
             type="button"
-            className="rounded-lg border px-4 py-2 text-sm"
+            className="border px-4 py-2 text-sm"
             onClick={validateAndPreview}
           >
-            Validate & Preview
-          </button>
+            Validate &amp; Preview
+          </UIButton>
 
-          <button
+          <UIButton
             type="button"
-            className="rounded-lg border px-4 py-2 text-sm"
+            className="border px-4 py-2 text-sm"
             onClick={() => {
               setSubject("TV Interview");
               setNewsroomName("");
@@ -541,14 +519,10 @@ export default function NewBookingPage() {
             }}
           >
             Reset
-          </button>
+          </UIButton>
         </div>
 
-        {submitError && (
-          <p className="text-sm text-red-600" role="alert">
-            {submitError}
-          </p>
-        )}
+        {submitError && <UIAlert variant="error">{submitError}</UIAlert>}
       </form>
 
       {/* Preview */}
@@ -560,8 +534,8 @@ export default function NewBookingPage() {
           </pre>
         ) : (
           <p className="text-sm text-gray-600">
-            Fill the form and click “Validate & Preview” (or blur a field) to
-            see validated data here.
+            Fill the form and click “Validate &amp; Preview” (or blur a field)
+            to see validated data here.
           </p>
         )}
       </section>

@@ -3,6 +3,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PrismaClient, AppearanceType } from "@prisma/client";
 
+// Shared UI (client components are safe to render in a Server Component tree)
+import Button from "../../../../../components/ui/Button";
+import Alert from "../../../../../components/ui/Alert";
+
 export const runtime = "nodejs";
 
 // ---- Prisma singleton (no excess clients)
@@ -49,12 +53,20 @@ export default async function EditBookingPage({
 
   if (!booking) {
     return (
-      <main className="mx-auto max-w-3xl p-6 space-y-4">
-        <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
-        <p>Booking not found.</p>
-        <Link href="/modules/booking" className="text-sm underline">
-          ← Back to bookings
-        </Link>
+      <main className="mx-auto max-w-2xl p-6 space-y-4">
+        <header className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">Edit Booking</h1>
+          <Link
+            href="/modules/booking"
+            className="text-sm text-blue-600 underline"
+          >
+            ← Back to bookings
+          </Link>
+        </header>
+
+        <Alert variant="error" title="Booking not found">
+          The booking you’re trying to edit doesn’t exist.
+        </Alert>
       </main>
     );
   }
@@ -62,7 +74,6 @@ export default async function EditBookingPage({
   // --- Server Action: runs on the server on submit (no client JS, no GET) ---
   async function updateBooking(formData: FormData) {
     "use server";
-
     const id = String(formData.get("id") || "");
     if (!id) return;
 
@@ -106,6 +117,7 @@ export default async function EditBookingPage({
       },
     });
 
+    // Success → go back to list; list page can show a toast/banner using ?updated=1
     redirect("/modules/booking?updated=1");
   }
 
@@ -121,173 +133,148 @@ export default async function EditBookingPage({
   const talkingPoints = booking.talkingPoints ?? "";
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
-      <p className="text-gray-600">
+    <main className="mx-auto max-w-2xl space-y-5 p-6">
+      <header className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Edit Booking</h1>
+        <Link
+          href="/modules/booking"
+          className="text-sm text-blue-600 underline"
+        >
+          ← Back to bookings
+        </Link>
+      </header>
+
+      <p className="text-sm text-gray-600">
         Update the minimal fields: subject, time, location, and extras.
       </p>
 
       {/* No client JS. Server Action handles everything on first click/Enter. */}
-      <form
-        action={updateBooking}
-        method="post"
-        className="space-y-4"
-        noValidate
-      >
+      <form action={updateBooking} className="space-y-4">
         {/* Important: include id so the action knows which record */}
         <input type="hidden" name="id" value={booking.id} />
 
-        <div>
-          <label htmlFor="subject" className="block text-sm font-medium">
-            Subject <span className="text-red-600">*</span>
-          </label>
+        {/* Subject */}
+        <label className="block text-sm font-medium">
+          Subject *
           <input
-            id="subject"
             name="subject"
-            type="text"
-            required
             defaultValue={subject}
-            className="mt-1 w-full rounded-lg border p-2"
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+            maxLength={300}
+            required
           />
-        </div>
+        </label>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div>
-            <label htmlFor="startAt" className="block text-sm font-medium">
-              Start date/time <span className="text-red-600">*</span>
-            </label>
+        {/* Start date/time & Duration */}
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="block text-sm font-medium">
+            Start date/time *
             <input
-              id="startAt"
-              name="startAt"
               type="datetime-local"
-              required
+              name="startAt"
               defaultValue={toDatetimeLocalValue(startAt)}
-              className="mt-1 w-full rounded-lg border p-2"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="durationMins" className="block text-sm font-medium">
-              Duration (minutes) <span className="text-red-600">*</span>
-            </label>
-            <input
-              id="durationMins"
-              name="durationMins"
-              type="number"
-              min={1}
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
               required
-              defaultValue={durationMins}
-              className="mt-1 w-full rounded-lg border p-2"
             />
-          </div>
+          </label>
+
+          <label className="block text-sm font-medium">
+            Duration (minutes) *
+            <input
+              type="number"
+              name="durationMins"
+              min={5}
+              max={600}
+              step={5}
+              defaultValue={durationMins}
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+              required
+            />
+          </label>
         </div>
 
+        {/* Appearance */}
         <fieldset className="space-y-2">
           <legend className="text-sm font-medium">Appearance Type</legend>
-          <div className="flex gap-6">
-            <label className="flex items-center gap-2">
+          <div className="flex gap-2">
+            <label className="inline-flex items-center gap-2">
               <input
                 type="radio"
                 name="appearanceType"
                 value="ONLINE"
-                defaultChecked={appearanceType === "ONLINE"}
+                defaultChecked={appearanceType === AppearanceType.ONLINE}
               />
               <span>Online</span>
             </label>
-            <label className="flex items-center gap-2">
+            <label className="inline-flex items-center gap-2">
               <input
                 type="radio"
                 name="appearanceType"
                 value="IN_PERSON"
-                defaultChecked={appearanceType === "IN_PERSON"}
+                defaultChecked={appearanceType === AppearanceType.IN_PERSON}
               />
               <span>In-person</span>
             </label>
           </div>
         </fieldset>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <label htmlFor="locationName" className="block text-sm font-medium">
-              Location name
-            </label>
-            <input
-              id="locationName"
-              name="locationName"
-              type="text"
-              defaultValue={locationName}
-              className="mt-1 w-full rounded-lg border p-2"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="locationUrl" className="block text-sm font-medium">
-              Location URL (map / meeting link)
-            </label>
-            <input
-              id="locationUrl"
-              name="locationUrl"
-              type="url"
-              defaultValue={locationUrl}
-              className="mt-1 w-full rounded-lg border p-2"
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <label htmlFor="programName" className="block text-sm font-medium">
-              Program name (optional)
-            </label>
-            <input
-              id="programName"
-              name="programName"
-              type="text"
-              defaultValue={programName}
-              className="mt-1 w-full rounded-lg border p-2"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="hostName" className="block text-sm font-medium">
-              Host name (optional)
-            </label>
-            <input
-              id="hostName"
-              name="hostName"
-              type="text"
-              defaultValue={hostName}
-              className="mt-1 w-full rounded-lg border p-2"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label htmlFor="talkingPoints" className="block text-sm font-medium">
-            Talking points (optional)
-          </label>
-          <textarea
-            id="talkingPoints"
-            name="talkingPoints"
-            rows={4}
-            defaultValue={talkingPoints}
-            className="mt-1 w-full rounded-lg border p-2"
+        {/* Location fields */}
+        <label className="block text-sm font-medium">
+          Location name
+          <input
+            name="locationName"
+            defaultValue={locationName}
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
           />
-        </div>
+        </label>
 
+        <label className="block text-sm font-medium">
+          Location URL (map / meeting link)
+          <input
+            name="locationUrl"
+            defaultValue={locationUrl}
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+            placeholder="https://…"
+          />
+        </label>
+
+        {/* Optional extras */}
+        <label className="block text-sm font-medium">
+          Program name (optional)
+          <input
+            name="programName"
+            defaultValue={programName}
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="block text-sm font-medium">
+          Host name (optional)
+          <input
+            name="hostName"
+            defaultValue={hostName}
+            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="block text-sm font-medium">
+          Talking points (optional)
+          <textarea
+            name="talkingPoints"
+            defaultValue={talkingPoints}
+            className="mt-1 h-28 w-full rounded-lg border px-3 py-2 text-sm"
+          />
+        </label>
+
+        {/* Actions */}
         <div className="mt-2 flex items-center gap-3">
-          <button
-            type="submit"
-            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
-          >
+          <Button variant="primary" size="md" type="submit">
             Save changes
-          </button>
-          <Link
-            href={`/modules/booking/${booking.id}`}
-            className="rounded-lg border px-4 py-2 text-sm"
-          >
+          </Button>
+
+          <Button href={`/modules/booking/${booking.id}`} size="md">
             Cancel
-          </Link>
+          </Button>
         </div>
       </form>
     </main>
