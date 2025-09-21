@@ -1,139 +1,181 @@
 // src/app/api/bookings/route.ts
-import { NextResponse } from "next/server";
-import { AppearanceType } from "@prisma/client";
-// Use a relative path since @ alias isn't configured
-import prisma from "../../../lib/prisma"; // ✅ centralized Prisma singleton
+import { NextRequest, NextResponse } from "next/server";
+import { getToken } from "next-auth/jwt";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../auth/[...nextauth]/route";
+import prisma from "../../../lib/prisma";
 
-export async function POST(req: Request) {
+const TENANCY_ENFORCED = process.env.TENANCY_ENFORCED !== "false";
+
+async function getAuthedUser(req: NextRequest) {
+  // 1) Try JWT from NextAuth
+  const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
+  const token = await getToken({ req, secret }).catch(() => null);
+  let email = (token?.email as string | undefined) ?? undefined;
+
+  // 2) Fallback to getServerSession if JWT failed
+  if (!email) {
+    const session = await getServerSession(authOptions).catch(() => null);
+    email = (session?.user?.email as string | undefined) ?? undefined;
+  }
+
+  if (!email) return null;
+
+  const user = await prisma.user.findUnique({
+    where: { email },
+    include: { memberships: true },
+  });
+  return user;
+}
+
+function roleForActiveOrg(user: any) {
+  if (!user?.activeOrgId) return null;
+  const m = user.memberships?.find((mm: any) => mm.orgId === user.activeOrgId);
+  return m?.role ?? null;
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const body = await req.json();
-    const errors: string[] = [];
+    const user = await getAuthedUser(req);
+    if (!user)
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // ---- coerce + validate required fields ----
-    const subjectRaw = coerceString(body.subject);
-    const newsroomNameRaw = coerceString(body.newsroomName);
-    // Support either expertName or guestName (your current UI uses guestName)
-    const expertNameRaw =
-      coerceString(body.expertName) ?? coerceString(body.guestName);
-    const appearanceTypeRaw = coerceString(body.appearanceType);
-    const startAtRaw = body.startAt;
-    const durationMinsRaw = coerceNumber(body.durationMins);
+    if (!TENANCY_ENFORCED) {
+      const all = await prisma.booking.findMany({
+        orderBy: { startAt: "desc" },
+      });
+      return NextResponse.json(all);
+    }
 
-    if (!subjectRaw) errors.push("subject is required");
-    if (!newsroomNameRaw) errors.push("newsroomName is required");
-    if (!expertNameRaw) errors.push("expertName (or guestName) is required");
+    const activeRole = roleForActiveOrg(user);
 
-    let appearanceType: AppearanceType | null = null;
-    if (appearanceTypeRaw) {
-      const upper = appearanceTypeRaw.toUpperCase();
-      if (upper === "IN_PERSON" || upper === "ONLINE") {
-        appearanceType = upper as AppearanceType;
-      } else {
-        errors.push('appearanceType must be "IN_PERSON" or "ONLINE"');
+    // If user has no active org and is not an EXPERT with single org → empty list
+    if (
+      !activeRole &&
+      !user.memberships?.some((m: any) => m.role === "EXPERT")
+    ) {
+      return NextResponse.json([], { status: 200 });
+    }
+
+    // EXPERT view (temporary name match)
+    if (
+      activeRole === "EXPERT" ||
+      (!activeRole && user.memberships?.every((m: any) => m.role === "EXPERT"))
+    ) {
+      const name = user.name ?? "";
+      const expertBookings = await prisma.booking.findMany({
+        where: {
+          expertName: name,
+          orgId: { in: user.memberships.map((m: any) => m.orgId) },
+        },
+        orderBy: { startAt: "desc" },
+      });
+      return NextResponse.json(expertBookings);
+    }
+
+    // PRODUCER/ADMIN/OWNER: scope by active org
+    if (!user.activeOrgId) {
+      return NextResponse.json(
+        { error: "No active organization selected." },
+        { status: 400 }
+      );
+    }
+
+    const rows = await prisma.booking.findMany({
+      where: { orgId: user.activeOrgId },
+      orderBy: { startAt: "desc" },
+    });
+    return NextResponse.json(rows);
+  } catch (e) {
+    console.error("GET /api/bookings failed:", e);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await getAuthedUser(req);
+    if (!user)
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const body = await req.json().catch(() => ({} as any));
+    const {
+      subject,
+      expertName,
+      newsroomName,
+      appearanceType, // "ONLINE" | "IN_PERSON"
+      startAt,
+      durationMins,
+      locationName,
+      locationUrl,
+      programName,
+      hostName,
+      talkingPoints,
+    } = body ?? {};
+
+    if (
+      !subject ||
+      !expertName ||
+      !newsroomName ||
+      !appearanceType ||
+      !startAt ||
+      !durationMins
+    ) {
+      return NextResponse.json(
+        { error: "Missing required fields." },
+        { status: 400 }
+      );
+    }
+
+    let orgIdToUse = body.orgId ?? null;
+
+    if (TENANCY_ENFORCED) {
+      const activeRole = roleForActiveOrg(user);
+      const expertOnly = user.memberships?.every(
+        (m: any) => m.role === "EXPERT"
+      );
+      const fallbackOrgId =
+        user.activeOrgId ?? (expertOnly ? user.memberships?.[0]?.orgId : null);
+
+      if (!fallbackOrgId) {
+        return NextResponse.json(
+          { error: "No active organization selected." },
+          { status: 400 }
+        );
       }
-    } else {
-      errors.push("appearanceType is required");
+
+      orgIdToUse = fallbackOrgId;
+
+      if (activeRole === "EXPERT" || expertOnly) {
+        if ((user.name ?? "") !== expertName) {
+          return NextResponse.json(
+            { error: "Experts can only create bookings for themselves." },
+            { status: 403 }
+          );
+        }
+      }
     }
 
-    const startAt = new Date(startAtRaw);
-    if (!isFinite(startAt.getTime())) {
-      errors.push("startAt must be a valid ISO date string");
-    }
-
-    const duration = Number(durationMinsRaw);
-    if (!Number.isFinite(duration) || duration <= 0) {
-      errors.push("durationMins must be a positive number");
-    }
-
-    if (errors.length) {
-      return NextResponse.json({ ok: false, errors }, { status: 400 });
-    }
-
-    // At this point types are safe; assign to narrowed (non-null) vars
-    const subject = subjectRaw as string;
-    const newsroomName = newsroomNameRaw as string;
-    const expertName = expertNameRaw as string;
-    const apType = appearanceType as AppearanceType;
-    const durationMins = Math.trunc(duration);
-
-    // ---- optional fields ----
-    const orgId = coerceString(body.orgId) || null;
-
-    // Accept either the new names or your current UI names
-    // - ONLINE: meetingLink -> locationUrl
-    // - IN_PERSON: venueAddress -> locationName
-    const locationNameExplicit = coerceString(body.locationName);
-    const locationUrlExplicit = coerceString(body.locationUrl);
-    const meetingLink = coerceString(body.meetingLink);
-    const venueAddress = coerceString(body.venueAddress);
-
-    const locationName =
-      locationNameExplicit ??
-      (apType === "IN_PERSON" ? venueAddress ?? null : null);
-    const locationUrl =
-      locationUrlExplicit ?? (apType === "ONLINE" ? meetingLink ?? null : null);
-
-    // NEW optional extras (nullable in schema)
-    const programName = coerceString(body.programName) || null;
-    const hostName = coerceString(body.hostName) || null;
-    const talkingPoints = coerceString(body.talkingPoints) || null;
-
-    const booking = await prisma.booking.create({
+    const created = await prisma.booking.create({
       data: {
         subject,
         expertName,
         newsroomName,
-        appearanceType: apType,
-        startAt,
-        durationMins,
-        locationName,
-        locationUrl,
-        orgId,
-        programName,
-        hostName,
-        talkingPoints,
-        // status left for model default (PENDING)
+        appearanceType,
+        startAt: new Date(startAt),
+        durationMins: Number(durationMins),
+        locationName: locationName ?? null,
+        locationUrl: locationUrl ?? null,
+        programName: programName ?? null,
+        hostName: hostName ?? null,
+        talkingPoints: talkingPoints ?? null,
+        orgId: orgIdToUse,
       },
     });
 
-    return NextResponse.json({ ok: true, booking }, { status: 201 });
-  } catch (err: any) {
-    const message =
-      typeof err?.message === "string" ? err.message : "Unknown server error";
-    return NextResponse.json(
-      { ok: false, errors: ["Failed to create booking", message] },
-      { status: 500 }
-    );
+    return NextResponse.json(created, { status: 201 });
+  } catch (e) {
+    console.error("POST /api/bookings failed:", e);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
-}
-
-export async function GET() {
-  try {
-    const bookings = await prisma.booking.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    });
-    return NextResponse.json({ ok: true, bookings });
-  } catch (err: any) {
-    const message =
-      typeof err?.message === "string" ? err.message : "Unknown server error";
-    return NextResponse.json(
-      { ok: false, errors: ["Failed to fetch bookings", message] },
-      { status: 500 }
-    );
-  }
-}
-
-/* ----------------- helpers ----------------- */
-function coerceString(v: unknown): string | null {
-  if (typeof v === "string") return v.trim();
-  if (v == null) return null;
-  return String(v).trim();
-}
-function coerceNumber(v: unknown): number | null {
-  if (typeof v === "number") return v;
-  if (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v))) {
-    return Number(v);
-  }
-  return null;
 }

@@ -1,193 +1,161 @@
 // src/app/modules/booking/page.tsx
+// Server Component — Bookings list (tenancy-aware via /api/bookings)
 
-// Server component: Booking list (tag-based fetch + shared UI)
-import prisma from "../../../lib/prisma"; // kept import if other pages rely on tree-shaking; not used here
-import { formatDateTime } from "../../../lib/date";
-import Button from "../../../components/ui/Button";
-import Alert from "../../../components/ui/Alert";
 import Link from "next/link";
 import { headers } from "next/headers";
 
-export const runtime = "nodejs"; // ensure Node runtime if needed for other server work
-// NOTE: no `dynamic = "force-dynamic"` when using tag-based fetch
+// Auth-scoped data: always render fresh.
+export const dynamic = "force-dynamic";
 
-type BookingRow = {
+type Booking = {
   id: string;
-  subject: string | null;
-  newsroomName: string | null;
-  expertName: string | null;
+  subject: string;
+  expertName: string;
+  newsroomName: string;
   appearanceType: "ONLINE" | "IN_PERSON";
-  startAt: string | Date;
-  durationMins: number | null;
-  createdAt: string | Date;
-  updatedAt: string | Date;
+  status: "PENDING" | "CONFIRMED" | "CANCELLED";
+  startAt: string; // ISO
+  durationMins: number;
+  locationName?: string | null;
+  locationUrl?: string | null;
+  programName?: string | null;
+  hostName?: string | null;
+  talkingPoints?: string | null;
+  orgId?: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
-async function loadBookings(): Promise<BookingRow[]> {
-  // Build absolute URL for robustness in dev/prod
+function getBaseUrl() {
   const h = headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host");
-  const proto =
-    h.get("x-forwarded-proto") ??
-    (process.env.NODE_ENV === "production" ? "https" : "http");
-  const url = `${proto}://${host}/api/bookings`;
-
-  const res = await fetch(url, {
-    next: { tags: ["bookings"] }, // 👈 tag-based caching
-  });
-  if (!res.ok) throw new Error("Failed to load bookings");
-
-  const data = await res.json();
-  // Accept {items: []} | {bookings: []} | [] to match existing API shapes
-  const items: BookingRow[] =
-    (data?.items as BookingRow[]) ??
-    (data?.bookings as BookingRow[]) ??
-    (Array.isArray(data) ? (data as BookingRow[]) : []);
-  return items ?? [];
+  const proto = h.get("x-forwarded-proto") ?? "http";
+  const host = h.get("host") ?? "localhost:3000";
+  return `${proto}://${host}`;
 }
 
-export default async function BookingListPage({
-  searchParams,
-}: {
-  searchParams?: { [key: string]: string | string[] | undefined };
-}) {
-  const created = searchParams?.created === "1";
-  const updated = searchParams?.updated === "1";
-  const errorMsg =
-    typeof searchParams?.error === "string"
-      ? decodeURIComponent(searchParams!.error as string)
-      : null;
+async function fetchBookings(): Promise<Booking[]> {
+  const cookie = headers().get("cookie") ?? "";
+  const url = `${getBaseUrl()}/api/bookings`;
 
-  let bookings: BookingRow[] = [];
+  const res = await fetch(url, {
+    method: "GET",
+    // Forward auth cookies so the API recognizes the user
+    headers: { cookie },
+    // Auth/org-scoped → do NOT cache
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    throw new Error(`Fetch failed with ${res.status}`);
+  }
+
+  return (await res.json()) as Booking[];
+}
+
+function fmtDate(iso: string) {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
+}
+
+export default async function BookingsPage() {
+  let bookings: Booking[] = [];
+  let loadError = "";
+
   try {
-    bookings = await loadBookings();
+    bookings = await fetchBookings();
   } catch {
-    return (
-      <main className="mx-auto max-w-5xl p-6">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
-          <Button
-            href="/modules/booking/new"
-            variant="primary"
-            size="md"
-            className="rounded-lg"
-          >
-            New booking
-          </Button>
-        </div>
-
-        <Alert
-          variant="error"
-          className="mt-6 rounded-lg"
-          title="Failed to load bookings from the server."
-        />
-      </main>
-    );
+    loadError = "Failed to load bookings from the server.";
   }
 
   return (
-    <main className="mx-auto max-w-5xl p-6">
-      {/* a11y live region for success/error messages */}
-      <div className="sr-only" aria-live="polite" />
-
+    <main className="mx-auto max-w-4xl p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
-        <Button
+        <Link
           href="/modules/booking/new"
-          variant="primary"
-          size="md"
-          className="rounded-lg"
+          className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium shadow-sm bg-gray-900 text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-900"
         >
           New booking
-        </Button>
+        </Link>
       </div>
 
-      {/* Banners */}
-      {created && (
-        <Alert
-          variant="success"
-          className="mt-4 rounded-lg"
-          title="Booking created"
+      {loadError ? (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-800"
         >
-          Booking created successfully.
-        </Alert>
-      )}
-      {updated && (
-        <Alert
-          variant="success"
-          className="mt-4 rounded-lg"
-          title="Booking updated"
-        >
-          Booking updated successfully.
-        </Alert>
-      )}
-      {errorMsg && (
-        <Alert
-          variant="error"
-          className="mt-4 rounded-lg"
-          title="Something went wrong"
-        >
-          {errorMsg}
-        </Alert>
-      )}
-
-      {/* Empty state vs table */}
-      {!bookings || bookings.length === 0 ? (
-        <div className="mt-8 rounded-lg border p-6 text-center">
-          <p className="text-sm text-gray-600">No bookings yet.</p>
-          <Button
-            href="/modules/booking/new"
-            variant="outline"
-            size="md"
-            className="mt-3 rounded-lg"
-          >
-            Create your first booking
-          </Button>
+          {loadError}
+        </div>
+      ) : bookings.length === 0 ? (
+        <div className="rounded-xl border p-6 text-gray-600">
+          No bookings yet. Create your first one.
         </div>
       ) : (
-        <div className="mt-6 overflow-hidden rounded-lg border">
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr className="text-left">
-                <th className="px-4 py-2 font-medium">Subject</th>
-                <th className="px-4 py-2 font-medium">Expert</th>
-                <th className="px-4 py-2 font-medium">Appearance</th>
-                <th className="px-4 py-2 font-medium">Start</th>
-                <th className="px-4 py-2 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {bookings.map((b) => (
-                <tr key={b.id}>
-                  <td className="px-4 py-2">{b.subject || "—"}</td>
-                  <td className="px-4 py-2">{b.expertName || "—"}</td>
-                  <td className="px-4 py-2">
-                    {b.appearanceType === "ONLINE" ? "Online" : "In-person"}
-                  </td>
-                  <td className="px-4 py-2">{formatDateTime(b.startAt)}</td>
-                  <td className="px-4 py-2 text-right">
-                    <Button
-                      href={`/modules/booking/${b.id}`}
-                      variant="outline"
-                      size="sm"
-                      className="rounded-lg"
-                    >
-                      View
-                    </Button>
-                    <Button
-                      href={`/modules/booking/${b.id}/edit`}
-                      variant="outline"
-                      size="sm"
-                      className="ml-2 rounded-lg"
-                    >
-                      Edit
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="space-y-3">
+          {bookings.map((b) => (
+            <li
+              key={b.id}
+              className="rounded-xl border p-4 hover:bg-gray-50 transition"
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-base font-medium">{b.subject}</div>
+                  <div className="mt-1 text-sm text-gray-600">
+                    {fmtDate(b.startAt)} • {b.durationMins}m •{" "}
+                    {b.appearanceType.replace("_", " ")}
+                  </div>
+                  <div className="mt-1 text-sm text-gray-600">
+                    Expert: <span className="font-medium">{b.expertName}</span>{" "}
+                    • Newsroom:{" "}
+                    <span className="font-medium">{b.newsroomName}</span>
+                  </div>
+                  {b.locationName ? (
+                    <div className="mt-1 text-sm text-gray-600">
+                      Location:{" "}
+                      {b.locationUrl ? (
+                        <a
+                          href={b.locationUrl}
+                          className="underline underline-offset-2"
+                          target="_blank"
+                        >
+                          {b.locationName}
+                        </a>
+                      ) : (
+                        b.locationName
+                      )}
+                    </div>
+                  ) : null}
+                  {b.programName || b.hostName ? (
+                    <div className="mt-1 text-sm text-gray-600">
+                      {b.programName ? (
+                        <>
+                          Program:{" "}
+                          <span className="font-medium">{b.programName}</span>
+                        </>
+                      ) : null}
+                      {b.programName && b.hostName ? " • " : null}
+                      {b.hostName ? (
+                        <>
+                          Host:{" "}
+                          <span className="font-medium">{b.hostName}</span>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+                <Link
+                  href={`/modules/booking/${b.id}/edit`}
+                  className="text-sm font-medium underline underline-offset-2"
+                >
+                  Edit
+                </Link>
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
     </main>
   );

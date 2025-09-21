@@ -1,15 +1,16 @@
 // prisma/schema.prisma
-// Org & Tenancy foundation + Booking extras (programName, hostName, talkingPoints)
+// Tenancy foundation + Org settings shell + existing Booking fields (non-breaking)
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  // Reads from DATABASE_URL in .env (PostgreSQL)
-  provider = "postgresql"
+  provider = "postgresql"         // Reads from DATABASE_URL in .env
   url      = env("DATABASE_URL")
 }
+
+/** ===== Enums ===== **/
 
 /// Booking appearance mode
 enum AppearanceType {
@@ -17,72 +18,113 @@ enum AppearanceType {
   ONLINE
 }
 
-/// Booking workflow status
+/// Booking workflow status (kept minimal to avoid breaking existing flows)
 enum BookingStatus {
   PENDING
   CONFIRMED
   CANCELLED
 }
 
-/// Organization/user roles for tenancy & permissions
+/// Organization/user roles for tenancy & permissions (product-aligned)
 enum Role {
   OWNER
+  ADMIN
   PRODUCER
   EXPERT
-  DEV
 }
+
+/** ===== Core Tenancy Models ===== **/
 
 /// Organizations (newsrooms or companies)
 model Organization {
-  id        String   @id @default(cuid())
-  name      String   @db.VarChar(200)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String                   @id @default(cuid())
+  name         String                   @db.VarChar(200)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
 
-  // Feature toggles owned by this organization
-  toggles   OrgFeatureToggle?
-
-  // Optional: bookings scoped to an org (wired via orgId on Booking)
-  bookings  Booking[]
+  // Settings (shell) — one row per org
+  settings     OrgSettings?
 
   // Tenancy relations
-  memberships OrganizationMembership[]
-
+  memberships  OrganizationMembership[]
   // Reverse side of User.activeOrg
-  activeUsers User[] @relation("ActiveOrg")
+  activeUsers  User[]                   @relation("ActiveOrg")
+
+  // Bookings scoped to an org
+  bookings     Booking[]
 }
 
-/// DB-backed feature flags per organization
-/// One row per org controls conditional fields in UI
-model OrgFeatureToggle {
-  id     String @id @default(cuid())
-  orgId  String
+/// DB-backed org settings (shell). Controls visibility/behaviour in UI.
+model OrgSettings {
+  id               String       @id @default(cuid())
+  orgId            String       @unique
+  organization     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  // Field visibility toggles (MVP)
+  showProgramName  Boolean      @default(true)
+  showHostName     Boolean      @default(true)
+  showTalkingPoints Boolean     @default(true)
 
-  // Core toggles (can grow over time)
-  showProgramName  Boolean @default(true)
-  showHostName     Boolean @default(true)
-  showTalkingPoints Boolean @default(true)
+  // Appearance type allowlist (MVP)
+  allowInPerson    Boolean      @default(true)
+  allowOnline      Boolean      @default(true)
 
   // Audit
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([orgId]) // one toggle row per org (acts like a settings record)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 }
 
-/// Bookings table (current UI fields; expanded with extras)
+/// User ↔ Organization membership with role
+model OrganizationMembership {
+  id           String       @id @default(cuid())
+  userId       String
+  orgId        String
+  role         Role
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+  @@index([userId])
+}
+
+/** ===== App Models (kept compatible) ===== **/
+
+/// Application user (local credentials auth)
+model User {
+  id             String                    @id @default(cuid())
+  email          String                    @unique @db.VarChar(320)
+  name           String?                   @db.VarChar(200)
+  // Store a secure hash (bcrypt/argon2) — NOT plaintext
+  hashedPassword String                    @db.VarChar(255)
+
+  // Optional “active org” for scoping the UI/session (switcher uses this)
+  activeOrgId    String?
+  activeOrg      Organization?             @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
+
+  // Tenancy memberships
+  memberships    OrganizationMembership[]
+
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+
+  @@index([activeOrgId])
+}
+
+/// Bookings table (current UI fields; org scope optional for backwards compat)
 model Booking {
   id            String         @id @default(cuid())
-
   subject       String         @db.VarChar(300)
+
+  // NOTE: these names are kept to avoid breaking current UI/routes
   expertName    String         @db.VarChar(200)
   newsroomName  String         @db.VarChar(200)
 
   appearanceType AppearanceType
-  status         BookingStatus  @default(PENDING)
-
+  status        BookingStatus  @default(PENDING)
   startAt       DateTime
   durationMins  Int
 
@@ -90,12 +132,12 @@ model Booking {
   locationName  String?        @db.VarChar(300)
   locationUrl   String?        @db.Text
 
-  // NEW optional extras (tenant-flagged in UI)
-  programName   String?        @db.VarChar(200) // e.g. show when toggled for org
-  hostName      String?        @db.VarChar(200) // e.g. show when toggled for org
-  talkingPoints String?        @db.Text         // longer free text; optional
+  // Optional editorial extras (visibility controlled by OrgSettings)
+  programName   String?        @db.VarChar(200)
+  hostName      String?        @db.VarChar(200)
+  talkingPoints String?        @db.Text
 
-  // Org scope (optional for now)
+  // Org scope (we’ll seed with orgId; keep optional to not break existing data)
   orgId         String?
   organization  Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
@@ -104,44 +146,4 @@ model Booking {
 
   @@index([orgId])
   @@index([startAt])
-}
-
-/// Application user (for local credentials auth)
-model User {
-  id             String   @id @default(cuid())
-  email          String   @unique @db.VarChar(320)
-  name           String?  @db.VarChar(200)
-
-  // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword String    @db.VarChar(255)
-
-  // Optional “active org” for scoping the UI/session
-  activeOrgId String?
-  activeOrg   Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
-
-  // Tenancy memberships
-  memberships OrganizationMembership[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([activeOrgId])
-}
-
-/// User ↔ Organization membership with role
-model OrganizationMembership {
-  id        String   @id @default(cuid())
-  userId    String
-  orgId     String
-  role      Role
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, orgId])
-  @@index([orgId])
-  @@index([userId])
 }
