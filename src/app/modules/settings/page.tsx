@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
+import { useTheme } from "../../../components/theme-provider";
 
 type Toggles = {
   showProgramName: boolean;
@@ -19,6 +21,9 @@ export default function SettingsPage() {
     showHostName: true,
     showTalkingPoints: true,
   });
+
+  // === User-level theme (light by default) ===
+  const { theme, setTheme } = useTheme();
 
   // Load current toggles from API
   React.useEffect(() => {
@@ -60,6 +65,7 @@ export default function SettingsPage() {
       setSaving(true);
       setSuccess(null);
       setError(null);
+
       const res = await fetch("/api/toggles", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -67,7 +73,8 @@ export default function SettingsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save toggles");
-      // Sync <body data-*> so the Booking form will see fresh values on mount
+
+      // Sync so the Booking form will see fresh values on mount
       setBodyDatasets(toggles);
       setSuccess("Saved!");
     } catch (e: any) {
@@ -79,79 +86,115 @@ export default function SettingsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 p-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <a
-          href="/modules/booking"
-          className="rounded-lg border px-4 py-2 text-sm"
-        >
-          Back to bookings
-        </a>
-      </div>
+    <main className="mx-auto max-w-3xl p-6 space-y-6">
+      <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+      <Link
+        href="/modules/booking"
+        className="inline-flex w-fit items-center text-sm text-gray-600 hover:text-gray-900"
+      >
+        ← Back to bookings
+      </Link>
 
-      <section className="space-y-4 rounded-xl border p-4">
-        <h2 className="text-lg font-semibold">Org Feature Toggles</h2>
-        <p className="text-sm text-gray-600">
+      {/* ========== Org Feature Toggles (existing) ========== */}
+      <section className="rounded-lg border p-4">
+        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
+        <p className="mb-4 text-sm text-gray-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <p className="text-sm text-gray-600">Loading…</p>
+          <p>Loading…</p>
         ) : error ? (
-          <p className="text-sm text-red-600" role="alert">
-            {error}
-          </p>
+          <p className="text-red-600">{error}</p>
         ) : (
           <>
             <ToggleRow
-              label="Show Program Name"
-              description="Display an optional Program name input on the booking form."
+              label="Program name"
+              description="Show a free-text Program name field on the booking form."
               checked={toggles.showProgramName}
               onChange={(v) =>
                 setToggles((t) => ({ ...t, showProgramName: v }))
               }
             />
             <ToggleRow
-              label="Show Host Name"
-              description="Display an optional Host name input on the booking form."
+              label="Host name"
+              description="Show a free-text Host name field on the booking form."
               checked={toggles.showHostName}
               onChange={(v) => setToggles((t) => ({ ...t, showHostName: v }))}
             />
             <ToggleRow
-              label="Show Talking Points"
-              description="Display an optional Talking points textarea on the booking form."
+              label="Talking points"
+              description="Show a multi-line Talking points field on the booking form."
               checked={toggles.showTalkingPoints}
               onChange={(v) =>
                 setToggles((t) => ({ ...t, showTalkingPoints: v }))
               }
             />
 
-            <div className="flex items-center gap-3 pt-2">
+            <div className="mt-4 flex items-center gap-3">
               <button
                 type="button"
                 onClick={handleSave}
                 disabled={saving}
-                className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                className="rounded-md border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
               >
                 {saving ? "Saving…" : "Save changes"}
               </button>
-
               {success && (
                 <span className="text-sm text-green-700">{success}</span>
               )}
             </div>
           </>
         )}
+
+        <h3 className="mt-6 text-sm font-medium">Tip</h3>
+        <p className="text-sm text-gray-600">
+          Changes apply immediately. The Booking form reads flags from{" "}
+          <code className="rounded bg-gray-100 px-1 py-0.5">
+            &lt;body data-*&gt;
+          </code>{" "}
+          on mount. After saving, just navigate to the form and it will use the
+          new values.
+        </p>
       </section>
 
-      <section className="rounded-xl border p-4 text-sm text-gray-600">
-        <h3 className="mb-2 font-medium">Tip</h3>
-        <p>
-          Changes apply immediately. The Booking form reads flags from{" "}
-          <code>&lt;body data-*&gt;</code> on mount. After saving, just navigate
-          to the form and it will use the new values.
+      {/* ========== User Theme (new) ========== */}
+      <section className="rounded-lg border p-4">
+        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
+        <p className="mb-4 text-sm text-gray-600">
+          Choose your theme for this device.
         </p>
+
+        <fieldset className="space-y-2">
+          <legend className="sr-only">Theme</legend>
+
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="theme"
+              value="light"
+              checked={theme === "light"}
+              onChange={() => setTheme("light")}
+            />
+            <span>Light (default)</span>
+          </label>
+
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="theme"
+              value="dark"
+              checked={theme === "dark"}
+              onChange={() => setTheme("dark")}
+            />
+            <span>Dark</span>
+          </label>
+
+          <p className="mt-3 text-sm text-gray-600">
+            This preference is saved locally in your browser. We can move it to
+            a DB-backed user setting later.
+          </p>
+        </fieldset>
       </section>
     </main>
   );
@@ -165,28 +208,30 @@ function ToggleRow(props: {
 }) {
   const id = React.useId();
   return (
-    <div className="flex items-start justify-between rounded-lg border p-3">
-      <div className="pr-4">
+    <div className="flex items-start justify-between gap-4 border-t py-3 first:border-t-0">
+      <div className="min-w-0">
         <label htmlFor={id} className="block text-sm font-medium">
           {props.label}
         </label>
         {props.description && (
-          <p className="mt-1 text-xs text-gray-600">{props.description}</p>
+          <p className="text-sm text-gray-600">{props.description}</p>
         )}
       </div>
+
       <button
         id={id}
         type="button"
-        role="switch"
-        aria-checked={props.checked}
         onClick={() => props.onChange(!props.checked)}
-        className={`h-6 w-11 rounded-full transition ${
+        className={`relative h-6 w-11 rounded-full transition ${
           props.checked ? "bg-gray-900" : "bg-gray-300"
         }`}
+        role="switch"
+        aria-checked={props.checked}
+        aria-label={props.label}
       >
         <span
-          className={`block h-5 w-5 translate-y-0.5 transform rounded-full bg-white shadow transition ${
-            props.checked ? "translate-x-6" : "translate-x-0.5"
+          className={`absolute left-0 top-0 h-6 w-6 rounded-full bg-white shadow transition ${
+            props.checked ? "translate-x-5" : ""
           }`}
         />
       </button>
