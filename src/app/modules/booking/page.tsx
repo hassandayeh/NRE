@@ -1,11 +1,15 @@
 // src/app/modules/booking/page.tsx
 
-// Server component: Booking list
+// Server component: Booking list (tag-based fetch + shared UI)
+import prisma from "../../../lib/prisma"; // kept import if other pages rely on tree-shaking; not used here
+import { formatDateTime } from "../../../lib/date";
+import Button from "../../../components/ui/Button";
+import Alert from "../../../components/ui/Alert";
 import Link from "next/link";
-import prisma from "../../../lib/prisma"; // ✅ centralized Prisma singleton
+import { headers } from "next/headers";
 
-export const runtime = "nodejs"; // ensure Node runtime for Prisma
-export const dynamic = "force-dynamic"; // always fetch fresh data
+export const runtime = "nodejs"; // ensure Node runtime if needed for other server work
+// NOTE: no `dynamic = "force-dynamic"` when using tag-based fetch
 
 type BookingRow = {
   id: string;
@@ -13,38 +17,33 @@ type BookingRow = {
   newsroomName: string | null;
   expertName: string | null;
   appearanceType: "ONLINE" | "IN_PERSON";
-  startAt: Date;
+  startAt: string | Date;
   durationMins: number | null;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 };
 
-function formatLocalDateTime(value: Date | string) {
-  const d = value instanceof Date ? value : new Date(value);
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(d);
-}
-
 async function loadBookings(): Promise<BookingRow[]> {
-  return prisma.booking.findMany({
-    orderBy: { startAt: "desc" },
-    select: {
-      id: true,
-      subject: true,
-      newsroomName: true,
-      expertName: true,
-      appearanceType: true,
-      startAt: true,
-      durationMins: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+  // Build absolute URL for robustness in dev/prod
+  const h = headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host");
+  const proto =
+    h.get("x-forwarded-proto") ??
+    (process.env.NODE_ENV === "production" ? "https" : "http");
+  const url = `${proto}://${host}/api/bookings`;
+
+  const res = await fetch(url, {
+    next: { tags: ["bookings"] }, // 👈 tag-based caching
   });
+  if (!res.ok) throw new Error("Failed to load bookings");
+
+  const data = await res.json();
+  // Accept {items: []} | {bookings: []} | [] to match existing API shapes
+  const items: BookingRow[] =
+    (data?.items as BookingRow[]) ??
+    (data?.bookings as BookingRow[]) ??
+    (Array.isArray(data) ? (data as BookingRow[]) : []);
+  return items ?? [];
 }
 
 export default async function BookingListPage({
@@ -67,20 +66,21 @@ export default async function BookingListPage({
       <main className="mx-auto max-w-5xl p-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
-          <Link
+          <Button
             href="/modules/booking/new"
-            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
+            variant="primary"
+            size="md"
+            className="rounded-lg"
           >
             New booking
-          </Link>
+          </Button>
         </div>
 
-        <div
-          className="mt-6 rounded-lg border bg-red-50 p-4 text-sm text-red-700"
-          role="status"
-        >
-          Failed to load bookings from the database.
-        </div>
+        <Alert
+          variant="error"
+          className="mt-6 rounded-lg"
+          title="Failed to load bookings from the server."
+        />
       </main>
     );
   }
@@ -92,54 +92,57 @@ export default async function BookingListPage({
 
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
-        <Link
+        <Button
           href="/modules/booking/new"
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
+          variant="primary"
+          size="md"
+          className="rounded-lg"
         >
           New booking
-        </Link>
+        </Button>
       </div>
 
-      {/* Toasts (non-interactive in Server Component) */}
+      {/* Banners */}
       {created && (
-        <div className="mt-4 rounded-lg border bg-green-50 p-4" role="status">
-          <div className="text-sm font-medium text-green-800">
-            Booking created
-          </div>
-          <div className="text-sm text-green-700">
-            Booking created successfully.
-          </div>
-        </div>
+        <Alert
+          variant="success"
+          className="mt-4 rounded-lg"
+          title="Booking created"
+        >
+          Booking created successfully.
+        </Alert>
       )}
       {updated && (
-        <div className="mt-4 rounded-lg border bg-green-50 p-4" role="status">
-          <div className="text-sm font-medium text-green-800">
-            Booking updated
-          </div>
-          <div className="text-sm text-green-700">
-            Booking updated successfully.
-          </div>
-        </div>
+        <Alert
+          variant="success"
+          className="mt-4 rounded-lg"
+          title="Booking updated"
+        >
+          Booking updated successfully.
+        </Alert>
       )}
       {errorMsg && (
-        <div className="mt-4 rounded-lg border bg-red-50 p-4" role="status">
-          <div className="text-sm font-medium text-red-800">
-            Something went wrong
-          </div>
-          <div className="text-sm text-red-700">{errorMsg}</div>
-        </div>
+        <Alert
+          variant="error"
+          className="mt-4 rounded-lg"
+          title="Something went wrong"
+        >
+          {errorMsg}
+        </Alert>
       )}
 
       {/* Empty state vs table */}
       {!bookings || bookings.length === 0 ? (
         <div className="mt-8 rounded-lg border p-6 text-center">
           <p className="text-sm text-gray-600">No bookings yet.</p>
-          <Link
+          <Button
             href="/modules/booking/new"
-            className="mt-3 inline-block rounded-lg border px-4 py-2 text-sm"
+            variant="outline"
+            size="md"
+            className="mt-3 rounded-lg"
           >
             Create your first booking
-          </Link>
+          </Button>
         </div>
       ) : (
         <div className="mt-6 overflow-hidden rounded-lg border">
@@ -161,22 +164,24 @@ export default async function BookingListPage({
                   <td className="px-4 py-2">
                     {b.appearanceType === "ONLINE" ? "Online" : "In-person"}
                   </td>
-                  <td className="px-4 py-2">
-                    {formatLocalDateTime(b.startAt)}
-                  </td>
+                  <td className="px-4 py-2">{formatDateTime(b.startAt)}</td>
                   <td className="px-4 py-2 text-right">
-                    <Link
+                    <Button
                       href={`/modules/booking/${b.id}`}
-                      className="rounded-lg border px-3 py-1 text-xs"
+                      variant="outline"
+                      size="sm"
+                      className="rounded-lg"
                     >
                       View
-                    </Link>
-                    <Link
+                    </Button>
+                    <Button
                       href={`/modules/booking/${b.id}/edit`}
-                      className="ml-2 rounded-lg border px-3 py-1 text-xs"
+                      variant="outline"
+                      size="sm"
+                      className="ml-2 rounded-lg"
                     >
                       Edit
-                    </Link>
+                    </Button>
                   </td>
                 </tr>
               ))}
