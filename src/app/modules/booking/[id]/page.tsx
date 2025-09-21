@@ -1,16 +1,8 @@
 // src/app/modules/booking/[id]/page.tsx
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { PrismaClient, AppearanceType } from "@prisma/client";
-
-// Prisma singleton (server-side safe)
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+import { AppearanceType } from "@prisma/client";
+import prisma from "../../../../lib/prisma"; // ✅ centralized Prisma singleton
 
 type PageProps = {
   params: { id: string };
@@ -28,107 +20,77 @@ export default async function BookingDetailsPage({
   if (!booking) return notFound();
 
   const isOnline = booking.appearanceType === AppearanceType.ONLINE;
-  const updated = searchParams?.updated === "1";
+  const updated = searchParams?.updated === "1"; // boolean
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 p-6">
+    <main className="mx-auto max-w-3xl p-6 space-y-6">
       {/* Top actions */}
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="text-2xl font-semibold">Booking details</h1>
-
-        {/* NEW: Edit button */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Booking details
+        </h1>
         <Link
           href={`/modules/booking/${booking.id}/edit`}
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
+          className="rounded-lg border px-3 py-1 text-sm"
         >
           Edit booking
         </Link>
       </div>
 
-      {/* Optional success banner after edit */}
-      {updated && (
-        <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Booking updated successfully.
+      {/* Success banner after edit */}
+      {updated ? (
+        <div className="rounded-lg border bg-green-50 p-4" role="status">
+          <div className="text-sm font-medium text-green-800">
+            Booking updated successfully.
+          </div>
         </div>
-      )}
+      ) : null}
 
-      <p>
+      <div>
         <Link href="/modules/booking" className="text-sm underline">
           ← Back to bookings
         </Link>
-      </p>
+      </div>
 
       {/* Core fields */}
-      <section className="rounded-xl border p-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Subject" value={booking.subject || "—"} />
-          <Field
-            label="Appearance"
-            value={pretty(booking.appearanceType || "—")}
-          />
-          <Field
-            label="Start at"
-            value={
-              booking.startAt ? new Date(booking.startAt).toLocaleString() : "—"
-            }
-          />
-          <Field
-            label="Duration"
-            value={
-              booking.durationMins != null
-                ? `${booking.durationMins} mins`
-                : "—"
-            }
-          />
-        </div>
+      <section className="space-y-3">
+        <Field label="Subject" value={booking.subject ?? "—"} />
+        <Field label="Expert" value={booking.expertName ?? "—"} />
+        <Field label="Appearance" value={pretty(booking.appearanceType)} />
+        <Field
+          label="Start"
+          value={new Date(booking.startAt).toLocaleString()}
+        />
+        <Field
+          label="Duration (mins)"
+          value={String(booking.durationMins ?? "—")}
+        />
       </section>
 
       {/* Location */}
-      <section className="rounded-xl border p-4">
-        <h2 className="mb-2 text-lg font-semibold">Location</h2>
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium">Location</h2>
         {isOnline ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <FieldText
-              label="Location name"
-              value={booking.locationName || "—"}
-            />
-            <Field
-              label="Location URL"
-              value={booking.locationUrl || "—"}
-              isLink
-            />
-          </div>
+          <Field
+            label="Meeting link"
+            value={booking.locationUrl ?? "—"}
+            isLink
+          />
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <FieldText
-              label="Location name"
-              value={booking.locationName || "—"}
-            />
-            <Field
-              label="Location URL"
-              value={booking.locationUrl || "—"}
-              isLink
-            />
-          </div>
+          <Field label="Venue" value={booking.locationName ?? "—"} />
         )}
       </section>
 
       {/* Extras */}
       {(booking.programName || booking.hostName || booking.talkingPoints) && (
-        <section className="rounded-xl border p-4">
-          <h2 className="mb-2 text-lg font-semibold">Extras</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {booking.programName && (
-              <FieldText label="Program name" value={booking.programName} />
-            )}
-            {booking.hostName && (
-              <FieldText label="Host name" value={booking.hostName} />
-            )}
-          </div>
+        <section className="space-y-3">
+          <h2 className="text-lg font-medium">Extras</h2>
+          {booking.programName && (
+            <Field label="Program" value={booking.programName} />
+          )}
+          {booking.hostName && <Field label="Host" value={booking.hostName} />}
           {booking.talkingPoints && (
-            <div className="mt-3">
-              <FieldText label="Talking points" value={booking.talkingPoints} />
-            </div>
+            <FieldText label="Talking points" value={booking.talkingPoints} />
           )}
         </section>
       )}
@@ -137,7 +99,6 @@ export default async function BookingDetailsPage({
 }
 
 /* ---------- helpers ---------- */
-
 function pretty(s: string) {
   return s
     .replaceAll("_", " ")
@@ -154,21 +115,17 @@ function Field({
   value: string;
   isLink?: boolean;
 }) {
+  const text = value || "—";
   return (
-    <div className="text-sm">
-      <div className="text-gray-600">{label}</div>
-      <div className="truncate font-medium">
-        {isLink && value && value !== "—" ? (
-          <a
-            href={value}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline"
-          >
-            {value}
+    <div className="flex items-start gap-3">
+      <div className="w-40 shrink-0 text-sm text-gray-600">{label}</div>
+      <div className="text-sm">
+        {isLink && text && text !== "—" ? (
+          <a href={text} className="underline" target="_blank" rel="noreferrer">
+            {text}
           </a>
         ) : (
-          value || "—"
+          text
         )}
       </div>
     </div>
@@ -177,9 +134,9 @@ function Field({
 
 function FieldText({ label, value }: { label: string; value: string }) {
   return (
-    <div className="text-sm">
-      <div className="text-gray-600">{label}</div>
-      <div className="whitespace-pre-wrap font-medium">{value}</div>
+    <div className="flex items-start gap-3">
+      <div className="w-40 shrink-0 text-sm text-gray-600">{label}</div>
+      <div className="whitespace-pre-wrap text-sm">{value}</div>
     </div>
   );
 }

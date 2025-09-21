@@ -1,15 +1,8 @@
 // src/app/api/bookings/route.ts
 import { NextResponse } from "next/server";
-import { PrismaClient, AppearanceType } from "@prisma/client";
-
-// Prisma singleton for Next.js dev HMR
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+import { AppearanceType } from "@prisma/client";
+// Use a relative path since @ alias isn't configured
+import prisma from "../../../lib/prisma"; // ✅ centralized Prisma singleton
 
 export async function POST(req: Request) {
   try {
@@ -19,11 +12,9 @@ export async function POST(req: Request) {
     // ---- coerce + validate required fields ----
     const subjectRaw = coerceString(body.subject);
     const newsroomNameRaw = coerceString(body.newsroomName);
-
     // Support either expertName or guestName (your current UI uses guestName)
     const expertNameRaw =
       coerceString(body.expertName) ?? coerceString(body.guestName);
-
     const appearanceTypeRaw = coerceString(body.appearanceType);
     const startAtRaw = body.startAt;
     const durationMinsRaw = coerceNumber(body.durationMins);
@@ -79,7 +70,6 @@ export async function POST(req: Request) {
     const locationName =
       locationNameExplicit ??
       (apType === "IN_PERSON" ? venueAddress ?? null : null);
-
     const locationUrl =
       locationUrlExplicit ?? (apType === "ONLINE" ? meetingLink ?? null : null);
 
@@ -140,7 +130,6 @@ function coerceString(v: unknown): string | null {
   if (v == null) return null;
   return String(v).trim();
 }
-
 function coerceNumber(v: unknown): number | null {
   if (typeof v === "number") return v;
   if (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v))) {

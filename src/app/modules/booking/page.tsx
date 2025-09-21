@@ -1,19 +1,11 @@
-// Server component: Booking list
+// src/app/modules/booking/page.tsx
 
+// Server component: Booking list
 import Link from "next/link";
-import { PrismaClient } from "@prisma/client";
+import prisma from "../../../lib/prisma"; // ✅ centralized Prisma singleton
 
 export const runtime = "nodejs"; // ensure Node runtime for Prisma
 export const dynamic = "force-dynamic"; // always fetch fresh data
-
-// Prisma singleton (prevents too many connections during dev/HMR)
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 type BookingRow = {
   id: string;
@@ -64,7 +56,7 @@ export default async function BookingListPage({
   const updated = searchParams?.updated === "1";
   const errorMsg =
     typeof searchParams?.error === "string"
-      ? decodeURIComponent(searchParams!.error)
+      ? decodeURIComponent(searchParams!.error as string)
       : null;
 
   let bookings: BookingRow[] = [];
@@ -73,12 +65,8 @@ export default async function BookingListPage({
   } catch {
     return (
       <main className="mx-auto max-w-5xl p-6">
-        <h1 className="text-2xl font-semibold">Bookings</h1>
-        <p className="mt-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
-          Failed to load bookings from the database.
-        </p>
-
-        <div className="mt-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
           <Link
             href="/modules/booking/new"
             className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
@@ -86,37 +74,24 @@ export default async function BookingListPage({
             New booking
           </Link>
         </div>
+
+        <div
+          className="mt-6 rounded-lg border bg-red-50 p-4 text-sm text-red-700"
+          role="status"
+        >
+          Failed to load bookings from the database.
+        </div>
       </main>
     );
   }
 
   return (
     <main className="mx-auto max-w-5xl p-6">
-      {/* Toast styles */}
-      <style>{`
-        .toast {
-          position: fixed;
-          right: 16px;
-          bottom: 16px;
-          max-width: 360px;
-          border-radius: 12px;
-          padding: 12px 14px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.12);
-          animation: slideIn 120ms ease-out;
-        }
-        .toast-title { font-weight: 600; margin-bottom: 2px; }
-        .toast-desc { font-size: 0.875rem; }
-        .toast-success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
-        .toast-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
-        .toast a { text-decoration: underline; }
-        @keyframes slideIn {
-          from { transform: translateY(8px); opacity: 0; }
-          to { transform: translateY(0); opacity: 1; }
-        }
-      `}</style>
+      {/* a11y live region for success/error messages */}
+      <div className="sr-only" aria-live="polite" />
 
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Bookings</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
         <Link
           href="/modules/booking/new"
           className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
@@ -125,75 +100,83 @@ export default async function BookingListPage({
         </Link>
       </div>
 
-      {/* Toasts */}
+      {/* Toasts (non-interactive in Server Component) */}
       {created && (
-        <div className="toast toast-success">
-          <div className="toast-title">Booking created</div>
-          <div className="toast-desc">Booking created successfully.</div>
-          <div className="mt-1 text-xs">
-            <Link href="/modules/booking">×</Link>
+        <div className="mt-4 rounded-lg border bg-green-50 p-4" role="status">
+          <div className="text-sm font-medium text-green-800">
+            Booking created
+          </div>
+          <div className="text-sm text-green-700">
+            Booking created successfully.
           </div>
         </div>
       )}
-
       {updated && (
-        <div className="toast toast-success">
-          <div className="toast-title">Booking updated</div>
-          <div className="toast-desc">Booking updated successfully.</div>
-          <div className="mt-1 text-xs">
-            <Link href="/modules/booking">×</Link>
+        <div className="mt-4 rounded-lg border bg-green-50 p-4" role="status">
+          <div className="text-sm font-medium text-green-800">
+            Booking updated
+          </div>
+          <div className="text-sm text-green-700">
+            Booking updated successfully.
           </div>
         </div>
       )}
-
       {errorMsg && (
-        <div className="toast toast-error">
-          <div className="toast-title">Something went wrong</div>
-          <div className="toast-desc">{errorMsg}</div>
-          <div className="mt-1 text-xs">
-            <Link href="/modules/booking">×</Link>
+        <div className="mt-4 rounded-lg border bg-red-50 p-4" role="status">
+          <div className="text-sm font-medium text-red-800">
+            Something went wrong
           </div>
+          <div className="text-sm text-red-700">{errorMsg}</div>
         </div>
       )}
 
       {/* Empty state vs table */}
       {!bookings || bookings.length === 0 ? (
-        <div className="rounded-xl border p-6">
+        <div className="mt-8 rounded-lg border p-6 text-center">
           <p className="text-sm text-gray-600">No bookings yet.</p>
-          <div className="mt-3">
-            <Link href="/modules/booking/new" className="text-sm underline">
-              Create your first booking
-            </Link>
-          </div>
+          <Link
+            href="/modules/booking/new"
+            className="mt-3 inline-block rounded-lg border px-4 py-2 text-sm"
+          >
+            Create your first booking
+          </Link>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-xl border">
+        <div className="mt-6 overflow-hidden rounded-lg border">
           <table className="min-w-full text-sm">
-            <thead>
-              <tr className="border-b bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-600">
-                <th className="px-4 py-3">Subject</th>
-                <th className="px-4 py-3">Expert</th>
-                <th className="px-4 py-3">Appearance</th>
-                <th className="px-4 py-3">Start</th>
+            <thead className="bg-gray-50">
+              <tr className="text-left">
+                <th className="px-4 py-2 font-medium">Subject</th>
+                <th className="px-4 py-2 font-medium">Expert</th>
+                <th className="px-4 py-2 font-medium">Appearance</th>
+                <th className="px-4 py-2 font-medium">Start</th>
+                <th className="px-4 py-2 font-medium"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y">
               {bookings.map((b) => (
-                <tr key={b.id} className="border-b last:border-0">
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/modules/booking/${b.id}`}
-                      className="font-medium underline"
-                    >
-                      {b.subject || "—"}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3">{b.expertName || "—"}</td>
-                  <td className="px-4 py-3">
+                <tr key={b.id}>
+                  <td className="px-4 py-2">{b.subject || "—"}</td>
+                  <td className="px-4 py-2">{b.expertName || "—"}</td>
+                  <td className="px-4 py-2">
                     {b.appearanceType === "ONLINE" ? "Online" : "In-person"}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-2">
                     {formatLocalDateTime(b.startAt)}
+                  </td>
+                  <td className="px-4 py-2 text-right">
+                    <Link
+                      href={`/modules/booking/${b.id}`}
+                      className="rounded-lg border px-3 py-1 text-xs"
+                    >
+                      View
+                    </Link>
+                    <Link
+                      href={`/modules/booking/${b.id}/edit`}
+                      className="ml-2 rounded-lg border px-3 py-1 text-xs"
+                    >
+                      Edit
+                    </Link>
                   </td>
                 </tr>
               ))}

@@ -1,18 +1,12 @@
 // src/app/api/bookings/[id]/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { PrismaClient, AppearanceType } from "@prisma/client";
+import { AppearanceType } from "@prisma/client";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../auth/[...nextauth]/route";
 
-// Prisma singleton (like elsewhere)
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+// ✅ Use centralized Prisma singleton (no local new PrismaClient)
+import prisma from "../../../../lib/prisma";
 
 // ---- Validation schema (all fields optional; we only update provided ones)
 const EditSchema = z
@@ -23,6 +17,7 @@ const EditSchema = z
       .min(2, "Subject too short")
       .max(300, "Subject too long")
       .optional(),
+
     // time
     startAt: z
       .preprocess((v) => {
@@ -96,15 +91,12 @@ export async function PATCH(
   // Build data object with only provided keys
   const data: any = {};
   const v = parsed.data;
-
   if (v.subject !== undefined) data.subject = v.subject;
   if (v.startAt !== undefined) data.startAt = v.startAt;
   if (v.durationMins !== undefined) data.durationMins = v.durationMins;
-
   if (v.appearanceType !== undefined) data.appearanceType = v.appearanceType;
   if (v.locationName !== undefined) data.locationName = v.locationName;
   if (v.locationUrl !== undefined) data.locationUrl = v.locationUrl;
-
   if (v.programName !== undefined) data.programName = v.programName;
   if (v.hostName !== undefined) data.hostName = v.hostName;
   if (v.talkingPoints !== undefined) data.talkingPoints = v.talkingPoints;
@@ -114,7 +106,6 @@ export async function PATCH(
       where: { id: bookingId },
       data,
     });
-
     return NextResponse.json({ booking: updated }, { status: 200 });
   } catch (e: any) {
     // Not found or other DB error
