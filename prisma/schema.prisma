@@ -1,12 +1,12 @@
 // prisma/schema.prisma
-// Tenancy foundation + Org settings shell + existing Booking fields (non-breaking)
+// Tenancy foundation + Org settings + Expert exclusivity + Booking.expert FK (non-breaking)
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"         // Reads from DATABASE_URL in .env
+  provider = "postgresql" // Reads from DATABASE_URL in .env
   url      = env("DATABASE_URL")
 }
 
@@ -18,14 +18,14 @@ enum AppearanceType {
   ONLINE
 }
 
-/// Booking workflow status (kept minimal to avoid breaking existing flows)
+/// Booking workflow status (kept minimal)
 enum BookingStatus {
   PENDING
   CONFIRMED
   CANCELLED
 }
 
-/// Organization/user roles for tenancy & permissions (product-aligned)
+/// Organization/user roles for tenancy & permissions
 enum Role {
   OWNER
   ADMIN
@@ -33,57 +33,67 @@ enum Role {
   EXPERT
 }
 
+/// Expert public visibility & exclusivity
+enum ExpertStatus {
+  PUBLIC
+  EXCLUSIVE
+}
+
 /** ===== Core Tenancy Models ===== **/
 
 /// Organizations (newsrooms or companies)
 model Organization {
-  id           String                   @id @default(cuid())
-  name         String                   @db.VarChar(200)
-  createdAt    DateTime                 @default(now())
-  updatedAt    DateTime                 @updatedAt
+  id               String      @id @default(cuid())
+  name             String      @db.VarChar(200)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
-  // Settings (shell) — one row per org
-  settings     OrgSettings?
+  // Settings (one row per org)
+  settings         OrgSettings?
 
   // Tenancy relations
-  memberships  OrganizationMembership[]
-  // Reverse side of User.activeOrg
-  activeUsers  User[]                   @relation("ActiveOrg")
+  memberships      OrganizationMembership[]
+
+  // Reverse side of User.activeOrg (legacy/optional UI context)
+  activeUsers      User[]      @relation("ActiveOrg")
+
+  // Experts exclusively attached to this org (when exclusive)
+  exclusiveExperts User[]      @relation("ExclusiveOrg")
 
   // Bookings scoped to an org
-  bookings     Booking[]
+  bookings         Booking[]
 }
 
 /// DB-backed org settings (shell). Controls visibility/behaviour in UI.
 model OrgSettings {
-  id               String       @id @default(cuid())
-  orgId            String       @unique
-  organization     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id                String        @id @default(cuid())
+  orgId             String        @unique
+  organization      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // Field visibility toggles (MVP)
-  showProgramName  Boolean      @default(true)
-  showHostName     Boolean      @default(true)
-  showTalkingPoints Boolean     @default(true)
+  showProgramName   Boolean       @default(true)
+  showHostName      Boolean       @default(true)
+  showTalkingPoints Boolean       @default(true)
 
   // Appearance type allowlist (MVP)
-  allowInPerson    Boolean      @default(true)
-  allowOnline      Boolean      @default(true)
+  allowInPerson     Boolean       @default(true)
+  allowOnline       Boolean       @default(true)
 
   // Audit
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 }
 
 /// User ↔ Organization membership with role
 model OrganizationMembership {
-  id           String       @id @default(cuid())
+  id           String   @id @default(cuid())
   userId       String
   orgId        String
   role         Role
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@unique([userId, orgId])
@@ -91,59 +101,72 @@ model OrganizationMembership {
   @@index([userId])
 }
 
-/** ===== App Models (kept compatible) ===== **/
+/** ===== App Models ===== **/
 
-/// Application user (local credentials auth)
+/// Application user
 model User {
-  id             String                    @id @default(cuid())
-  email          String                    @unique @db.VarChar(320)
-  name           String?                   @db.VarChar(200)
+  id               String                @id @default(cuid())
+  email            String                @unique @db.VarChar(320)
+  name             String?               @db.VarChar(200)
+
   // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword String                    @db.VarChar(255)
+  hashedPassword   String                @db.VarChar(255)
 
-  // Optional “active org” for scoping the UI/session (switcher uses this)
-  activeOrgId    String?
-  activeOrg      Organization?             @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
-
-  // Tenancy memberships
-  memberships    OrganizationMembership[]
-
-  createdAt      DateTime                  @default(now())
-  updatedAt      DateTime                  @updatedAt
-
+  // ---- Legacy UI scoping (now deprecated in product; kept to avoid breaking code) ----
+  activeOrgId      String?
+  activeOrg        Organization?         @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
   @@index([activeOrgId])
+
+  // Tenancy memberships (kept for Owner/Producer; product now disallows multi-org, to be enforced in app)
+  memberships      OrganizationMembership[]
+
+  // ---- Expert visibility/exclusivity (new) ----
+  expertStatus     ExpertStatus?         @default(PUBLIC)
+  exclusiveOrgId   String?
+  exclusiveOrg     Organization?         @relation("ExclusiveOrg", fields: [exclusiveOrgId], references: [id], onDelete: SetNull)
+
+  // Back-reference for bookings targeting this expert (needed by Prisma)
+  bookingsAsExpert Booking[]             @relation("ExpertBookings")
+
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 }
 
-/// Bookings table (current UI fields; org scope optional for backwards compat)
+/// Bookings table (current UI fields; org-scoped)
 model Booking {
-  id            String         @id @default(cuid())
-  subject       String         @db.VarChar(300)
+  id             String         @id @default(cuid())
+  subject        String         @db.VarChar(300)
 
-  // NOTE: these names are kept to avoid breaking current UI/routes
-  expertName    String         @db.VarChar(200)
-  newsroomName  String         @db.VarChar(200)
+  // NOTE: legacy expert string kept temporarily; will be removed after FK adoption
+  expertName     String         @db.VarChar(200)
 
+  newsroomName   String         @db.VarChar(200)
   appearanceType AppearanceType
-  status        BookingStatus  @default(PENDING)
-  startAt       DateTime
-  durationMins  Int
+  status         BookingStatus  @default(PENDING)
+  startAt        DateTime
+  durationMins   Int
 
   // Optional location fields
-  locationName  String?        @db.VarChar(300)
-  locationUrl   String?        @db.Text
+  locationName   String?        @db.VarChar(300)
+  locationUrl    String?        @db.Text
 
   // Optional editorial extras (visibility controlled by OrgSettings)
-  programName   String?        @db.VarChar(200)
-  hostName      String?        @db.VarChar(200)
-  talkingPoints String?        @db.Text
+  programName    String?        @db.VarChar(200)
+  hostName       String?        @db.VarChar(200)
+  talkingPoints  String?        @db.Text
 
-  // Org scope (we’ll seed with orgId; keep optional to not break existing data)
-  orgId         String?
-  organization  Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  // Org scope
+  orgId          String?
+  organization   Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  // ---- Expert FK (new; optional for now, to be backfilled) ----
+  expertUserId   String?
+  expert         User?          @relation("ExpertBookings", fields: [expertUserId], references: [id], onDelete: SetNull)
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   @@index([orgId])
   @@index([startAt])
+  @@index([expertUserId])
 }

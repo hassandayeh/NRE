@@ -1,4 +1,3 @@
-// src/app/api/bookings/route.ts
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { getServerSession } from "next-auth";
@@ -11,17 +10,17 @@ const TENANCY_ON = process.env.TENANCY_ENFORCED !== "false";
 
 async function getAuthContext() {
   const session = await getServerSession(authOptions);
-  const user = session?.user as any | undefined;
+  const email = session?.user?.email as string | undefined;
 
-  const email = user?.email as string | undefined;
   const dbUser = email
     ? await prisma.user.findUnique({
         where: { email },
-        select: { id: true, activeOrgId: true },
+        select: { id: true, activeOrgId: true, name: true },
       })
     : null;
 
   const userId = dbUser?.id ?? null;
+  const userName = (dbUser?.name as string | undefined) ?? undefined;
   const activeOrgId = (dbUser?.activeOrgId as string | null) ?? null;
 
   const memberships = userId
@@ -35,20 +34,12 @@ async function getAuthContext() {
   for (const m of memberships) rolesByOrg.set(m.orgId, m.role as Role);
 
   return {
-    session,
-    user,
     userId,
+    userName,
     activeOrgId,
-    memberships,
     rolesByOrg,
     isSignedIn: !!userId,
   };
-}
-
-function isNewsroomStaff(rolesByOrg: Map<string, Role>, orgId: string | null) {
-  if (!orgId) return false;
-  const role = rolesByOrg.get(orgId);
-  return role === "OWNER" || role === "PRODUCER";
 }
 
 function firstProducerOrg(rolesByOrg: Map<string, Role>): string | null {
@@ -58,40 +49,33 @@ function firstProducerOrg(rolesByOrg: Map<string, Role>): string | null {
   return null;
 }
 
-function isExpert(rolesByOrg: Map<string, Role>) {
-  for (const [, role] of rolesByOrg) if (role === "EXPERT") return true;
-  return false;
-}
-
 function coerceAppearance(val: unknown): Appearance | null {
   if (typeof val !== "string") return null;
   const up = val.toUpperCase().replace("-", "_");
   return up === "ONLINE" || up === "IN_PERSON" ? (up as Appearance) : null;
 }
-
 function asTrimmed(val: unknown): string | undefined {
   if (typeof val !== "string") return undefined;
   const t = val.trim();
   return t.length ? t : "";
 }
-
 function coerceISODate(val: unknown): Date | null {
   if (typeof val !== "string") return null;
   const d = new Date(val);
   return isNaN(d.getTime()) ? null : d;
 }
-
 function coerceInt(val: unknown): number | null {
   const n =
     typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
   return Number.isFinite(n) ? n : null;
 }
 
-// ---------- GET /api/bookings ----------
+// ---------- GET ----------
 export async function GET() {
   try {
-    const { isSignedIn, user, activeOrgId, rolesByOrg, memberships } =
+    const { isSignedIn, userName, userId, activeOrgId, rolesByOrg } =
       await getAuthContext();
+
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -108,26 +92,24 @@ export async function GET() {
       return NextResponse.json({ ok: true, bookings }, { status: 200 });
     }
 
-    const expertName = (user?.name as string | undefined) ?? "__";
-    const expertOrgIds = memberships
-      .filter((m) => m.role === "EXPERT")
-      .map((m) => m.orgId);
+    // No org switcher anymore → derive staff org from membership when activeOrgId is null
+    const staffOrgId = activeOrgId ?? firstProducerOrg(rolesByOrg);
 
-    if (isNewsroomStaff(rolesByOrg, activeOrgId)) {
+    if (staffOrgId) {
+      // Staff view → list by their org
       bookings = await prisma.booking.findMany({
-        where: { orgId: activeOrgId ?? undefined },
-        orderBy: [{ startAt: "asc" }],
-      });
-    } else if (isExpert(rolesByOrg)) {
-      bookings = await prisma.booking.findMany({
-        where: {
-          orgId: { in: expertOrgIds.length ? expertOrgIds : ["__none__"] },
-          expertName: expertName,
-        },
+        where: { orgId: staffOrgId },
         orderBy: [{ startAt: "asc" }],
       });
     } else {
-      bookings = [];
+      // Expert view → return bookings by FK or (legacy) by name using a small SQL
+      const rows = await prisma.$queryRaw<Booking[]>`
+        SELECT * FROM "Booking"
+        WHERE ("expertUserId" = ${userId}::text)
+           OR ("expertName" = ${userName ?? ""})
+        ORDER BY "startAt" ASC
+      `;
+      bookings = rows as Booking[];
     }
 
     return NextResponse.json({ ok: true, bookings }, { status: 200 });
@@ -140,10 +122,11 @@ export async function GET() {
   }
 }
 
-// ---------- POST /api/bookings ----------
+// ---------- POST ----------
 export async function POST(req: Request) {
   try {
     const { isSignedIn, activeOrgId, rolesByOrg } = await getAuthContext();
+
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -151,47 +134,31 @@ export async function POST(req: Request) {
       );
     }
 
-    // Resolve the org we will create the booking under
-    let resolvedOrgId: string | null = activeOrgId ?? null;
-
-    if (TENANCY_ON) {
-      // Only newsroom staff can create
-      if (!isNewsroomStaff(rolesByOrg, activeOrgId)) {
-        const fallbackOrg = firstProducerOrg(rolesByOrg);
-        if (!fallbackOrg) {
-          return NextResponse.json(
-            { ok: false, error: "Forbidden" },
-            { status: 403 }
-          );
-        }
-        resolvedOrgId = fallbackOrg;
-      }
-      if (!resolvedOrgId) {
-        return NextResponse.json(
-          { ok: false, error: "No active organization selected." },
-          { status: 400 }
-        );
-      }
-    } else {
-      resolvedOrgId = activeOrgId ?? resolvedOrgId;
+    // Resolve org (staff-only create; no org switching)
+    let resolvedOrgId: string | null =
+      activeOrgId ?? firstProducerOrg(rolesByOrg);
+    if (!resolvedOrgId) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
     }
 
     const body = await req.json().catch(() => ({} as any));
 
-    // Accept aliases from UI and map them
     const subject = asTrimmed(body.subject);
     const newsroomName = asTrimmed(body.newsroomName);
-    const expertName = asTrimmed(body.expertName ?? body.guestName); // alias
+    const expertUserIdInput = asTrimmed(body.expertUserId);
+    const expertNameInput = asTrimmed(body.expertName ?? body.guestName);
     const appearanceType = coerceAppearance(body.appearanceType);
     const startAt = coerceISODate(body.startAt);
     const durationMins = coerceInt(body.durationMins);
     const locationName = asTrimmed(body.locationName);
-    const locationUrl = asTrimmed(body.locationUrl ?? body.meetingLink); // alias
+    const locationUrl = asTrimmed(body.locationUrl ?? body.meetingLink);
     const programName = asTrimmed(body.programName);
     const hostName = asTrimmed(body.hostName);
     const talkingPoints = asTrimmed(body.talkingPoints);
 
-    // Field-level validations
     if (!subject)
       return NextResponse.json(
         { ok: false, error: "Subject is required." },
@@ -202,7 +169,7 @@ export async function POST(req: Request) {
         { ok: false, error: "Newsroom name is required." },
         { status: 400 }
       );
-    if (!expertName)
+    if (!expertUserIdInput && !expertNameInput)
       return NextResponse.json(
         { ok: false, error: "Guest name (expert) is required." },
         { status: 400 }
@@ -223,11 +190,40 @@ export async function POST(req: Request) {
         { status: 400 }
       );
 
+    // Resolve expert (FK preferred, fallback by name)
+    const expert =
+      (expertUserIdInput
+        ? await prisma.user.findUnique({ where: { id: expertUserIdInput } })
+        : null) ??
+      (expertNameInput
+        ? await prisma.user.findFirst({ where: { name: expertNameInput } })
+        : null);
+
+    if (!expert) {
+      return NextResponse.json(
+        { ok: false, error: "Expert not found." },
+        { status: 404 }
+      );
+    }
+
+    // Exclusivity: PUBLIC allowed; EXCLUSIVE only if same org
+    const expStatus = (expert.expertStatus ?? "PUBLIC") as
+      | "PUBLIC"
+      | "EXCLUSIVE";
+    if (expStatus === "EXCLUSIVE" && expert.exclusiveOrgId !== resolvedOrgId) {
+      return NextResponse.json(
+        { ok: false, error: "Expert is exclusive to another organization." },
+        { status: 403 }
+      );
+    }
+
+    const expertNameFinal = expert.name ?? expertNameInput ?? "Expert";
+
     const created = await prisma.booking.create({
       data: {
         subject,
         newsroomName,
-        expertName,
+        expertName: expertNameFinal, // keep legacy label for now
         appearanceType,
         startAt,
         durationMins,
@@ -236,12 +232,16 @@ export async function POST(req: Request) {
         programName: programName ?? "",
         hostName: hostName ?? "",
         talkingPoints: talkingPoints ?? "",
-        // relation connect instead of orgId scalar
-        organization: resolvedOrgId
-          ? { connect: { id: resolvedOrgId } }
-          : undefined,
+        organization: { connect: { id: resolvedOrgId } },
       },
     });
+
+    // Update FK via raw to avoid Prisma type churn
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Booking" SET "expertUserId" = $1 WHERE "id" = $2`,
+      expert.id,
+      created.id
+    );
 
     revalidateTag("bookings");
     return NextResponse.json({ ok: true, booking: created }, { status: 201 });
