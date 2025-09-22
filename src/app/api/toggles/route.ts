@@ -1,107 +1,134 @@
-import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+// src/app/api/toggles/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "../../../lib/prisma";
 import { z } from "zod";
 
-const prisma = new PrismaClient();
+/**
+ * Uses the Prisma model from schema.prisma:
+ * model OrgSettings {
+ *   id                String   @id @default(cuid())
+ *   orgId             String   @unique
+ *   showProgramName   Boolean  @default(true)
+ *   showHostName      Boolean  @default(true)
+ *   showTalkingPoints Boolean  @default(true)
+ *   allowInPerson     Boolean  @default(true)
+ *   allowOnline       Boolean  @default(true)
+ *   createdAt         DateTime @default(now())
+ *   updatedAt         DateTime @updatedAt
+ * }
+ */
 
-// Small helper: get or create the single org and its toggle row
-async function ensureOrgAndToggles() {
-  // 1) Find first org
-  let org = await prisma.organization.findFirst();
-  if (!org) {
-    org = await prisma.organization.create({
-      data: { name: "Default Organization" },
-    });
+// --- Validation schemas ---
+const orgIdParam = z.object({ orgId: z.string().min(1, "orgId is required") });
+
+const settingsPatchSchema = z
+  .object({
+    showProgramName: z.boolean().optional(),
+    showHostName: z.boolean().optional(),
+    showTalkingPoints: z.boolean().optional(),
+    allowInPerson: z.boolean().optional(),
+    allowOnline: z.boolean().optional(),
+  })
+  .strict();
+
+/** Helpers */
+function getOrgId(req: NextRequest): string | null {
+  const url = new URL(req.url);
+  const fromQuery = url.searchParams.get("orgId");
+  return fromQuery ?? null;
+}
+
+function json(data: unknown, init?: number | ResponseInit) {
+  const normalized: ResponseInit | undefined =
+    typeof init === "number" ? { status: init } : init;
+  return NextResponse.json(data, normalized);
+}
+
+// --- GET /api/toggles?orgId=... ---
+// Returns settings for an org; auto-creates the row with defaults if it doesn't exist.
+export async function GET(req: NextRequest) {
+  const orgId = getOrgId(req);
+  const parsed = orgIdParam.safeParse({ orgId });
+  if (!parsed.success) {
+    return json({ error: parsed.error.flatten() }, 400);
   }
 
-  // 2) Ensure toggles row (unique per org)
-  let toggles = await prisma.orgFeatureToggle.findUnique({
-    where: { orgId: org.id },
+  const existing = await prisma.orgSettings.findUnique({
+    where: { orgId: parsed.data.orgId },
   });
-  if (!toggles) {
-    toggles = await prisma.orgFeatureToggle.create({
-      data: { orgId: org.id }, // defaults are true per schema
-    });
-  }
 
-  return { org, toggles };
+  if (existing) return json(existing);
+
+  const created = await prisma.orgSettings.create({
+    data: { orgId: parsed.data.orgId },
+  });
+
+  return json(created, 201);
 }
 
-export async function GET() {
-  try {
-    const { toggles } = await ensureOrgAndToggles();
-
-    return NextResponse.json({
-      toggles: {
-        showProgramName: toggles.showProgramName,
-        showHostName: toggles.showHostName,
-        showTalkingPoints: toggles.showTalkingPoints,
-        orgId: toggles.orgId,
-        id: toggles.id,
-      },
-    });
-  } catch (err) {
-    console.error("GET /api/toggles error:", err);
-    return NextResponse.json(
-      { error: "Failed to load toggles" },
-      { status: 500 }
-    );
+// --- POST /api/toggles?orgId=... ---
+// Idempotent initialization/upsert (useful for first-time setup).
+export async function POST(req: NextRequest) {
+  const orgId = getOrgId(req);
+  const parsed = orgIdParam.safeParse({ orgId });
+  if (!parsed.success) {
+    return json({ error: parsed.error.flatten() }, 400);
   }
+
+  let body: unknown = {};
+  try {
+    body = await req.json();
+  } catch {
+    // empty body is fine
+  }
+
+  const overrides = settingsPatchSchema.safeParse(body);
+  if (!overrides.success) {
+    return json({ error: overrides.error.flatten() }, 400);
+  }
+
+  const settings = await prisma.orgSettings.upsert({
+    where: { orgId: parsed.data.orgId },
+    create: { orgId: parsed.data.orgId, ...overrides.data },
+    update: { ...overrides.data },
+  });
+
+  return json(settings, 201);
 }
 
-const updateSchema = z.object({
-  showProgramName: z.boolean().optional(),
-  showHostName: z.boolean().optional(),
-  showTalkingPoints: z.boolean().optional(),
-});
+// --- PATCH /api/toggles?orgId=... ---
+// Partial update of any subset of settings.
+export async function PATCH(req: NextRequest) {
+  const orgId = getOrgId(req);
+  const parsed = orgIdParam.safeParse({ orgId });
+  if (!parsed.success) {
+    return json({ error: parsed.error.flatten() }, 400);
+  }
 
-export async function PUT(req: Request) {
-  try {
-    const body = await req.json().catch(() => ({}));
-    const parsed = updateSchema.safeParse(body);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      const path = issue.path.join(".");
-      return NextResponse.json(
-        { error: `${path || "payload"}: ${issue.message}` },
-        { status: 400 }
-      );
-    }
+  const payload = (await req.json().catch(() => ({}))) as unknown;
+  const check = settingsPatchSchema.safeParse(payload);
+  if (!check.success) {
+    return json({ error: check.error.flatten() }, 400);
+  }
 
-    const { org, toggles } = await ensureOrgAndToggles();
+  const existing = await prisma.orgSettings.findUnique({
+    where: { orgId: parsed.data.orgId },
+  });
 
-    const updated = await prisma.orgFeatureToggle.update({
-      where: { orgId: org.id },
-      data: {
-        // Only update keys provided
-        ...(parsed.data.showProgramName !== undefined && {
-          showProgramName: parsed.data.showProgramName,
-        }),
-        ...(parsed.data.showHostName !== undefined && {
-          showHostName: parsed.data.showHostName,
-        }),
-        ...(parsed.data.showTalkingPoints !== undefined && {
-          showTalkingPoints: parsed.data.showTalkingPoints,
-        }),
+  if (!existing) {
+    return json(
+      {
+        error:
+          "OrgSettings not found for this orgId. Call POST to initialize first.",
       },
-    });
-
-    // Optional: reflect changes to <body data-*> by reading these at render time.
-    return NextResponse.json({
-      ok: true,
-      toggles: {
-        showProgramName: updated.showProgramName,
-        showHostName: updated.showHostName,
-        showTalkingPoints: updated.showTalkingPoints,
-        orgId: updated.orgId,
-        id: updated.id,
-      },
-    });
-  } catch (err) {
-    console.error("PUT /api/toggles error:", err);
-    return NextResponse.json(
-      { error: "Failed to update toggles" },
-      { status: 500 }
+      404
     );
   }
+
+  const updated = await prisma.orgSettings.update({
+    where: { orgId: parsed.data.orgId },
+    data: check.data,
+  });
+
+  return json(updated);
 }
