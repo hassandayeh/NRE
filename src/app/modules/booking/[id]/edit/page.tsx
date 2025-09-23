@@ -1,8 +1,9 @@
 "use client"; // src/app/modules/booking/[id]/edit/page.tsx
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import Button from "../../../../../components/ui/Button";
 
 export const dynamic = "force-dynamic";
 
@@ -24,20 +25,6 @@ type Booking = {
   newsroomName?: string | null;
 };
 
-type Role = "OWNER" | "ADMIN" | "PRODUCER" | "EXPERT";
-
-type WhoAmI = {
-  sessionEmail: string | null;
-  user: { id: string; activeOrgId: string | null } | null;
-  memberships: Array<{ orgId: string; role: Role }>;
-  activeOrgId: string | null;
-  bookingOrgId: string | null;
-  // NOTE: we no longer rely on this single membership to infer edit rights
-  staffMembership: { orgId: string; role: "OWNER" | "PRODUCER" } | null;
-};
-
-const STAFF_ROLES: ReadonlySet<Role> = new Set(["OWNER", "ADMIN", "PRODUCER"]);
-
 function pad(n: number) {
   return `${n}`.padStart(2, "0");
 }
@@ -58,11 +45,11 @@ export default function EditBookingPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // NEW: field-level errors (we only map Duration for now)
+  // Field-level errors (we only map Duration for now)
   const [fieldErrors, setFieldErrors] = useState<{ durationMins?: string }>({});
 
   const [booking, setBooking] = useState<Booking | null>(null);
-  const [who, setWho] = useState<WhoAmI | null>(null);
+  const [canEdit, setCanEdit] = useState<boolean>(false);
 
   const [subject, setSubject] = useState("");
   const [startAtLocal, setStartAtLocal] = useState("");
@@ -75,37 +62,17 @@ export default function EditBookingPage() {
   const [hostName, setHostName] = useState("");
   const [talkingPoints, setTalkingPoints] = useState("");
 
-  // Compute staff-ness from ALL memberships; ignore activeOrgId entirely.
-  const isNewsroomStaffAnywhere = useMemo(() => {
-    if (!who?.memberships) return false;
-    return who.memberships.some((m) => STAFF_ROLES.has(m.role));
-  }, [who]);
-
-  const isStaffOfBookingOrg = useMemo(() => {
-    if (!who?.memberships || !booking?.orgId) return false;
-    return who.memberships.some(
-      (m) => STAFF_ROLES.has(m.role) && m.orgId === booking.orgId
-    );
-  }, [who, booking]);
-
-  const canEdit = isStaffOfBookingOrg; // single source of truth for UI editability
-
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
         setLoading(true);
         setLoadError(null);
-        const [bRes, wRes] = await Promise.all([
-          fetch(`/api/bookings/${id}`, {
-            cache: "no-store",
-            credentials: "include",
-          }),
-          fetch(`/api/whoami?bookingId=${id}`, {
-            cache: "no-store",
-            credentials: "include",
-          }),
-        ]);
+
+        const bRes = await fetch(`/api/bookings/${id}`, {
+          cache: "no-store",
+          credentials: "include",
+        });
 
         if (!bRes.ok) {
           if (bRes.status === 401)
@@ -114,13 +81,16 @@ export default function EditBookingPage() {
           throw new Error("Failed to load booking.");
         }
 
-        const bJson = (await bRes.json()) as { ok: boolean; booking: Booking };
-        const wJson = wRes.ok ? ((await wRes.json()) as WhoAmI) : null;
+        const bJson = (await bRes.json()) as {
+          ok: boolean;
+          booking: Booking;
+          canEdit?: boolean;
+        };
 
         if (cancelled) return;
 
         setBooking(bJson.booking);
-        setWho(wJson);
+        setCanEdit(Boolean(bJson.canEdit)); // default false if omitted
         setSubject(bJson.booking.subject ?? "");
         setStartAtLocal(toLocalInputValue(bJson.booking.startAt));
         setDurationMins(bJson.booking.durationMins ?? 30);
@@ -145,7 +115,7 @@ export default function EditBookingPage() {
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveError(null);
-    setFieldErrors({}); // clear field-level errors before submit
+    setFieldErrors({});
     setSaving(true);
 
     try {
@@ -171,16 +141,13 @@ export default function EditBookingPage() {
           const j = (await res.json().catch(() => ({}))) as { error?: string };
           const msg = j?.error || "Invalid data.";
 
-          // Map known duration errors to field-level inline errors
           if (
             msg === "durationMins must be > 0" ||
             msg === "durationMins must be a number"
           ) {
             setFieldErrors({ durationMins: msg });
-            return; // handled → don't show page-level error
+            return; // handled inline
           }
-
-          // Unknown 400s fall back to page-level error
           throw new Error(msg);
         }
         if (res.status === 403)
@@ -191,7 +158,6 @@ export default function EditBookingPage() {
         throw new Error("Failed to update booking.");
       }
 
-      // Success → list with toast
       router.push("/modules/booking?updated=1");
     } catch (err: any) {
       setSaveError(err?.message || "Failed to update booking.");
@@ -239,9 +205,7 @@ export default function EditBookingPage() {
   }
 
   const readOnlyMessage = !canEdit
-    ? isNewsroomStaffAnywhere
-      ? "This booking belongs to a different organization. Only newsroom staff of the owning org can edit."
-      : "You’re viewing this booking as an Expert. Fields are read-only; only newsroom staff can make changes."
+    ? "Fields are read-only. Only newsroom staff of the owning organization can edit."
     : null;
 
   return (
@@ -408,18 +372,13 @@ export default function EditBookingPage() {
         )}
 
         <div className="flex items-center gap-3 pt-2">
-          <button
+          <Button
             type="submit"
             disabled={!canEdit || saving}
-            className={`rounded-md px-4 py-2 text-white ${
-              !canEdit || saving
-                ? "bg-gray-400"
-                : "bg-blue-600 hover:bg-blue-700"
-            }`}
             aria-disabled={!canEdit || saving}
           >
             {saving ? "Saving…" : "Save changes"}
-          </button>
+          </Button>
           <Link href="/modules/booking" className="text-gray-700 underline">
             Cancel
           </Link>
