@@ -51,9 +51,9 @@ const TENANCY_ON = process.env.TENANCY_ENFORCED !== "false";
  * 1) Try NextAuth session (getServerSession)
  * 2) Fallback to JWT (getToken) and hydrate minimal user from DB
  * Returns:
- *  - rolesByOrg: map of all memberships
- *  - staffOrgIds: all orgIds where user is OWNER/ADMIN/PRODUCER
- *  - activeOrgId: from session/user (may be null)
+ * - rolesByOrg: map of all memberships
+ * - staffOrgIds: all orgIds where user is OWNER/ADMIN/PRODUCER
+ * - activeOrgId: from session/user (may be null)
  */
 async function getAuthContext(request: Request) {
   // 1) Primary: session
@@ -65,14 +65,18 @@ async function getAuthContext(request: Request) {
       where: { userId },
       select: { orgId: true, role: true },
     });
+
     const rolesByOrg: RolesMap = new Map();
     const staffOrgIds: string[] = [];
+
     for (const m of memberships) {
       const role = m.role as Role;
       rolesByOrg.set(m.orgId, role);
-      if (role === "OWNER" || role === "ADMIN" || role === "PRODUCER")
+      if (role === "OWNER" || role === "ADMIN" || role === "PRODUCER") {
         staffOrgIds.push(m.orgId);
+      }
     }
+
     return { memberships, rolesByOrg, staffOrgIds, activeOrgId };
   };
 
@@ -80,12 +84,7 @@ async function getAuthContext(request: Request) {
     const activeOrgId: string | null =
       (sessionUser.activeOrgId as string | null) ?? null;
     const ctx = await hydrate(sessionUser.id, activeOrgId);
-    return {
-      session,
-      user: sessionUser,
-      ...ctx,
-      isSignedIn: true,
-    };
+    return { session, user: sessionUser, ...ctx, isSignedIn: true };
   }
 
   // 2) Fallback: JWT token (covers cases where getServerSession returns null)
@@ -105,12 +104,7 @@ async function getAuthContext(request: Request) {
 
     if (me) {
       const ctx = await hydrate(me.id, me.activeOrgId ?? null);
-      return {
-        session: null,
-        user: me,
-        ...ctx,
-        isSignedIn: true,
-      };
+      return { session: null, user: me, ...ctx, isSignedIn: true };
     }
   }
 
@@ -131,7 +125,11 @@ function hasAnyStaff(staffOrgIds: string[]) {
   return staffOrgIds.length > 0;
 }
 
-/** Guard: build a Prisma where clause for the booking id based on caller identity. */
+/**
+ * Guard: build a Prisma where clause for the booking id based on caller identity.
+ * - Staff: restrict by their staff orgs
+ * - Expert: restrict by assigned expert (temporary: name match until FK migration)
+ */
 function buildGuardedWhere(opts: {
   id: string;
   enforce: boolean;
@@ -139,6 +137,7 @@ function buildGuardedWhere(opts: {
   user: any | undefined;
 }) {
   const { id, enforce, staffOrgIds, user } = opts;
+
   if (!enforce) {
     return { id }; // dev escape hatch
   }
@@ -154,20 +153,14 @@ function buildGuardedWhere(opts: {
   return { id, expertName: userName };
 }
 
-/** Ensures expert is member of the booking's org (post-fetch check). */
-function assertExpertOrgMembership(
-  rolesByOrg: RolesMap,
-  booking: { orgId: string | null }
-) {
-  if (!booking.orgId) return false;
-  return rolesByOrg.has(booking.orgId);
-}
-
 /** Map body → prisma-safe update payload (whitelist + coercions + null normalization). */
 async function readUpdatePayload(req: Request): Promise<UpdatePayload> {
-  const body = await req.json().catch(() => ({} as any));
-  const raw: Record<string, any> = {};
+  const body = (await req.json().catch(() => ({} as any))) as Record<
+    string,
+    unknown
+  >;
 
+  const raw: Record<string, any> = {};
   for (const key of UPDATABLE_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(body, key)) {
       let v = (body as any)[key];
@@ -212,9 +205,8 @@ function validateUpdatePayload(data: UpdatePayload) {
 // ---------- GET /api/bookings/[id] ----------
 export async function GET(req: Request, { params }: Params) {
   try {
-    const { isSignedIn, user, rolesByOrg, staffOrgIds } = await getAuthContext(
-      req
-    );
+    const { isSignedIn, user, staffOrgIds } = await getAuthContext(req);
+
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -222,6 +214,7 @@ export async function GET(req: Request, { params }: Params) {
       );
     }
 
+    // Staff can read within their orgs; Experts can read only if assigned (via expertName)
     const where = buildGuardedWhere({
       id: params.id,
       enforce: TENANCY_ON,
@@ -229,16 +222,7 @@ export async function GET(req: Request, { params }: Params) {
       user,
     });
 
-    let booking = await prisma.booking.findFirst({ where });
-
-    // If expert path, enforce post-fetch org membership
-    if (TENANCY_ON && booking && !hasAnyStaff(staffOrgIds)) {
-      if (
-        !assertExpertOrgMembership(rolesByOrg, { orgId: booking.orgId ?? null })
-      ) {
-        booking = null;
-      }
-    }
+    const booking = await prisma.booking.findFirst({ where });
 
     if (!booking) {
       return NextResponse.json(
@@ -261,6 +245,7 @@ export async function GET(req: Request, { params }: Params) {
 export async function PATCH(req: Request, { params }: Params) {
   try {
     const { isSignedIn, staffOrgIds } = await getAuthContext(req);
+
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -321,6 +306,7 @@ export async function PUT(req: Request, ctx: Params) {
 export async function DELETE(req: Request, { params }: Params) {
   try {
     const { isSignedIn, staffOrgIds } = await getAuthContext(req);
+
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -345,6 +331,7 @@ export async function DELETE(req: Request, { params }: Params) {
         { status: 404 }
       );
     }
+
     if (
       TENANCY_ON &&
       (!existing.orgId || !staffOrgIds.includes(existing.orgId))
