@@ -54,15 +54,19 @@ export default function EditBookingPage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // NEW: field-level errors (we only map Duration for now)
+  const [fieldErrors, setFieldErrors] = useState<{ durationMins?: string }>({});
 
   const [booking, setBooking] = useState<Booking | null>(null);
   const [who, setWho] = useState<WhoAmI | null>(null);
 
   const [subject, setSubject] = useState("");
   const [startAtLocal, setStartAtLocal] = useState("");
-  const [durationMins, setDurationMins] = useState(30);
+  const [durationMins, setDurationMins] = useState<number>(30);
   const [appearanceType, setAppearanceType] =
     useState<AppearanceType>("ONLINE");
   const [locationName, setLocationName] = useState("");
@@ -71,7 +75,7 @@ export default function EditBookingPage() {
   const [hostName, setHostName] = useState("");
   const [talkingPoints, setTalkingPoints] = useState("");
 
-  // NEW: compute staff-ness from ALL memberships; ignore activeOrgId entirely.
+  // Compute staff-ness from ALL memberships; ignore activeOrgId entirely.
   const isNewsroomStaffAnywhere = useMemo(() => {
     if (!who?.memberships) return false;
     return who.memberships.some((m) => STAFF_ROLES.has(m.role));
@@ -92,7 +96,6 @@ export default function EditBookingPage() {
       try {
         setLoading(true);
         setLoadError(null);
-
         const [bRes, wRes] = await Promise.all([
           fetch(`/api/bookings/${id}`, {
             cache: "no-store",
@@ -118,7 +121,6 @@ export default function EditBookingPage() {
 
         setBooking(bJson.booking);
         setWho(wJson);
-
         setSubject(bJson.booking.subject ?? "");
         setStartAtLocal(toLocalInputValue(bJson.booking.startAt));
         setDurationMins(bJson.booking.durationMins ?? 30);
@@ -143,7 +145,9 @@ export default function EditBookingPage() {
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveError(null);
+    setFieldErrors({}); // clear field-level errors before submit
     setSaving(true);
+
     try {
       const res = await fetch(`/api/bookings/${id}`, {
         method: "PATCH",
@@ -164,8 +168,20 @@ export default function EditBookingPage() {
 
       if (!res.ok) {
         if (res.status === 400) {
-          const j = await res.json().catch(() => ({}));
-          throw new Error(j?.error || "Invalid data.");
+          const j = (await res.json().catch(() => ({}))) as { error?: string };
+          const msg = j?.error || "Invalid data.";
+
+          // Map known duration errors to field-level inline errors
+          if (
+            msg === "durationMins must be > 0" ||
+            msg === "durationMins must be a number"
+          ) {
+            setFieldErrors({ durationMins: msg });
+            return; // handled → don't show page-level error
+          }
+
+          // Unknown 400s fall back to page-level error
+          throw new Error(msg);
         }
         if (res.status === 403)
           throw new Error("You don’t have permission to edit this booking.");
@@ -187,16 +203,11 @@ export default function EditBookingPage() {
   if (loading) {
     return (
       <main className="mx-auto max-w-3xl p-6 space-y-4">
-        <Link
-          href="/modules/booking"
-          className="text-sm text-blue-700 underline"
-        >
+        <Link href="/modules/booking" className="text-sm underline">
           ← Back to bookings
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
-        <div className="rounded-md border border-gray-200 bg-white p-3">
-          Loading booking…
-        </div>
+        <h1 className="text-2xl font-semibold">Edit Booking</h1>
+        <p>Loading booking…</p>
       </main>
     );
   }
@@ -204,13 +215,10 @@ export default function EditBookingPage() {
   if (loadError) {
     return (
       <main className="mx-auto max-w-3xl p-6 space-y-4">
-        <Link
-          href="/modules/booking"
-          className="text-sm text-blue-700 underline"
-        >
+        <Link href="/modules/booking" className="text-sm underline">
           ← Back to bookings
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
+        <h1 className="text-2xl font-semibold">Edit Booking</h1>
         <div className="rounded-md border border-red-300 bg-red-50 p-3 text-red-800">
           {loadError}
         </div>
@@ -221,16 +229,11 @@ export default function EditBookingPage() {
   if (!booking) {
     return (
       <main className="mx-auto max-w-3xl p-6 space-y-4">
-        <Link
-          href="/modules/booking"
-          className="text-sm text-blue-700 underline"
-        >
+        <Link href="/modules/booking" className="text-sm underline">
           ← Back to bookings
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
-        <div className="rounded-md border border-red-300 bg-red-50 p-3 text-red-800">
-          Booking not found.
-        </div>
+        <h1 className="text-2xl font-semibold">Edit Booking</h1>
+        <p>Booking not found.</p>
       </main>
     );
   }
@@ -243,21 +246,24 @@ export default function EditBookingPage() {
 
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-4">
-      <Link href="/modules/booking" className="text-sm text-blue-700 underline">
+      <Link href="/modules/booking" className="text-sm underline">
         ← Back to bookings
       </Link>
-
-      <h1 className="text-2xl font-semibold tracking-tight">Edit Booking</h1>
+      <h1 className="text-2xl font-semibold">Edit Booking</h1>
 
       {!canEdit && readOnlyMessage && (
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
-          <strong>Read-only</strong> — {readOnlyMessage}
+        <div
+          role="status"
+          className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900"
+        >
+          <strong>Read-only — </strong>
+          {readOnlyMessage}
         </div>
       )}
 
-      <form className="space-y-4" onSubmit={onSave} noValidate>
+      <form onSubmit={onSave} className="space-y-4" noValidate>
         <label className="block">
-          <div className="mb-1 text-sm font-medium">Subject *</div>
+          <span className="mb-1 block text-sm font-medium">Subject *</span>
           <input
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
@@ -268,7 +274,9 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">Start date/time *</div>
+          <span className="mb-1 block text-sm font-medium">
+            Start date/time *
+          </span>
           <input
             type="datetime-local"
             value={startAtLocal}
@@ -280,48 +288,62 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">Duration (minutes) *</div>
+          <span className="mb-1 block text-sm font-medium">
+            Duration (minutes) *
+          </span>
           <input
             type="number"
+            inputMode="numeric"
             min={1}
-            value={durationMins}
+            value={Number.isFinite(durationMins) ? durationMins : 0}
             onChange={(e) => setDurationMins(Number(e.target.value || 0))}
             disabled={!canEdit || saving}
-            className="w-full rounded-md border px-3 py-2"
+            aria-invalid={fieldErrors.durationMins ? true : undefined}
+            aria-describedby={
+              fieldErrors.durationMins ? "duration-error" : undefined
+            }
+            className={`w-full rounded-md border px-3 py-2 ${
+              fieldErrors.durationMins ? "border-red-500" : ""
+            }`}
             required
           />
+          {fieldErrors.durationMins && (
+            <p id="duration-error" className="mt-1 text-sm text-red-600">
+              {fieldErrors.durationMins}
+            </p>
+          )}
         </label>
 
-        <fieldset className="block">
-          <legend className="mb-1 text-sm font-medium">Appearance Type</legend>
-          <div className="flex gap-4">
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                name="appearanceType"
-                checked={appearanceType === "ONLINE"}
-                onChange={() => setAppearanceType("ONLINE")}
-                disabled={!canEdit || saving}
-              />
-              <span>Online</span>
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input
-                type="radio"
-                name="appearanceType"
-                checked={appearanceType === "IN_PERSON"}
-                onChange={() => setAppearanceType("IN_PERSON")}
-                disabled={!canEdit || saving}
-              />
-              <span>In-person</span>
-            </label>
-          </div>
+        <fieldset className="space-y-2">
+          <legend className="mb-1 block text-sm font-medium">
+            Appearance Type
+          </legend>
+          <label className="mr-4 inline-flex items-center gap-2">
+            <input
+              type="radio"
+              name="appearanceType"
+              checked={appearanceType === "ONLINE"}
+              onChange={() => setAppearanceType("ONLINE")}
+              disabled={!canEdit || saving}
+            />
+            <span>Online</span>
+          </label>
+          <label className="inline-flex items-center gap-2">
+            <input
+              type="radio"
+              name="appearanceType"
+              checked={appearanceType === "IN_PERSON"}
+              onChange={() => setAppearanceType("IN_PERSON")}
+              disabled={!canEdit || saving}
+            />
+            <span>In-person</span>
+          </label>
         </fieldset>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">
+          <span className="mb-1 block text-sm font-medium">
             Location name (optional)
-          </div>
+          </span>
           <input
             value={locationName}
             onChange={(e) => setLocationName(e.target.value)}
@@ -331,9 +353,9 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">
+          <span className="mb-1 block text-sm font-medium">
             Location URL (optional)
-          </div>
+          </span>
           <input
             value={locationUrl}
             onChange={(e) => setLocationUrl(e.target.value)}
@@ -343,9 +365,9 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">
+          <span className="mb-1 block text-sm font-medium">
             Program name (optional)
-          </div>
+          </span>
           <input
             value={programName}
             onChange={(e) => setProgramName(e.target.value)}
@@ -355,7 +377,9 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">Host name (optional)</div>
+          <span className="mb-1 block text-sm font-medium">
+            Host name (optional)
+          </span>
           <input
             value={hostName}
             onChange={(e) => setHostName(e.target.value)}
@@ -365,14 +389,15 @@ export default function EditBookingPage() {
         </label>
 
         <label className="block">
-          <div className="mb-1 text-sm font-medium">
+          <span className="mb-1 block text-sm font-medium">
             Talking points (optional)
-          </div>
+          </span>
           <textarea
             value={talkingPoints}
             onChange={(e) => setTalkingPoints(e.target.value)}
             disabled={!canEdit || saving}
             className="w-full rounded-md border px-3 py-2"
+            rows={4}
           />
         </label>
 
