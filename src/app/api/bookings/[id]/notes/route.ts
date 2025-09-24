@@ -6,14 +6,14 @@ import {
   TENANCY_ON,
 } from "../../../../../lib/viewer";
 
-// Minimal role check for note creation (HOST+)
-function canPostNote(viewer: any, orgId: string | null | undefined) {
-  if (!viewer?.isSignedIn) return false;
-  const roles = ["OWNER", "ADMIN", "PRODUCER", "HOST"];
+const STAFF_ROLES = ["OWNER", "ADMIN", "PRODUCER", "HOST"] as const;
+
+function isStaffInOrg(viewer: any, orgId: string | null | undefined) {
   const ms = viewer?.memberships ?? viewer?.orgMemberships ?? [];
   return ms.some(
     (m: any) =>
-      (!TENANCY_ON || !orgId || m.orgId === orgId) && roles.includes(m.role)
+      (!TENANCY_ON || !orgId || m.orgId === orgId) &&
+      STAFF_ROLES.includes(m.role)
   );
 }
 
@@ -24,14 +24,14 @@ export async function GET(
 ) {
   try {
     const viewer = await resolveViewerFromRequest(req);
-    if (!viewer.isSignedIn) {
+    if (!viewer?.isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
         { status: 401 }
       );
     }
 
-    // Reuse the same read-where as the list/detail route
+    // Must be able to read the booking first (staff or guest)
     const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
     const booking = await prisma.booking.findFirst({
       where,
@@ -44,11 +44,49 @@ export async function GET(
       );
     }
 
-    const notes = await prisma.bookingNote.findMany({
-      where: { bookingId: booking.id },
-      orderBy: { createdAt: "asc" },
-      include: { author: { select: { id: true, name: true } } },
+    // Who are the guests of this booking?
+    const guestRows = await prisma.bookingGuest.findMany({
+      where: { bookingId: booking.id, userId: { not: null } },
+      select: { userId: true },
     });
+    const guestUserIds = guestRows
+      .map((g) => g.userId)
+      .filter(Boolean) as string[];
+    const isStaff = isStaffInOrg(viewer, booking.orgId);
+    const isGuest = viewer.userId && guestUserIds.includes(viewer.userId);
+
+    // Visibility
+    let notes;
+    if (isStaff) {
+      // Staff: see all notes EXCEPT guest-authored ones
+      notes = await prisma.bookingNote.findMany({
+        where: {
+          bookingId: booking.id,
+          // exclude notes whose author is a guest user of this booking
+          NOT: guestUserIds.length
+            ? { authorId: { in: guestUserIds } }
+            : undefined,
+        },
+        orderBy: { createdAt: "asc" },
+        include: { author: { select: { id: true, name: true } } },
+      });
+    } else if (isGuest) {
+      // Guest: only their own notes
+      notes = await prisma.bookingNote.findMany({
+        where: {
+          bookingId: booking.id,
+          authorId: viewer.userId as string,
+        },
+        orderBy: { createdAt: "asc" },
+        include: { author: { select: { id: true, name: true } } },
+      });
+    } else {
+      // Not staff and not a guest (shouldn't happen if buildBookingReadWhere blocked), but be explicit.
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
 
     const shaped = notes.map((n) => ({
       id: n.id,
@@ -77,14 +115,14 @@ export async function POST(
 ) {
   try {
     const viewer = await resolveViewerFromRequest(req);
-    if (!viewer.isSignedIn) {
+    if (!viewer?.isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
         { status: 401 }
       );
     }
 
-    // Authorize against the target booking org using the same read-where first.
+    // Viewer must be able to read this booking (staff or guest)
     const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
     const booking = await prisma.booking.findFirst({
       where,
@@ -97,13 +135,6 @@ export async function POST(
       );
     }
 
-    if (!canPostNote(viewer, booking.orgId)) {
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
     let payload: { body?: string };
     try {
       payload = (await req.json()) as { body?: string };
@@ -113,7 +144,6 @@ export async function POST(
         { status: 400 }
       );
     }
-
     const body = (payload.body ?? "").trim();
     if (!body) {
       return NextResponse.json(
