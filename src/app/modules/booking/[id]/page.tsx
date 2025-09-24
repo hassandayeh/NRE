@@ -1,3 +1,4 @@
+// src/app/modules/booking/[id]/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -44,10 +45,11 @@ type Booking = {
   locationAddress: string | null;
   dialInfo: string | null;
 
-  expertUserId: string | null; // legacy mirror
-  expertName: string; // legacy mirror
-  orgId: string | null;
+  // legacy mirrors
+  expertUserId: string | null;
+  expertName: string;
 
+  orgId: string | null;
   guests: BookingGuest[];
 };
 
@@ -66,12 +68,11 @@ type Note = {
 };
 
 type ApiNotesGet = { ok: true; notes: Note[] } | { ok: false; error: string };
-
 type ApiNotePost = { ok: true; note: Note } | { ok: false; error: string };
 
 function typeIcon(t: AppearanceType) {
   if (t === "ONLINE") return "☁️";
-  if (t === "IN_PERSON") return "🏢";
+  if (t === "IN_PERSON") return "🏛️";
   return "📞";
 }
 
@@ -100,16 +101,18 @@ export default function ViewBookingPage() {
   } | null>(null);
   const [posting, setPosting] = useState(false);
 
-  const booking = data && data.ok ? data.booking : null;
-  const canEdit = data && data.ok ? data.canEdit : false;
+  const booking = data && "ok" in data && data.ok ? data.booking : null;
+  const canEdit = data && "ok" in data && data.ok ? data.canEdit : false;
 
   // Load booking
   useEffect(() => {
     let cancelled = false;
+
     async function load() {
       setLoading(true);
       setStatus(null);
       setData(null);
+
       try {
         const res = await fetch(`/api/bookings/${id}`, {
           method: "GET",
@@ -129,6 +132,7 @@ export default function ViewBookingPage() {
         if (!cancelled) setLoading(false);
       }
     }
+
     if (id) load();
     return () => {
       cancelled = true;
@@ -138,6 +142,7 @@ export default function ViewBookingPage() {
   // Load notes
   useEffect(() => {
     let cancelled = false;
+
     async function loadNotes() {
       setNotesLoading(true);
       setNoteMsg(null);
@@ -149,8 +154,14 @@ export default function ViewBookingPage() {
         });
         const json = (await res.json()) as ApiNotesGet;
         if (cancelled) return;
+
         if (res.ok && json.ok) {
           setNotes(json.notes);
+        } else if (res.status === 403) {
+          // 👇 Change: Experts aren’t allowed to read newsroom/staff notes.
+          // Treat as "no visible notes" instead of surfacing a red error.
+          setNotes([]);
+          // do NOT set noteMsg (hide the alert)
         } else {
           setNotes([]);
           setNoteMsg({
@@ -168,6 +179,7 @@ export default function ViewBookingPage() {
         if (!cancelled) setNotesLoading(false);
       }
     }
+
     if (id) loadNotes();
     return () => {
       cancelled = true;
@@ -177,6 +189,7 @@ export default function ViewBookingPage() {
   async function postNote() {
     setPosting(true);
     setNoteMsg(null);
+
     try {
       const body = (noteBody || "").trim();
       if (!body) {
@@ -184,6 +197,7 @@ export default function ViewBookingPage() {
         setPosting(false);
         return;
       }
+
       const res = await fetch(`/api/bookings/${id}/notes`, {
         method: "POST",
         credentials: "include",
@@ -191,6 +205,7 @@ export default function ViewBookingPage() {
         body: JSON.stringify({ body }),
       });
       const json = (await res.json()) as ApiNotePost;
+
       if (!res.ok || !json.ok) {
         setNoteMsg({
           tone: "error",
@@ -216,7 +231,7 @@ export default function ViewBookingPage() {
 
   const banner = useMemo(() => {
     if (loading) return null;
-    if (!data || data.ok) return null;
+    if (!data || ("ok" in data && data.ok)) return null;
     if (status === 401)
       return { tone: "error", text: "Unauthorized. Please sign in." };
     if (status === 403)
@@ -232,210 +247,215 @@ export default function ViewBookingPage() {
   }, [loading, data, status]);
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Booking</h1>
-        <div className="flex gap-3">
-          <Link href="/modules/booking" className="text-blue-600 underline">
-            Back to bookings
-          </Link>
-          {booking && canEdit && (
-            <Link
-              href={`/modules/booking/${booking.id}/edit`}
-              className="rounded-md border px-3 py-1 text-sm hover:bg-gray-50"
-            >
-              Edit
-            </Link>
-          )}
-        </div>
+    <main className="mx-auto w-full max-w-3xl px-4 py-6">
+      <div className="mb-4">
+        <Link href="/modules/booking" className="text-blue-600 underline">
+          Back to bookings
+        </Link>
       </div>
+
+      <h1 className="mb-4 text-2xl font-semibold">Booking</h1>
+
+      {booking && canEdit && (
+        <div className="mb-3">
+          <Link
+            href={`/modules/booking/${booking.id}/edit`}
+            className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black"
+          >
+            Edit
+          </Link>
+        </div>
+      )}
 
       {banner && (
         <div
-          className={`rounded-md border p-3 ${
-            banner.tone === "error"
-              ? "border-red-300 bg-red-50 text-red-800"
-              : "border-blue-300 bg-blue-50 text-blue-800"
-          }`}
+          role="alert"
+          className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
         >
           {banner.text}
         </div>
       )}
 
       {booking && (
-        <section className="space-y-4 rounded-lg border p-4 bg-white">
-          <div className="space-y-1">
-            <h2 className="text-lg font-medium">{booking.subject}</h2>
-            <p className="text-sm text-gray-600">
-              <span className="font-medium">{fmtDate(booking.startAt)}</span> •{" "}
-              {booking.durationMins}m
-            </p>
-            <p className="text-sm text-gray-600">
-              Newsroom: <strong>{booking.newsroomName}</strong>
+        <section className="rounded-lg border bg-white p-4">
+          <h2 className="text-lg font-medium">{booking.subject}</h2>
+
+          <div className="mt-1 text-sm text-gray-700">
+            <div>
+              {fmtDate(booking.startAt)} • {booking.durationMins}m
+            </div>
+
+            <div className="mt-1">
+              <span className="text-gray-500">Newsroom:</span>{" "}
+              <span className="font-medium">{booking.newsroomName}</span>
               {booking.programName ? (
                 <>
                   {" "}
-                  • Program: <strong>{booking.programName}</strong>
+                  • <span className="text-gray-500">Program:</span>{" "}
+                  <span>{booking.programName}</span>
                 </>
               ) : null}
               {booking.hostName ? (
                 <>
                   {" "}
-                  • Host: <strong>{booking.hostName}</strong>
+                  • <span className="text-gray-500">Host:</span>{" "}
+                  <span>{booking.hostName}</span>
                 </>
               ) : null}
-            </p>
-          </div>
+            </div>
 
-          <div className="flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full bg-gray-100 px-2 py-1">
-              Scope: <strong>{booking.appearanceScope}</strong>
-            </span>
-            <span className="rounded-full bg-gray-100 px-2 py-1">
-              Access: <strong>{booking.accessProvisioning}</strong>
-            </span>
-            {booking.appearanceScope === "UNIFIED" &&
-              booking.appearanceType && (
-                <span className="rounded-full bg-gray-100 px-2 py-1">
-                  Unified type: <strong>{booking.appearanceType}</strong>
-                </span>
-              )}
-          </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="rounded-full border px-2 py-0.5 text-xs">
+                <span className="text-gray-500">Scope:</span>{" "}
+                {booking.appearanceScope}
+              </span>
+              <span className="rounded-full border px-2 py-0.5 text-xs">
+                <span className="text-gray-500">Access:</span>{" "}
+                {booking.accessProvisioning}
+              </span>
+              {booking.appearanceScope === "UNIFIED" &&
+                booking.appearanceType && (
+                  <span className="rounded-full border px-2 py-0.5 text-xs">
+                    Unified type: {booking.appearanceType}
+                  </span>
+                )}
+            </div>
 
-          <div className="text-sm text-gray-700 space-y-1">
             {booking.locationUrl && (
-              <div>
-                Default link:{" "}
+              <div className="mt-2">
+                <span className="text-gray-500">Default link:</span>{" "}
                 <a
                   href={booking.locationUrl}
-                  className="text-blue-600 underline break-all"
+                  className="text-blue-600 underline"
+                  target="_blank"
+                  rel="noreferrer"
                 >
                   {booking.locationUrl}
                 </a>
               </div>
             )}
+
             {(booking.locationName || booking.locationAddress) && (
-              <div>
-                Default venue:{" "}
-                <span className="font-medium">{booking.locationName}</span>
+              <div className="mt-1">
+                <span className="text-gray-500">Default venue:</span>{" "}
+                <span>{booking.locationName}</span>
                 {booking.locationAddress ? (
                   <> — {booking.locationAddress}</>
                 ) : null}
               </div>
             )}
-            {booking.dialInfo && <div>Default dial: {booking.dialInfo}</div>}
+
+            {booking.dialInfo && (
+              <div className="mt-1">
+                <span className="text-gray-500">Default dial:</span>{" "}
+                {booking.dialInfo}
+              </div>
+            )}
           </div>
 
-          <div className="space-y-2">
-            <h3 className="font-medium">Guests</h3>
-            <ul className="space-y-2">
-              {booking.guests.map((g) => (
-                <li
-                  key={g.id}
-                  className="flex items-start justify-between rounded border p-2"
-                >
+          <h3 className="mt-5 text-base font-semibold">Guests</h3>
+          <ul className="mt-2 space-y-2 text-sm">
+            {booking.guests.map((g) => (
+              <li key={g.id} className="rounded-md border px-3 py-2">
+                <div className="flex items-start justify-between">
                   <div>
                     <div className="font-medium">
                       {typeIcon(g.appearanceType)} {g.name}{" "}
-                      <span className="text-xs text-gray-500">
+                      <span className="text-gray-500">
                         ({g.kind.toLowerCase()})
                       </span>
                     </div>
-                    <div className="text-sm text-gray-600">
-                      {g.appearanceType === "ONLINE" &&
-                        (g.joinUrl || booking.locationUrl) && (
-                          <>
-                            Link:{" "}
-                            <a
-                              href={g.joinUrl || booking.locationUrl || "#"}
-                              className="text-blue-600 underline break-all"
-                            >
-                              {g.joinUrl || booking.locationUrl}
-                            </a>
-                          </>
-                        )}
-                      {g.appearanceType === "IN_PERSON" &&
-                        (g.venueName ||
-                          g.venueAddress ||
-                          booking.locationName ||
-                          booking.locationAddress) && (
-                          <>
-                            Venue:{" "}
-                            <span className="font-medium">
-                              {g.venueName || booking.locationName || ""}
-                            </span>
-                            {(g.venueAddress || booking.locationAddress) && (
-                              <>
-                                {" "}
-                                — {g.venueAddress || booking.locationAddress}
-                              </>
-                            )}
-                          </>
-                        )}
-                      {g.appearanceType === "PHONE" &&
-                        (g.dialInfo || booking.dialInfo) && (
-                          <>Dial: {g.dialInfo || booking.dialInfo}</>
-                        )}
-                    </div>
+
+                    {g.appearanceType === "ONLINE" &&
+                      (g.joinUrl || booking.locationUrl) && (
+                        <div className="mt-1">
+                          Link:{" "}
+                          <a
+                            href={g.joinUrl || booking.locationUrl || "#"}
+                            className="text-blue-600 underline"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {g.joinUrl || booking.locationUrl}
+                          </a>
+                        </div>
+                      )}
+
+                    {g.appearanceType === "IN_PERSON" &&
+                      (g.venueName ||
+                        g.venueAddress ||
+                        booking.locationName ||
+                        booking.locationAddress) && (
+                        <div className="mt-1">
+                          Venue: {g.venueName || booking.locationName || ""}
+                          {(g.venueAddress || booking.locationAddress) && (
+                            <> — {g.venueAddress || booking.locationAddress}</>
+                          )}
+                        </div>
+                      )}
+
+                    {g.appearanceType === "PHONE" &&
+                      (g.dialInfo || booking.dialInfo) && (
+                        <div className="mt-1">
+                          Dial: {g.dialInfo || booking.dialInfo}
+                        </div>
+                      )}
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">#{g.order}</div>
-                </li>
-              ))}
-            </ul>
-          </div>
+
+                  <div className="text-xs text-gray-400">#{g.order}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
 
           {/* Notes */}
-          <div className="pt-2">
-            <div className="mb-2 text-sm font-medium">Notes</div>
+          <h3 className="mt-6 text-base font-semibold">Notes</h3>
+          <div className="mt-2">
             {notesLoading ? (
-              <div className="rounded border bg-gray-50 p-3 text-gray-700">
+              <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm text-gray-600">
                 Loading notes…
               </div>
+            ) : notes.length === 0 ? (
+              <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm text-gray-600">
+                No notes yet.
+              </div>
             ) : (
-              <div className="space-y-2">
-                {notes.length === 0 ? (
-                  <div className="rounded border bg-gray-50 p-3 text-gray-600">
-                    No notes yet.
-                  </div>
-                ) : (
-                  <ul className="space-y-2">
-                    {notes.map((n) => (
-                      <li key={n.id} className="rounded border p-3">
-                        <div className="flex items-center justify-between text-xs text-gray-500">
-                          <span>By {n.authorName}</span>
-                          <span>{fmtDate(n.createdAt)}</span>
-                        </div>
-                        <div className="mt-1 whitespace-pre-wrap text-sm">
-                          {n.body}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              <ul className="space-y-2">
+                {notes.map((n) => (
+                  <li key={n.id} className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-gray-500">
+                      By {n.authorName} • {fmtDate(n.createdAt)}
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap text-sm">
+                      {n.body}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {/* Composer */}
+            {noteMsg && (
+              <div
+                className={`mt-3 rounded-md border px-3 py-2 text-sm ${
+                  noteMsg.tone === "success"
+                    ? "border-green-200 bg-green-50 text-green-800"
+                    : "border-red-200 bg-red-50 text-red-800"
+                }`}
+                role={noteMsg.tone === "error" ? "alert" : "status"}
+              >
+                {noteMsg.text}
               </div>
             )}
 
-            {/* Composer (allowed roles will succeed; others get clear error) */}
-            <div className="mt-3 space-y-2">
-              {noteMsg && (
-                <div
-                  className={`rounded-md border p-2 text-sm ${
-                    noteMsg.tone === "success"
-                      ? "border-green-300 bg-green-50 text-green-800"
-                      : "border-red-300 bg-red-50 text-red-800"
-                  }`}
-                >
-                  {noteMsg.text}
-                </div>
-              )}
+            <div className="mt-3">
               <textarea
-                className="w-full rounded border p-2"
-                rows={3}
-                placeholder="Add a note for this booking…"
                 value={noteBody}
                 onChange={(e) => setNoteBody(e.target.value)}
+                placeholder="Add a note for this booking..."
+                className="h-24 w-full rounded-md border p-2 text-sm focus:outline-none focus:ring-2 focus:ring-black"
               />
-              <div>
+              <div className="mt-2">
                 <button
                   className="rounded-md border px-3 py-1 text-sm hover:bg-gray-50"
                   onClick={postNote}

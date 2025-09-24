@@ -5,15 +5,18 @@ import {
   buildBookingReadWhere,
   TENANCY_ON,
 } from "../../../../../lib/viewer";
+import { Role } from "@prisma/client"; // ✅ use Prisma enum
 
-const STAFF_ROLES = ["OWNER", "ADMIN", "PRODUCER", "HOST"] as const;
+// Treat these roles as newsroom staff for note visibility (Prisma enum, not strings)
+const STAFF_ROLES: Role[] = [Role.OWNER, Role.ADMIN, Role.PRODUCER, Role.HOST];
 
 function isStaffInOrg(viewer: any, orgId: string | null | undefined) {
   const ms = viewer?.memberships ?? viewer?.orgMemberships ?? [];
   return ms.some(
     (m: any) =>
       (!TENANCY_ON || !orgId || m.orgId === orgId) &&
-      STAFF_ROLES.includes(m.role)
+      // viewer roles may be strings; coerce to Role for comparison
+      STAFF_ROLES.includes((m.role as Role) ?? ("" as unknown as Role))
   );
 }
 
@@ -35,7 +38,7 @@ export async function GET(
     const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
     const booking = await prisma.booking.findFirst({
       where,
-      select: { id: true, orgId: true },
+      select: { id: true, orgId: true, expertName: true },
     });
     if (!booking) {
       return NextResponse.json(
@@ -44,7 +47,7 @@ export async function GET(
       );
     }
 
-    // Who are the guests of this booking?
+    // Who are the guests of this booking (with userIds)?
     const guestRows = await prisma.bookingGuest.findMany({
       where: { bookingId: booking.id, userId: { not: null } },
       select: { userId: true },
@@ -52,26 +55,44 @@ export async function GET(
     const guestUserIds = guestRows
       .map((g) => g.userId)
       .filter(Boolean) as string[];
-    const isStaff = isStaffInOrg(viewer, booking.orgId);
-    const isGuest = viewer.userId && guestUserIds.includes(viewer.userId);
 
-    // Visibility
+    const isStaff = isStaffInOrg(viewer, booking.orgId);
+
+    // Guest detection fallback:
+    const isGuest =
+      !!viewer.userId &&
+      (guestUserIds.includes(viewer.userId) ||
+        (!!booking.expertName && booking.expertName === (viewer.name ?? "__")));
+
     let notes;
     if (isStaff) {
-      // Staff: see all notes EXCEPT guest-authored ones
+      // ✅ Staff: only org-staff-authored notes
+      const orgId = booking.orgId ?? null;
+      const staffUserIds =
+        orgId === null
+          ? [] // safer: no org → no staff scope
+          : ((
+              await prisma.organizationMembership.findMany({
+                where: {
+                  orgId,
+                  role: { in: STAFF_ROLES }, // ✅ enum-typed
+                },
+                select: { userId: true },
+              })
+            )
+              .map((r) => r.userId)
+              .filter(Boolean) as string[]);
+
       notes = await prisma.bookingNote.findMany({
         where: {
           bookingId: booking.id,
-          // exclude notes whose author is a guest user of this booking
-          NOT: guestUserIds.length
-            ? { authorId: { in: guestUserIds } }
-            : undefined,
+          authorId: staffUserIds.length ? { in: staffUserIds } : "__NO_MATCH__", // return []
         },
         orderBy: { createdAt: "asc" },
         include: { author: { select: { id: true, name: true } } },
       });
     } else if (isGuest) {
-      // Guest: only their own notes
+      // ✅ Guest: only their own notes
       notes = await prisma.bookingNote.findMany({
         where: {
           bookingId: booking.id,
@@ -81,7 +102,7 @@ export async function GET(
         include: { author: { select: { id: true, name: true } } },
       });
     } else {
-      // Not staff and not a guest (shouldn't happen if buildBookingReadWhere blocked), but be explicit.
+      // Not staff and not a recognized guest → explicit 403
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
         { status: 403 }
@@ -144,6 +165,7 @@ export async function POST(
         { status: 400 }
       );
     }
+
     const body = (payload.body ?? "").trim();
     if (!body) {
       return NextResponse.json(
