@@ -1,5 +1,6 @@
 // prisma/schema.prisma
-// Tenancy foundation + Org settings + Expert exclusivity + Booking.expert FK (non-breaking)
+// Tenancy foundation + Org settings + Expert exclusivity + Booking.expert FK
+// + Expert Directory fields + Availability blocks (non-breaking)
 
 generator client {
   provider = "prisma-client-js"
@@ -43,57 +44,62 @@ enum ExpertStatus {
 
 /// Organizations (newsrooms or companies)
 model Organization {
-  id               String      @id @default(cuid())
-  name             String      @db.VarChar(200)
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
+  id        String   @id @default(cuid())
+  name      String   @db.VarChar(200)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Settings (one row per org)
-  settings         OrgSettings?
+  settings  OrgSettings?
 
   // Tenancy relations
-  memberships      OrganizationMembership[]
+  memberships OrganizationMembership[]
 
   // Reverse side of User.activeOrg (legacy/optional UI context)
-  activeUsers      User[]      @relation("ActiveOrg")
+  activeUsers     User[] @relation("ActiveOrg")
 
   // Experts exclusively attached to this org (when exclusive)
-  exclusiveExperts User[]      @relation("ExclusiveOrg")
+  exclusiveExperts User[] @relation("ExclusiveOrg")
 
   // Bookings scoped to an org
-  bookings         Booking[]
+  bookings Booking[]
 }
 
 /// DB-backed org settings (shell). Controls visibility/behaviour in UI.
 model OrgSettings {
-  id                String        @id @default(cuid())
-  orgId             String        @unique
-  organization      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  orgId  String @unique
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // Field visibility toggles (MVP)
-  showProgramName   Boolean       @default(true)
-  showHostName      Boolean       @default(true)
-  showTalkingPoints Boolean       @default(true)
+  showProgramName  Boolean @default(true)
+  showHostName     Boolean @default(true)
+  showTalkingPoints Boolean @default(true)
 
   // Appearance type allowlist (MVP)
-  allowInPerson     Boolean       @default(true)
-  allowOnline       Boolean       @default(true)
+  allowInPerson Boolean @default(true)
+  allowOnline   Boolean @default(true)
+
+  // NEW: lightweight scheduling knobs
+  defaultDurationMins Int @default(30)
+  minLeadTimeMins     Int @default(120)
 
   // Audit
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// User ↔ Organization membership with role
 model OrganizationMembership {
-  id           String   @id @default(cuid())
-  userId       String
-  orgId        String
-  role         Role
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id        String   @id @default(cuid())
+  userId    String
+  orgId     String
+  role      Role
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@unique([userId, orgId])
@@ -103,70 +109,110 @@ model OrganizationMembership {
 
 /** ===== App Models ===== **/
 
-/// Application user
+/// Application user model
 model User {
-  id               String                @id @default(cuid())
-  email            String                @unique @db.VarChar(320)
-  name             String?               @db.VarChar(200)
-
+  id             String  @id @default(cuid())
+  email          String  @unique @db.VarChar(320)
+  name           String? @db.VarChar(200)
   // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword   String                @db.VarChar(255)
+  hashedPassword String  @db.VarChar(255)
 
-  // ---- Legacy UI scoping (now deprecated in product; kept to avoid breaking code) ----
-  activeOrgId      String?
-  activeOrg        Organization?         @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
+  // ---- Legacy UI scoping (deprecated in product; kept to avoid breaking code) ----
+  activeOrgId String?
+  activeOrg   Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
   @@index([activeOrgId])
 
   // Tenancy memberships (kept for Owner/Producer; product now disallows multi-org, to be enforced in app)
-  memberships      OrganizationMembership[]
+  memberships OrganizationMembership[]
 
-  // ---- Expert visibility/exclusivity (new) ----
-  expertStatus     ExpertStatus?         @default(PUBLIC)
-  exclusiveOrgId   String?
-  exclusiveOrg     Organization?         @relation("ExclusiveOrg", fields: [exclusiveOrgId], references: [id], onDelete: SetNull)
+  // ---- Expert visibility/exclusivity (existing) ----
+  expertStatus    ExpertStatus?  @default(PUBLIC)
+  exclusiveOrgId  String?
+  exclusiveOrg    Organization?  @relation("ExclusiveOrg", fields: [exclusiveOrgId], references: [id], onDelete: SetNull)
 
   // Back-reference for bookings targeting this expert (needed by Prisma)
-  bookingsAsExpert Booking[]             @relation("ExpertBookings")
+  bookingsAsExpert Booking[] @relation("ExpertBookings")
 
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
+  // ===== NEW: Expert directory fields (all optional or defaulted) =====
+  bio               String?         @db.Text
+  languages         String[]        @default([]) // ISO codes e.g. ["ar","en"]
+  tags              String[]        @default([]) // topics, beats, skills
+  timezone          String          @default("UTC") @db.VarChar(50)
+  countryCode       String?         @db.VarChar(2)
+  city              String?         @db.VarChar(120)
+  supportsInPerson  Boolean         @default(true)
+  supportsOnline    Boolean         @default(true)
+  inPersonRadiusKm  Int?
+  avatarUrl         String?         @db.Text
+  slug              String?         @unique @db.VarChar(120)
+  rankBoost         Int             @default(0)
+
+  // Availability blocks (reverse)
+  timeBlocks ExpertTimeBlock[]
+
+  // Bookings created by this user (audit)
+  bookingsCreated Booking[] @relation("CreatedBookings")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// Bookings table (current UI fields; org-scoped)
 model Booking {
-  id             String         @id @default(cuid())
-  subject        String         @db.VarChar(300)
+  id           String         @id @default(cuid())
+  subject      String         @db.VarChar(300)
 
   // NOTE: legacy expert string kept temporarily; will be removed after FK adoption
-  expertName     String         @db.VarChar(200)
+  expertName   String         @db.VarChar(200)
+  newsroomName String         @db.VarChar(200)
 
-  newsroomName   String         @db.VarChar(200)
   appearanceType AppearanceType
-  status         BookingStatus  @default(PENDING)
-  startAt        DateTime
-  durationMins   Int
+  status         BookingStatus @default(PENDING)
+
+  startAt      DateTime
+  durationMins Int
 
   // Optional location fields
-  locationName   String?        @db.VarChar(300)
-  locationUrl    String?        @db.Text
+  locationName String? @db.VarChar(300)
+  locationUrl  String? @db.Text
 
   // Optional editorial extras (visibility controlled by OrgSettings)
-  programName    String?        @db.VarChar(200)
-  hostName       String?        @db.VarChar(200)
-  talkingPoints  String?        @db.Text
+  programName    String? @db.VarChar(200)
+  hostName       String? @db.VarChar(200)
+  talkingPoints  String? @db.Text
 
   // Org scope
-  orgId          String?
-  organization   Organization?  @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  orgId        String?
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  // ---- Expert FK (new; optional for now, to be backfilled) ----
-  expertUserId   String?
-  expert         User?          @relation("ExpertBookings", fields: [expertUserId], references: [id], onDelete: SetNull)
+  // Expert FK (existing; optional for now, to be backfilled)
+  expertUserId String?
+  expert       User?   @relation("ExpertBookings", fields: [expertUserId], references: [id], onDelete: SetNull)
 
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  // NEW: created-by audit (who sent the invite)
+  createdByUserId String?
+  createdBy       User?   @relation("CreatedBookings", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([orgId])
   @@index([startAt])
   @@index([expertUserId])
+  @@index([createdByUserId])
+}
+
+/// NEW: Expert self-managed time blocks (for availability in Mode 2 search)
+model ExpertTimeBlock {
+  id           String   @id @default(cuid())
+  expertUserId String
+  startAt      DateTime
+  endAt        DateTime
+  reason       String?  @db.VarChar(200)
+
+  expert   User     @relation(fields: [expertUserId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expertUserId, startAt])
 }
