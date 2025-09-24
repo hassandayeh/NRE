@@ -1,194 +1,161 @@
-// src/app/modules/booking/page.tsx
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+"use client";
 
 import Link from "next/link";
-import { headers } from "next/headers";
-import { resolveViewer, canEditBooking } from "../../../lib/viewer";
+import { useEffect, useState } from "react";
 
-type Booking = {
+type BookingListItem = {
   id: string;
-  subject: string | null;
-  startAt: string | Date | null;
-  durationMins: number | null;
-  appearanceType: "ONLINE" | "IN_PERSON" | null;
-  expertName: string | null;
-  newsroomName: string | null;
-  locationName: string | null;
-  locationUrl: string | null;
-  programName: string | null;
-  hostName: string | null;
-  // Some older API responses may omit orgId. Handle both cases gracefully.
-  orgId?: string | null;
+  subject: string;
+  startAt: string; // ISO
+  durationMins: number;
+
+  // Display fields used in the list
+  appearanceScope?: "UNIFIED" | "PER_GUEST" | null;
+  appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE" | null;
+
+  expertName?: string | null; // legacy mirror
+  newsroomName?: string | null;
+  programName?: string | null;
+  hostName?: string | null;
+
+  // Optional location hints for summary lines
+  locationName?: string | null;
+  locationAddress?: string | null;
 };
 
-function formatWhen(d: string | Date | null) {
-  if (!d) return "—";
-  const dt = typeof d === "string" ? new Date(d) : d;
-  if (isNaN(dt.getTime())) return "—";
-  return dt.toLocaleString([], {
-    month: "numeric",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+type ApiList =
+  | { ok: true; bookings: BookingListItem[] }
+  | { ok: false; error: string };
 
-async function loadBookings(): Promise<Booking[]> {
-  const h = headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host");
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  const base = `${proto}://${host}`;
-
-  // Forward cookies so NextAuth sees the session on the API route
-  const res = await fetch(`${base}/api/bookings`, {
-    cache: "no-store",
-    headers: { cookie: h.get("cookie") ?? "" },
-  });
-
-  let json: any = null;
+function fmtDate(iso: string) {
   try {
-    json = await res.json();
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      month: "numeric",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
-    return [];
+    return iso;
   }
-  const maybe = Array.isArray(json) ? json : json?.bookings;
-  return Array.isArray(maybe) ? (maybe as Booking[]) : [];
 }
 
-export default async function BookingListPage({
-  searchParams,
-}: {
-  searchParams?: Record<string, string | string[] | undefined>;
-}) {
-  const [viewer, bookings] = await Promise.all([
-    resolveViewer(),
-    loadBookings(),
-  ]);
-  const isStaffAnywhere = viewer.staffOrgIds.length > 0;
+export default function BookingsPage() {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [items, setItems] = useState<BookingListItem[]>([]);
 
-  const updated =
-    (typeof searchParams?.updated === "string" ? searchParams?.updated : "") ===
-    "1";
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setErr(null);
+      try {
+        const res = await fetch("/api/bookings", {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        });
+        const json = (await res.json()) as ApiList;
+        if (cancelled) return;
+        if (res.ok && json.ok) {
+          setItems(json.bookings);
+        } else {
+          setErr((json as any)?.error || "Failed to load bookings.");
+        }
+      } catch {
+        if (!cancelled) setErr("Network error while loading bookings.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
-        {isStaffAnywhere && (
-          <Link
-            href="/modules/booking/new"
-            className="rounded-md bg-blue-600 px-3 py-2 text-white hover:bg-blue-700"
-          >
-            New booking
-          </Link>
-        )}
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">Bookings</h1>
 
-      {updated && (
-        <div className="rounded-md border border-green-300 bg-green-50 p-3 text-green-800">
-          Booking updated successfully.
+      {loading && (
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-gray-700">
+          Loading…
         </div>
       )}
 
-      {bookings.length === 0 ? (
-        <div className="rounded-md border border-gray-200 bg-white p-4">
-          <p className="text-gray-700">
-            No bookings yet.&nbsp;
-            {isStaffAnywhere ? (
-              <>
-                <Link
-                  href="/modules/booking/new"
-                  className="text-blue-700 underline"
-                >
-                  Create your first booking
-                </Link>
-                .
-              </>
-            ) : (
-              "When a newsroom invites you, you’ll see it here."
-            )}
-          </p>
+      {err && (
+        <div className="rounded-md border border-red-300 bg-red-50 p-3 text-red-800">
+          {err}
         </div>
-      ) : (
-        <ul className="space-y-4">
-          {bookings.map((b) => {
-            const editAllowed =
-              b.orgId !== undefined
-                ? canEditBooking(viewer, b.orgId ?? null)
-                : isStaffAnywhere;
+      )}
 
-            return (
-              <li key={b.id} className="rounded-lg border p-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <h3 className="text-lg font-semibold">
-                      {b.subject || "(no subject)"}
-                    </h3>
-                    <p className="text-sm text-gray-600">
-                      {formatWhen(b.startAt)} • {b.durationMins ?? "—"}m •{" "}
-                      {b.appearanceType === "IN_PERSON"
-                        ? "IN PERSON"
-                        : "ONLINE"}
-                    </p>
-                    <p className="text-sm text-gray-600">
-                      <span className="font-medium">Expert:</span>{" "}
-                      {b.expertName || "—"} •{" "}
-                      <span className="font-medium">Newsroom:</span>{" "}
-                      {b.newsroomName || "—"}
-                    </p>
-                    {b.locationName && (
-                      <p className="text-sm text-gray-600">
-                        <span className="font-medium">Location:</span>{" "}
-                        {b.locationUrl ? (
-                          <a
-                            href={b.locationUrl}
-                            className="text-blue-700 underline"
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {b.locationName}
-                          </a>
-                        ) : (
-                          b.locationName
-                        )}
-                      </p>
+      {!loading && !err && items.length === 0 && (
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-gray-700">
+          No bookings yet.
+        </div>
+      )}
+
+      <ul className="space-y-4">
+        {items.map((b) => (
+          <li key={b.id} className="relative">
+            {/* Card */}
+            <div className="group rounded-lg border p-4 hover:shadow-sm transition-colors">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h2 className="text-lg font-medium">{b.subject}</h2>
+                  <div className="mt-1 text-sm text-gray-600">
+                    {fmtDate(b.startAt)} • {b.durationMins}m
+                    {b.appearanceType ? (
+                      <>
+                        {" "}
+                        • <span className="uppercase">{b.appearanceType}</span>
+                      </>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-1 text-sm text-gray-700 space-y-0.5">
+                    {(b.expertName || b.newsroomName) && (
+                      <div>
+                        Expert: {b.expertName ?? "—"} • Newsroom:{" "}
+                        {b.newsroomName ?? "—"}
+                      </div>
                     )}
                     {(b.programName || b.hostName) && (
-                      <p className="text-sm text-gray-600">
-                        <span className="font-medium">Program:</span>{" "}
-                        {b.programName || "—"} •{" "}
-                        <span className="font-medium">Host:</span>{" "}
-                        {b.hostName || "—"}
-                      </p>
+                      <div>
+                        Program: {b.programName ?? "—"} • Host:{" "}
+                        {b.hostName ?? "—"}
+                      </div>
                     )}
-                  </div>
-
-                  <div className="shrink-0">
-                    {editAllowed ? (
-                      <Link
-                        href={`/modules/booking/${b.id}/edit`}
-                        className="rounded-md bg-blue-600 px-3 py-2 text-white hover:bg-blue-700"
-                      >
-                        Edit
-                      </Link>
-                    ) : (
-                      <Link
-                        href={`/modules/booking/${b.id}/edit`}
-                        className="rounded-md border px-3 py-2 text-gray-800 hover:bg-gray-50"
-                        title="Open (read-only)"
-                      >
-                        Open
-                      </Link>
-                    )}
+                    {b.appearanceType === "IN_PERSON" &&
+                      (b.locationName || b.locationAddress) && (
+                        <div>
+                          Location: {b.locationName ?? ""}{" "}
+                          {b.locationAddress ? `— ${b.locationAddress}` : ""}
+                        </div>
+                      )}
                   </div>
                 </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+
+                {/* subtle affordance to indicate clickability */}
+                <div className="ml-3 text-sm text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                  View →
+                </div>
+              </div>
+
+              {/* Make the whole card clickable to the VIEW page */}
+              <Link
+                href={`/modules/booking/${b.id}`}
+                className="absolute inset-0"
+                aria-label={`Open ${b.subject}`}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
     </main>
   );
 }

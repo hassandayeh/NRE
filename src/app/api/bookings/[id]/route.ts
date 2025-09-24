@@ -1,102 +1,158 @@
 // src/app/api/bookings/[id]/route.ts
-
-import { NextResponse } from "next/server";
-import { revalidateTag } from "next/cache";
+import { NextResponse, NextRequest } from "next/server";
 import prisma from "../../../../lib/prisma";
 import {
   resolveViewerFromRequest,
+  canEditBooking,
   buildBookingReadWhere,
   TENANCY_ON,
-  canEditBooking,
 } from "../../../../lib/viewer";
 
-// ===== Types =====
-type Params = { params: { id: string } };
+/** ===== Types (request payload) ===== */
+type AppearanceType = "ONLINE" | "IN_PERSON" | "PHONE";
+type AppearanceScope = "UNIFIED" | "PER_GUEST";
+type AccessProvisioning = "SHARED" | "PER_GUEST";
+type ParticipantKind = "EXPERT" | "REPORTER";
 
-/**
- * Only fields we explicitly allow to update.
- * NOTE: expertName/newsroomName are non-nullable in Prisma → if client sends null/empty we omit.
- */
-const UPDATABLE_FIELDS = [
-  "subject",
-  "newsroomName",
-  "expertName", // temporary until FK migration lands
-  "appearanceType",
-  "startAt",
-  "durationMins",
-  "programName",
-  "hostName",
-  "talkingPoints",
-  "locationName",
-  "locationUrl",
-] as const;
+type GuestInput = {
+  id?: string;
+  userId?: string | null;
+  name: string; // required for external guests
+  kind: ParticipantKind;
+  order: number;
+  appearanceType: AppearanceType;
+  joinUrl?: string | null;
+  venueName?: string | null;
+  venueAddress?: string | null;
+  dialInfo?: string | null;
+};
 
 type UpdatePayload = Partial<{
-  subject: string; // non-nullable
-  newsroomName: string; // non-nullable
-  expertName: string; // non-nullable
-  appearanceType: "ONLINE" | "IN_PERSON";
-  startAt: Date;
-  durationMins: number;
+  subject: string;
+  newsroomName: string | null;
   programName: string | null;
   hostName: string | null;
   talkingPoints: string | null;
-  locationName: string | null;
-  locationUrl: string | null;
+
+  appearanceScope: AppearanceScope;
+  appearanceType?: AppearanceType | null; // only when UNIFIED
+  accessProvisioning: AccessProvisioning;
+
+  // Booking defaults
+  locationUrl?: string | null; // ONLINE
+  locationName?: string | null; // IN_PERSON
+  locationAddress?: string | null;
+  dialInfo?: string | null; // PHONE
+
+  // Full replace of guests
+  guests: GuestInput[];
 }>;
 
-/** Map body → prisma-safe update payload (whitelist + coercions + null normalization). */
-async function readUpdatePayload(req: Request): Promise<UpdatePayload> {
-  const body = (await req.json().catch(() => ({} as any))) as Record<
-    string,
-    unknown
-  >;
+/** ===== Validation helpers ===== */
+function requireField(val: any, name: string) {
+  if (!val || (typeof val === "string" && val.trim() === "")) {
+    throw new Error(`Missing required field: ${name}`);
+  }
+}
 
-  const raw: Record<string, unknown> = {};
+function validateUnified(
+  scope: AppearanceScope,
+  type: AppearanceType | null | undefined,
+  body: UpdatePayload
+) {
+  if (scope !== "UNIFIED") return;
+  if (!type)
+    throw new Error("appearanceType is required when appearanceScope=UNIFIED");
+  if (type === "ONLINE") requireField(body.locationUrl, "locationUrl");
+  if (
+    type === "IN_PERSON" &&
+    !(
+      (body.locationName && body.locationName?.trim()) ||
+      (body.locationAddress && body.locationAddress?.trim())
+    )
+  ) {
+    throw new Error(
+      "locationName or locationAddress is required when UNIFIED+IN_PERSON"
+    );
+  }
+  if (type === "PHONE") requireField(body.dialInfo, "dialInfo");
+}
 
-  for (const key of UPDATABLE_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(body, key)) {
-      let v = (body as any)[key];
+function hasPerGuestField(g: GuestInput) {
+  if (g.appearanceType === "ONLINE") return !!g.joinUrl?.trim();
+  if (g.appearanceType === "IN_PERSON")
+    return !!(g.venueName?.trim() || g.venueAddress?.trim());
+  if (g.appearanceType === "PHONE") return !!g.dialInfo?.trim();
+  return false;
+}
 
-      if (key === "startAt") {
-        const d = new Date(v as any);
-        if (!isNaN(d.getTime())) v = d;
-        else continue;
-      } else if (key === "durationMins") {
-        const n = Number(v);
-        if (!Number.isFinite(n)) continue;
-        v = n;
-      }
+function validatePerGuest(payload: UpdatePayload) {
+  if (payload.appearanceScope !== "PER_GUEST") return;
+  const guests: GuestInput[] = (payload.guests ?? []) as GuestInput[];
+  if (!Array.isArray(guests) || guests.length === 0) {
+    throw new Error(
+      "At least one guest is required when appearanceScope=PER_GUEST"
+    );
+  }
+}
 
-      if (v === "") v = null; // normalize empty → null for nullable fields
-      raw[key] = v;
+function validateFallbacks(payload: UpdatePayload) {
+  if (payload.appearanceScope !== "PER_GUEST") return;
+  const guests: GuestInput[] = (payload.guests ?? []) as GuestInput[];
+  const shared = payload.accessProvisioning === "SHARED";
+
+  for (const g of guests) {
+    const hasOwn = hasPerGuestField(g);
+    if (hasOwn) continue;
+    if (!shared) {
+      throw new Error(
+        `Guest "${g.name}" is missing required access detail for ${g.appearanceType} and accessProvisioning is PER_GUEST`
+      );
+    }
+    if (g.appearanceType === "ONLINE" && !payload.locationUrl?.trim()) {
+      throw new Error(
+        `Guest "${g.name}" requires joinUrl or a booking default locationUrl`
+      );
+    }
+    if (
+      g.appearanceType === "IN_PERSON" &&
+      !(
+        (payload.locationName && payload.locationName.trim()) ||
+        (payload.locationAddress && payload.locationAddress.trim())
+      )
+    ) {
+      throw new Error(
+        `Guest "${g.name}" requires venue fields or booking default locationName/locationAddress`
+      );
+    }
+    if (g.appearanceType === "PHONE" && !payload.dialInfo?.trim()) {
+      throw new Error(
+        `Guest "${g.name}" requires dialInfo or booking default dialInfo`
+      );
     }
   }
-
-  // Non-nullable fields: if null, omit to satisfy Prisma
-  for (const k of ["subject", "expertName", "newsroomName"]) {
-    if (raw[k] === null) delete raw[k];
-  }
-
-  return raw as UpdatePayload;
 }
 
-/** Basic field sanity checks (pre-Zod). */
-function validateUpdatePayload(data: UpdatePayload) {
-  if (
-    data.durationMins !== undefined &&
-    typeof data.durationMins !== "number"
-  ) {
-    return "durationMins must be a number";
-  }
-  if (data.durationMins !== undefined && data.durationMins <= 0) {
-    return "durationMins must be > 0";
-  }
-  return null;
+function sanitizeGuests(guests: GuestInput[]): GuestInput[] {
+  return (guests ?? [])
+    .map((g, idx) => ({
+      ...g,
+      order: typeof g.order === "number" ? g.order : idx,
+      userId: g.userId ?? null,
+      joinUrl: g.joinUrl?.trim() || null,
+      venueName: g.venueName?.trim() || null,
+      venueAddress: g.venueAddress?.trim() || null,
+      dialInfo: g.dialInfo?.trim() || null,
+      name: g.name?.trim() || "",
+    }))
+    .sort((a, b) => a.order - b.order);
 }
 
-// ---------- GET /api/bookings/[id] ----------
-export async function GET(req: Request, { params }: Params) {
+/** ===== GET ===== */
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
     const viewer = await resolveViewerFromRequest(req);
     if (!viewer.isSignedIn) {
@@ -106,10 +162,9 @@ export async function GET(req: Request, { params }: Params) {
       );
     }
 
-    // Staff can read within their orgs; Experts can read only if assigned (via expertName)
+    // Use the SAME where logic used by your list route/viewer helpers
     const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
     const booking = await prisma.booking.findFirst({ where });
-
     if (!booking) {
       return NextResponse.json(
         { ok: false, error: "Not found" },
@@ -117,122 +172,196 @@ export async function GET(req: Request, { params }: Params) {
       );
     }
 
-    // NEW: surface a computed canEdit for the client (back-compat: still returning { ok, booking })
-    const canEdit = TENANCY_ON
-      ? canEditBooking(viewer, booking.orgId ?? null)
-      : viewer.staffOrgIds.length > 0;
+    const guests = await (prisma as any).bookingGuest.findMany({
+      where: { bookingId: booking.id },
+      orderBy: { order: "asc" },
+    });
 
-    return NextResponse.json({ ok: true, booking, canEdit }, { status: 200 });
+    const canEdit = canEditBooking(viewer, booking.orgId);
+    return NextResponse.json({
+      ok: true,
+      booking: { ...booking, guests },
+      canEdit,
+    });
   } catch (err) {
     console.error("GET /api/bookings/[id] error:", err);
     return NextResponse.json(
-      { ok: false, error: "Failed to load booking" },
+      { ok: false, error: "Server error" },
       { status: 500 }
     );
   }
 }
 
-// ---------- PATCH /api/bookings/[id] ----------
-export async function PATCH(req: Request, { params }: Params) {
+/** ===== PATCH/PUT ===== */
+async function updateBooking(id: string, body: UpdatePayload) {
+  const current = await prisma.booking.findUnique({ where: { id } });
+  if (!current) throw new Error("Not found");
+
+  // Read existing values to compute validation defaults
+  const c: any = current;
+  const scope: AppearanceScope =
+    body.appearanceScope ?? (c.appearanceScope as AppearanceScope);
+  const provisioning: AccessProvisioning =
+    body.accessProvisioning ?? (c.accessProvisioning as AccessProvisioning);
+  const unifiedType =
+    scope === "UNIFIED"
+      ? body.appearanceType ?? (c.appearanceType as AppearanceType | null)
+      : null;
+
+  const payload: UpdatePayload = {
+    ...body,
+    appearanceScope: scope,
+    accessProvisioning: provisioning,
+    appearanceType: unifiedType,
+  };
+
+  validateUnified(scope, unifiedType, payload);
+  if (scope === "PER_GUEST") {
+    validatePerGuest(payload);
+    validateFallbacks(payload);
+  }
+
+  const nextGuests = Array.isArray(body.guests)
+    ? sanitizeGuests(body.guests)
+    : undefined;
+
+  return await prisma.$transaction(async (tx) => {
+    // 1) Update booking core fields
+    await tx.booking.update({
+      where: { id },
+      data: {
+        subject: body.subject ?? current.subject,
+        newsroomName: body.newsroomName ?? current.newsroomName,
+        programName: body.programName ?? current.programName,
+        hostName: body.hostName ?? current.hostName,
+        talkingPoints: body.talkingPoints ?? current.talkingPoints,
+
+        appearanceScope: scope,
+        accessProvisioning: provisioning,
+        appearanceType: scope === "UNIFIED" ? (unifiedType as any) : null,
+
+        locationUrl:
+          body.locationUrl !== undefined
+            ? body.locationUrl || null
+            : c.locationUrl ?? null,
+        locationName:
+          body.locationName !== undefined
+            ? body.locationName || null
+            : c.locationName ?? null,
+        locationAddress:
+          body.locationAddress !== undefined
+            ? body.locationAddress || null
+            : c.locationAddress ?? null,
+        dialInfo:
+          body.dialInfo !== undefined
+            ? body.dialInfo || null
+            : c.dialInfo ?? null,
+      } as any,
+    });
+
+    // 2) Replace guests if provided
+    if (nextGuests) {
+      const ptx = tx as any;
+      await ptx.bookingGuest.deleteMany({ where: { bookingId: id } });
+      if (nextGuests.length) {
+        await ptx.bookingGuest.createMany({
+          data: nextGuests.map((g) => ({
+            bookingId: id,
+            userId: g.userId ?? null,
+            name: g.name,
+            kind: g.kind,
+            order: g.order,
+            appearanceType: g.appearanceType,
+            joinUrl: g.joinUrl ?? null,
+            venueName: g.venueName ?? null,
+            venueAddress: g.venueAddress ?? null,
+            dialInfo: g.dialInfo ?? null,
+          })),
+        });
+      }
+
+      // 3) Legacy mirror from first guest
+      const first = nextGuests[0];
+      await tx.booking.update({
+        where: { id },
+        data: {
+          expertUserId: first?.userId ?? null,
+          expertName: first?.name ?? current.expertName,
+        },
+      });
+    }
+
+    // 4) Read back
+    const updated = await tx.booking.findUnique({ where: { id } });
+    const guests = await (tx as any).bookingGuest.findMany({
+      where: { bookingId: id },
+      orderBy: { order: "asc" },
+    });
+
+    return { ...updated!, guests };
+  });
+}
+
+async function handleWrite(req: NextRequest, params: { id: string }) {
+  const viewer = await resolveViewerFromRequest(req);
+  if (!viewer.isSignedIn) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  // Must be newsroom staff of this booking's org to edit
+  const bk = await prisma.booking.findUnique({ where: { id: params.id } });
+  if (!bk)
+    return NextResponse.json(
+      { ok: false, error: "Not found" },
+      { status: 404 }
+    );
+
+  if (!canEditBooking(viewer, bk.orgId)) {
+    return NextResponse.json(
+      { ok: false, error: "Forbidden" },
+      { status: 403 }
+    );
+  }
+
+  let body: UpdatePayload;
   try {
-    const viewer = await resolveViewerFromRequest(req);
-    if (!viewer.isSignedIn) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    body = (await req.json()) as UpdatePayload;
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Invalid JSON" },
+      { status: 400 }
+    );
+  }
 
-    // Only newsroom staff (Owner/Admin/Producer) may update (enforced tenancy)
-    if (TENANCY_ON && viewer.staffOrgIds.length === 0) {
+  try {
+    const updated = await updateBooking(params.id, body);
+    return NextResponse.json({ ok: true, booking: updated });
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (msg.includes("Missing required"))
+      return NextResponse.json({ ok: false, error: msg }, { status: 400 });
+    if (msg.includes("requires"))
+      return NextResponse.json({ ok: false, error: msg }, { status: 400 });
+    if (msg.includes("Unique constraint")) {
       return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    const data = await readUpdatePayload(req);
-    const validationError = validateUpdatePayload(data);
-    if (validationError) {
-      return NextResponse.json(
-        { ok: false, error: validationError },
+        { ok: false, error: "Duplicate internal guest in the same booking." },
         { status: 400 }
       );
     }
-
-    // Update by id; confirm org after update to block cross-tenant edits
-    const updated = await prisma.booking.update({
-      where: { id: params.id },
-      data,
-    });
-
-    if (TENANCY_ON && !canEditBooking(viewer, updated.orgId ?? null)) {
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    revalidateTag("bookings");
-    return NextResponse.json({ ok: true, booking: updated }, { status: 200 });
-  } catch (err) {
-    console.error("PATCH /api/bookings/[id] error:", err);
+    console.error("PATCH/PUT /api/bookings/[id] failed:", e);
     return NextResponse.json(
-      { ok: false, error: "Failed to update booking" },
+      { ok: false, error: "Server error" },
       { status: 500 }
     );
   }
 }
 
-// Keep supporting PUT by delegating to PATCH semantics.
-export async function PUT(req: Request, ctx: Params) {
-  return PATCH(req, ctx);
+export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
+  return handleWrite(req, ctx.params);
 }
-
-// ---------- DELETE /api/bookings/[id] ----------
-export async function DELETE(req: Request, { params }: Params) {
-  try {
-    const viewer = await resolveViewerFromRequest(req);
-    if (!viewer.isSignedIn) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
-
-    // Only newsroom staff can delete (enforced tenancy)
-    if (TENANCY_ON && viewer.staffOrgIds.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    const existing = await prisma.booking.findUnique({
-      where: { id: params.id },
-    });
-    if (!existing) {
-      return NextResponse.json(
-        { ok: false, error: "Not found" },
-        { status: 404 }
-      );
-    }
-
-    if (TENANCY_ON && !canEditBooking(viewer, existing.orgId ?? null)) {
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    await prisma.booking.delete({ where: { id: params.id } });
-    revalidateTag("bookings");
-    return NextResponse.json({ ok: true }, { status: 200 });
-  } catch (err) {
-    console.error("DELETE /api/bookings/[id] error:", err);
-    return NextResponse.json(
-      { ok: false, error: "Failed to delete booking" },
-      { status: 500 }
-    );
-  }
+export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
+  return handleWrite(req, ctx.params);
 }
