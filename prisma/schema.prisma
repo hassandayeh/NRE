@@ -7,13 +7,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  // Reads from DATABASE_URL in .env
+  provider = "postgresql" // Reads from DATABASE_URL in .env
   url      = env("DATABASE_URL")
 }
 
 /**
- * ===== Enums ===== *
+ * ===== Enums =====
  */
 
 /// Booking appearance mode (used by Booking when UNIFIED and by each BookingGuest)
@@ -64,45 +63,44 @@ enum ParticipantKind {
 }
 
 /**
- * ===== Core Tenancy Models ===== *
+ * ===== Core Tenancy Models =====
  */
 
 /// Organizations (newsrooms or companies)
 model Organization {
-  id        String   @id @default(cuid())
-  name      String   @db.VarChar(200)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String                   @id @default(cuid())
+  name            String                   @db.VarChar(200)
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
 
   // Settings (one row per org)
-  settings OrgSettings?
+  settings        OrgSettings?
 
   // Tenancy relations
-  memberships OrganizationMembership[]
+  memberships     OrganizationMembership[]
 
   // Reverse side of User.activeOrg (legacy/optional UI context)
-  activeUsers User[] @relation("ActiveOrg")
+  activeUsers     User[]                   @relation("ActiveOrg")
 
   // Experts exclusively attached to this org (when exclusive)
-  exclusiveExperts User[] @relation("ExclusiveOrg")
+  exclusiveExperts User[]                  @relation("ExclusiveOrg")
 
   // Bookings scoped to an org
-  bookings Booking[]
+  bookings        Booking[]
 
   // ⭐ Back-relation for favorites
-  favoriteLists FavoriteList[]
+  favoriteLists   FavoriteList[]
 }
 
 /// DB-backed org settings (shell). Controls visibility/behaviour in UI (MVP).
 model OrgSettings {
-  id String @id @default(cuid())
-
-  orgId        String       @unique
+  id          String       @id @default(cuid())
+  orgId       String       @unique
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // Field visibility toggles (MVP)
-  showProgramName   Boolean @default(true)
-  showHostName      Boolean @default(true)
+  showProgramName  Boolean @default(true)
+  showHostName     Boolean @default(true)
   showTalkingPoints Boolean @default(true)
 
   // Appearance type allowlist (MVP)
@@ -133,17 +131,23 @@ model OrganizationMembership {
 }
 
 /**
- * ===== App Models ===== *
+ * ===== App Models =====
  */
 
 /// Application user model
 model User {
-  id    String  @id @default(cuid())
-  email String  @unique @db.VarChar(320)
-  name  String? @db.VarChar(200)
-
+  id             String   @id @default(cuid())
+  email          String   @unique @db.VarChar(320)
+  name           String?  @db.VarChar(200)   // legacy display; some UI still reads this
   // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword String @db.VarChar(255)
+  hashedPassword String   @db.VarChar(255)
+
+  // ---- New: Profile fields (non-breaking, optional) ----
+  displayName String?       @db.VarChar(200)
+  avatarUrl   String?       @db.Text
+  bio         String?       @db.Text
+  languages   String[]      @default([])     // e.g. ["en", "ar"]; required with empty default to avoid null checks
+  timeZone    String?       @db.VarChar(64)  // e.g. "Africa/Cairo"
 
   // ---- Legacy UI scoping (deprecated in product; kept to avoid breaking code) ----
   activeOrgId String?
@@ -153,8 +157,7 @@ model User {
   memberships OrganizationMembership[]
 
   // ---- Expert visibility/exclusivity ----
-  expertStatus ExpertStatus? @default(PUBLIC)
-
+  expertStatus   ExpertStatus? @default(PUBLIC)
   exclusiveOrgId String?
   exclusiveOrg   Organization? @relation("ExclusiveOrg", fields: [exclusiveOrgId], references: [id], onDelete: SetNull)
 
@@ -167,11 +170,9 @@ model User {
   // Favorites created by this user
   favoriteListsCreated FavoriteList[] @relation("FavoriteListCreatedBy")
 
-  // ⭐ Back-relation for BookingGuest.user
+  // ⭐ Back-relations
   bookingGuests BookingGuest[]
-
-  // ⭐ Back-relation for FavoriteListItem.targetUser
-  favoritedIn FavoriteListItem[]
+  favoritedIn   FavoriteListItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -181,30 +182,30 @@ model User {
 
 /// Bookings table (current UI fields; org-scoped)
 model Booking {
-  id      String @id @default(cuid())
-  subject String @db.VarChar(300)
+  id           String          @id @default(cuid())
+  subject      String          @db.VarChar(300)
 
   // ---- Legacy editorial fields (kept) ----
-  expertName   String @db.VarChar(200)
-  newsroomName String @db.VarChar(200)
+  expertName   String          @db.VarChar(200)
+  newsroomName String          @db.VarChar(200)
 
   // ---- Appearance & Access (revised) ----
-  appearanceScope    AppearanceScope    @default(UNIFIED)
-  appearanceType     AppearanceType? // used when UNIFIED; nullable when PER_GUEST
+  appearanceScope   AppearanceScope   @default(UNIFIED)
+  appearanceType    AppearanceType?   // used when UNIFIED; nullable when PER_GUEST
   accessProvisioning AccessProvisioning @default(SHARED)
+  status            BookingStatus     @default(PENDING)
 
-  status       BookingStatus @default(PENDING)
   startAt      DateTime
   durationMins Int
 
   // Booking defaults (used when UNIFIED and/or SHARED, and as fallbacks)
   // ONLINE
-  locationUrl     String? @db.Text
+  locationUrl   String? @db.Text
   // IN_PERSON
-  locationName    String? @db.VarChar(300)
+  locationName   String? @db.VarChar(300)
   locationAddress String?
   // PHONE
-  dialInfo        String? @db.Text
+  dialInfo       String? @db.Text
 
   // Optional editorial extras (visibility controlled by OrgSettings)
   programName   String? @db.VarChar(200)
@@ -217,7 +218,7 @@ model Booking {
 
   // ---- Expert FK (legacy mirror; optional; to be deprecated later) ----
   expertUserId String?
-  expert       User?   @relation("ExpertBookings", fields: [expertUserId], references: [id], onDelete: SetNull)
+  expert       User? @relation("ExpertBookings", fields: [expertUserId], references: [id], onDelete: SetNull)
 
   // Guests & notes
   guests BookingGuest[]
@@ -233,32 +234,32 @@ model Booking {
 
 /// Join table for booking participants (experts/reporters) with per-guest appearance & access
 model BookingGuest {
-  id String @id @default(cuid())
+  id        String   @id @default(cuid())
 
   bookingId String
-  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   // Internal or external
-  userId String? // nullable for external guest snapshots
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?         // nullable for external guest snapshots
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   // External snapshot
-  name String // snapshot for external guests; for internal, duplicate of user.name at time of add
-
-  kind ParticipantKind // EXPERT | REPORTER
+  name String            // snapshot for external guests; for internal, duplicate of user.name at time of add
+  kind ParticipantKind   // EXPERT | REPORTER
 
   // Display order
   order Int @default(0)
 
   // Per-guest appearance & access
   appearanceType AppearanceType
+
   // ONLINE
-  joinUrl        String?
+  joinUrl String?
   // IN_PERSON
-  venueName      String?
-  venueAddress   String?
+  venueName    String?
+  venueAddress String?
   // PHONE
-  dialInfo       String?
+  dialInfo String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -271,15 +272,15 @@ model BookingGuest {
 
 /// Notes attached to a booking (auth: HOST+ can create; readable by HOST+)
 model BookingNote {
-  id String @id @default(cuid())
+  id        String   @id @default(cuid())
 
   bookingId String
-  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   authorId String
-  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  author   User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
-  body String @db.Text
+  body     String   @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -288,39 +289,39 @@ model BookingNote {
 }
 
 /**
- * ===== Favorites (org-wide lists) ===== *
+ * ===== Favorites (org-wide lists) =====
  */
 
 model FavoriteList {
-  id String @id @default(cuid())
-
-  orgId        String
+  id          String   @id @default(cuid())
+  orgId       String
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  name String @db.VarChar(200)
+  name        String   @db.VarChar(200)
 
   createdById String
-  createdBy   User   @relation("FavoriteListCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdBy   User     @relation("FavoriteListCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
 
-  items FavoriteListItem[]
+  items       FavoriteListItem[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@index([orgId, name])
 }
 
 model FavoriteListItem {
-  id String @id @default(cuid())
+  id         String   @id @default(cuid())
 
-  listId String
-  list   FavoriteList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  listId     String
+  list       FavoriteList @relation(fields: [listId], references: [id], onDelete: Cascade)
 
-  targetUserId String // the favorited expert/reporter user
-  targetUser   User   @relation(fields: [targetUserId], references: [id], onDelete: Cascade)
+  // the favorited expert/reporter user
+  targetUserId String
+  targetUser   User        @relation(fields: [targetUserId], references: [id], onDelete: Cascade)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   // Unique per list/target user
   @@unique([listId, targetUserId])

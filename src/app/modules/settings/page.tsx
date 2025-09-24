@@ -1,10 +1,12 @@
 "use client";
 
 /**
- * Settings — resilient save feedback
- * - Preserves: /api/toggles (GET/PUT), <body data-*> sync, and useTheme()
- * - Standardizes: Button, Alert
- * - Feedback: portal ToastBox + inline chip + ARIA live region
+ * Settings (autosave)
+ * - Toggles save IMMEDIATELY on switch (no Save buttons).
+ * - Green toast appears on every successful change.
+ * - Still resilient to GET failures and flat/legacy response shapes.
+ * - Updates <body data-*> after successful save so booking UI reacts.
+ * - NEW: Shows "Organization profile" link for Owners (200 from /api/org/profile).
  */
 
 import * as React from "react";
@@ -12,11 +14,7 @@ import Link from "next/link";
 import { createPortal } from "react-dom";
 import { useTheme } from "../../../components/theme-provider";
 
-/** ---------- Shared UI components (default or named exports) ---------- */
-import * as ButtonModule from "../../../components/ui/Button";
-const Button: React.ElementType =
-  (ButtonModule as any).Button ?? (ButtonModule as any).default;
-
+// Minimal Alert (kept)
 import * as AlertModule from "../../../components/ui/Alert";
 const Alert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
@@ -26,60 +24,89 @@ type Toggles = {
   showProgramName: boolean;
   showHostName: boolean;
   showTalkingPoints: boolean;
+  allowInPerson: boolean;
+  allowOnline: boolean;
 };
+type PartialTogglesFromApi = Partial<Toggles> & { [k: string]: unknown };
 
-/** ---------- Minimal in-file Toast (works even if shared Toast is non-renderable) ---------- */
-function ToastBox(props: {
-  kind?: "success" | "error";
-  children: React.ReactNode;
-  onClose?: () => void;
-}) {
-  const kind = props.kind ?? "success";
+/** ---------- Toast ---------- */
+function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   return (
     <div
       role="status"
-      className="pointer-events-auto min-w-[220px] max-w-[360px] rounded-xl border bg-white/95 p-3 shadow-2xl backdrop-blur"
-      style={{ borderColor: kind === "success" ? "#16a34a" : "#dc2626" }}
+      className="fixed bottom-4 right-4 z-50 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-green-900 shadow-lg"
     >
-      <div className="flex items-start gap-3">
-        <div
-          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
-            kind === "success" ? "bg-green-600" : "bg-red-600"
-          }`}
-          aria-hidden
-        />
-        <div className="text-sm text-gray-900">{props.children}</div>
-        {props.onClose && (
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={props.onClose}
-            className="ml-auto rounded px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
-          >
-            ✕
-          </button>
-        )}
-      </div>
+      <span className="mr-3">{props.children}</span>
+      {props.onClose && (
+        <button
+          onClick={props.onClose}
+          className="ml-2 rounded-md px-2 py-1 text-sm hover:bg-black/5"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      )}
     </div>
   );
 }
 
+/** ---------- helpers ---------- */
+function toBool(v: unknown, fallback: boolean): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    if (v.toLowerCase() === "true") return true;
+    if (v.toLowerCase() === "false") return false;
+  }
+  return fallback;
+}
+
 export default function SettingsPage() {
   const [loading, setLoading] = React.useState(true);
-  const [saving, setSaving] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [success, setSuccess] = React.useState<string | null>(null); // drives toast/chip
+  const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const [toggles, setToggles] = React.useState<Toggles>({
     showProgramName: true,
     showHostName: true,
     showTalkingPoints: true,
+    allowInPerson: true,
+    allowOnline: true,
   });
 
-  // === User-level theme (light by default) ===
-  const { theme, setTheme } = useTheme();
+  // Show one green toast for any successful change
+  const [toast, setToast] = React.useState<string | null>(null);
 
-  // Load current toggles from API (preserved)
+  // Prevent double-submit per key
+  const savingRef = React.useRef<Set<keyof Toggles>>(new Set());
+
+  // Owner check → controls "Organization profile" section visibility
+  const [canEditOrg, setCanEditOrg] = React.useState<boolean | null>(null);
+
+  // Theme (unchanged, robust)
+  const themeApi = useTheme() as any;
+  const theme: string | undefined = themeApi?.theme;
+  const setTheme: ((v: "light" | "dark") => void) | undefined =
+    themeApi?.setTheme;
+  const toggleTheme: (() => void) | undefined = themeApi?.toggleTheme;
+
+  function chooseTheme(next: "light" | "dark") {
+    if (setTheme) return setTheme(next);
+    if (toggleTheme && typeof theme === "string") {
+      const wantDark = next === "dark";
+      const isDark = theme === "dark";
+      if (wantDark !== isDark) toggleTheme();
+      return;
+    }
+    if (typeof document !== "undefined") {
+      const root = document.documentElement;
+      if (next === "dark") root.classList.add("dark");
+      else root.classList.remove("dark");
+      try {
+        localStorage.setItem("theme", next);
+      } catch {}
+    }
+  }
+
+  // Load toggles (accepts flat or { toggles } shapes)
   React.useEffect(() => {
     let ignore = false;
     (async () => {
@@ -87,16 +114,25 @@ export default function SettingsPage() {
         setLoading(true);
         const res = await fetch("/api/toggles", { cache: "no-store" });
         if (!res.ok) throw new Error("Failed to load toggles");
-        const data = (await res.json()) as {
-          toggles?: Toggles;
-          error?: string;
+        const raw = await res.json();
+        const data: PartialTogglesFromApi =
+          (raw && typeof raw === "object" && "toggles" in raw
+            ? (raw as any).toggles
+            : raw) ?? {};
+
+        const next: Toggles = {
+          showProgramName: toBool(data.showProgramName, true),
+          showHostName: toBool(data.showHostName, true),
+          showTalkingPoints: toBool(data.showTalkingPoints, true),
+          allowInPerson: toBool((data as any).allowInPerson, true),
+          allowOnline: toBool((data as any).allowOnline, true),
         };
-        if (ignore) return;
-        if (!data.toggles) throw new Error(data.error || "Invalid response");
-        setToggles(data.toggles);
-        setError(null);
+        if (!ignore) {
+          setToggles(next);
+          setLoadError(null);
+        }
       } catch (e: any) {
-        if (!ignore) setError(e?.message || "Failed to load toggles");
+        if (!ignore) setLoadError(e?.message || "Failed to load toggles");
       } finally {
         if (!ignore) setLoading(false);
       }
@@ -106,160 +142,183 @@ export default function SettingsPage() {
     };
   }, []);
 
-  // Sync flags into <body data-*> so booking pages can read them on mount (preserved)
-  function setBodyDatasets(next: Toggles) {
+  // Owner capability probe (silent): if GET /api/org/profile is 200 → show link
+  React.useEffect(() => {
+    let disposed = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/org/profile", { cache: "no-store" });
+        if (disposed) return;
+        setCanEditOrg(res.ok); // 200 => true; 401/403/404 => false
+      } catch {
+        if (!disposed) setCanEditOrg(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  // Sync <body data-*> after a successful save
+  function applyBodyDatasets(next: Toggles) {
     if (typeof document === "undefined") return;
     const ds = document.body.dataset as DOMStringMap;
     ds.showProgramName = String(next.showProgramName);
     ds.showHostName = String(next.showHostName);
     ds.showTalkingPoints = String(next.showTalkingPoints);
+    ds.allowInPerson = String(next.allowInPerson);
+    ds.allowOnline = String(next.allowOnline);
   }
 
-  // Save toggles (preserved logic) + resilient feedback
-  async function handleSave(e?: React.FormEvent) {
-    if (e) e.preventDefault();
-    try {
-      setSaving(true);
-      setSuccess(null);
-      setError(null);
+  // Autosave a single key (optimistic)
+  async function saveToggle<K extends keyof Toggles>(
+    key: K,
+    value: Toggles[K]
+  ) {
+    if (savingRef.current.has(key)) return;
+    savingRef.current.add(key);
 
+    // Optimistic UI
+    setToggles((t) => ({ ...t, [key]: value }));
+    try {
       const res = await fetch("/api/toggles", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toggles),
+        body: JSON.stringify({ [key]: value }),
       });
-      // Some setups return empty body; handle safely.
-      let data: any = {};
+      const ok = res.ok;
       try {
-        data = await res.json();
+        await res.json();
       } catch {
-        // ignore empty body
+        /* empty body ok */
       }
-      if (!res.ok) throw new Error(data?.error || "Failed to save toggles");
+      if (!ok) throw new Error("Failed to save");
 
-      setBodyDatasets(toggles);
-
-      // Visible feedback
-      setSuccess("Saved!");
-    } catch (e: any) {
-      setError(e?.message || "Failed to save toggles");
-      setSuccess(null);
+      // Success → sync body dataset + toast
+      const next = { ...toggles, [key]: value } as Toggles;
+      applyBodyDatasets(next);
+      setToast("Saved!");
+    } catch {
+      // Revert if failed
+      setToggles((t) => ({
+        ...t,
+        [key]: !value as unknown as Toggles[typeof key],
+      }));
+      setToast(null); // only green toast on success (per request)
     } finally {
-      setSaving(false);
+      savingRef.current.delete(key);
     }
   }
 
-  // Auto-hide success toast after 1.8s
+  // Auto-hide toast
   React.useEffect(() => {
-    if (!success) return;
-    const t = setTimeout(() => setSuccess(null), 1800);
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1500);
     return () => clearTimeout(t);
-  }, [success]);
+  }, [toast]);
 
-  // Portal root (mounted only in browser)
   const [portalReady, setPortalReady] = React.useState(false);
   React.useEffect(() => setPortalReady(true), []);
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-6">
-      {/* SR live region for success messages */}
-      <div aria-live="polite" className="sr-only">
-        {success ? "Saved" : ""}
-      </div>
+    <div className="mx-auto max-w-3xl p-6">
+      <h1 className="mb-2 text-2xl font-semibold">Settings</h1>
+      <Link
+        href="/modules/booking"
+        className="text-sm text-blue-700 underline underline-offset-2"
+      >
+        ← Back to bookings
+      </Link>
 
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <Link
-          href="/modules/booking"
-          className="text-sm text-blue-600 underline"
-        >
-          ← Back to bookings
-        </Link>
-      </header>
+      {/* ========== Organization (Owner-only link) ========== */}
+      {canEditOrg ? (
+        <section className="mt-6 rounded-2xl border p-5">
+          <h2 className="mb-1 text-lg font-medium">Organization</h2>
+          <p className="mb-4 text-sm text-gray-600">
+            Edit your organization name and other profile details.
+          </p>
+          <Link
+            href="/modules/settings/org"
+            className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+          >
+            Open organization profile →
+          </Link>
+        </section>
+      ) : null}
 
-      {/* ========== Org Feature Toggles (existing) ========== */}
-      <form onSubmit={handleSave} className="space-y-3 rounded-xl border p-4">
-        <h2 className="text-lg font-medium">Org Feature Toggles</h2>
-        <p className="text-sm text-gray-600">
+      {/* ========== Org Feature Toggles (autosave) ========== */}
+      <section className="mt-6 rounded-2xl border p-5">
+        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
+        <p className="mb-4 text-sm text-gray-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <p className="text-sm text-gray-600">Loading…</p>
-        ) : error ? (
-          <Alert variant="error">{error}</Alert>
+          <div className="rounded-md bg-gray-100 p-4 text-sm">Loading…</div>
         ) : (
           <>
-            <ToggleRow
-              label="Program name"
-              description="Show 'Program name' on booking form"
-              checked={toggles.showProgramName}
-              onChange={(v) =>
-                setToggles((t) => ({ ...t, showProgramName: v }))
-              }
-            />
-            <ToggleRow
-              label="Host name"
-              description="Show 'Host name' on booking form"
-              checked={toggles.showHostName}
-              onChange={(v) => setToggles((t) => ({ ...t, showHostName: v }))}
-            />
-            <ToggleRow
-              label="Talking points"
-              description="Show 'Talking points' on booking form"
-              checked={toggles.showTalkingPoints}
-              onChange={(v) =>
-                setToggles((t) => ({ ...t, showTalkingPoints: v }))
-              }
-            />
+            {loadError && (
+              <div className="mb-4">
+                <Alert>{loadError}</Alert>
+              </div>
+            )}
 
-            <div className="mt-3 flex items-center gap-3">
-              <Button
-                type="submit"
-                disabled={saving}
-                className="px-4 py-2 text-sm"
-              >
-                {saving ? "Saving…" : "Save changes"}
-              </Button>
+            <div className="space-y-4">
+              <ToggleRow
+                label="Show Program name"
+                description="Display the Program name field on the booking form."
+                checked={toggles.showProgramName}
+                onChange={(v) => saveToggle("showProgramName", v)}
+              />
+              <ToggleRow
+                label="Show Host name"
+                description="Display the Host name field on the booking form."
+                checked={toggles.showHostName}
+                onChange={(v) => saveToggle("showHostName", v)}
+              />
+              <ToggleRow
+                label="Show Talking points"
+                description="Display the Talking points field on the booking form."
+                checked={toggles.showTalkingPoints}
+                onChange={(v) => saveToggle("showTalkingPoints", v)}
+              />
+            </div>
 
-              <Button
-                type="button"
-                className="border px-4 py-2 text-sm"
-                onClick={() =>
-                  setToggles({
-                    showProgramName: true,
-                    showHostName: true,
-                    showTalkingPoints: true,
-                  })
-                }
-              >
-                Reset to defaults
-              </Button>
-
-              {/* Inline chip so there is ALWAYS a visible signal even if a toast is clipped */}
-              {success && (
-                <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-medium text-green-700 ring-1 ring-green-200">
-                  Saved!
-                </span>
-              )}
+            <div className="mt-5 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
+              <strong>Tip</strong>: Changes apply immediately. The Booking form
+              reads flags from <code>&lt;body data-*&gt;</code> on mount.
             </div>
           </>
         )}
+      </section>
 
-        <div className="pt-2">
-          <h3 className="mb-1 text-sm font-semibold">Tip</h3>
-          <p className="text-sm text-gray-600">
-            Changes apply immediately. The Booking form reads flags from{" "}
-            <code>&lt;body data-*&gt;</code> on mount. After saving, navigate to
-            the form and it will use the new values.
-          </p>
+      {/* ========== Appearance Types (autosave) ========== */}
+      <section className="mt-6 rounded-2xl border p-5">
+        <h2 className="mb-1 text-lg font-medium">Appearance Types</h2>
+        <p className="mb-4 text-sm text-gray-600">
+          Choose which appearance types are available to your team.
+        </p>
+
+        <div className="space-y-4">
+          <ToggleRow
+            label="Allow In-person"
+            description="Enable in-person appearances in booking forms."
+            checked={toggles.allowInPerson}
+            onChange={(v) => saveToggle("allowInPerson", v)}
+          />
+          <ToggleRow
+            label="Allow Online"
+            description="Enable online/virtual appearances in booking forms."
+            checked={toggles.allowOnline}
+            onChange={(v) => saveToggle("allowOnline", v)}
+          />
         </div>
-      </form>
+      </section>
 
-      {/* ========== User Theme (existing) ========== */}
-      <section className="space-y-3 rounded-xl border p-4">
-        <h2 className="text-lg font-medium">Appearance</h2>
-        <p className="text-sm text-gray-600">
+      {/* ========== Theme (unchanged) ========== */}
+      <section className="mt-6 rounded-2xl border p-5">
+        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
+        <p className="mb-4 text-sm text-gray-600">
           Choose your theme for this device.
         </p>
 
@@ -268,44 +327,40 @@ export default function SettingsPage() {
             <input
               type="radio"
               name="theme"
-              value="light"
-              checked={theme === "light"}
-              onChange={() => setTheme("light")}
+              checked={theme !== "dark"}
+              onChange={() => chooseTheme("light")}
             />
-            <span>Light (default)</span>
+            Light (default)
           </label>
+
           <label className="inline-flex items-center gap-2">
             <input
               type="radio"
               name="theme"
-              value="dark"
               checked={theme === "dark"}
-              onChange={() => setTheme("dark")}
+              onChange={() => chooseTheme("dark")}
             />
-            <span>Dark</span>
+            Dark
           </label>
         </div>
 
-        <p className="text-sm text-gray-600">
-          This preference is saved locally in your browser. We can move it to a
-          DB-backed user setting later.
+        <p className="mt-2 text-xs text-gray-500">
+          Stored locally (or via provider). We can persist per-user later.
         </p>
       </section>
 
-      {/* Portal toast (escapes stacking/overflow issues) */}
-      {portalReady && success
+      {/* Green toast only (per request) */}
+      {portalReady && toast
         ? createPortal(
-            <div className="pointer-events-none fixed bottom-4 right-4 z-[9999]">
-              <ToastBox onClose={() => setSuccess(null)}>{success}</ToastBox>
-            </div>,
+            <ToastBox onClose={() => setToast(null)}>{toast}</ToastBox>,
             document.body
           )
         : null}
-    </main>
+    </div>
   );
 }
 
-/** ---------- Small presentational toggle row (preserved) ---------- */
+/** ---------- Toggle row ---------- */
 function ToggleRow(props: {
   label: string;
   description?: string;
@@ -313,31 +368,40 @@ function ToggleRow(props: {
   onChange: (val: boolean) => void;
 }) {
   const id = React.useId();
+  const [local, setLocal] = React.useState(props.checked);
+
+  // keep local knob position in sync when parent changes (e.g., after revert)
+  React.useEffect(() => setLocal(props.checked), [props.checked]);
+
   return (
-    <div className="flex items-center justify-between rounded-lg border p-3">
-      <div className="mr-4">
-        <label htmlFor={id} className="font-medium">
+    <div className="flex items-start justify-between gap-4 rounded-xl border p-4">
+      <div className="grow">
+        <label htmlFor={id} className="block text-sm font-medium">
           {props.label}
         </label>
         {props.description && (
-          <p className="text-sm text-gray-600">{props.description}</p>
+          <p className="mt-1 text-xs text-gray-600">{props.description}</p>
         )}
       </div>
 
       <button
         id={id}
         type="button"
-        onClick={() => props.onChange(!props.checked)}
+        onClick={() => {
+          const next = !local;
+          setLocal(next); // instant UI
+          props.onChange(next); // autosave
+        }}
         className={`relative h-6 w-11 rounded-full transition ${
-          props.checked ? "bg-gray-900" : "bg-gray-300"
+          local ? "bg-gray-900" : "bg-gray-300"
         }`}
         role="switch"
-        aria-checked={props.checked}
+        aria-checked={local}
         aria-label={props.label}
       >
         <span
-          className={`absolute left-0 top-0 h-6 w-6 rounded-full bg-white shadow transition ${
-            props.checked ? "translate-x-5" : "translate-x-0"
+          className={`absolute left-0.5 top-0.5 inline-block h-5 w-5 transform rounded-full bg-white transition ${
+            local ? "translate-x-5" : "translate-x-0"
           }`}
         />
       </button>
