@@ -1,34 +1,44 @@
 "use client";
 
 /**
- * Booking Create Form + Async, Slot-Aware Expert Combobox (MULTI-SELECT)
- * - Source switcher: Org / Public / Both
- * - "Only available for this slot" filter (uses startAt + durationMins)
- * - Debounced search, pagination via nextCursor, keyboard nav (↑/↓/Enter/Escape)
- * - Multi-select: chips with "set primary" (first item is primary)
- * - Primary maps to expertUserId/expertName for current API; others are UI-only for now
+ * New Booking
+ * - Experts: MULTI-SELECT, no "primary"
+ * - Host: first-class combobox (mirrors to hostName for back-compat)
+ * - Appearance model parity with Edit (minus PHONE on create for now):
+ *     * appearanceScope: UNIFIED | PER_GUEST
+ *     * accessProvisioning: SHARED | PER_GUEST
+ *     * unifiedType (when UNIFIED): ONLINE | IN_PERSON
+ *     * booking defaults (locationUrl | locationName/locationAddress)
+ *     * per-guest appearance & fields when PER_GUEST (ONLINE/IN_PERSON only)
  */
 
 import React from "react";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
 
-/* ---------- Helpers: read server-driven feature flags ---------- */
+/* ---------- Flags from <body data-*> ---------- */
 function readBooleanDataset(key: string, fallback = true): boolean {
   if (typeof document === "undefined") return fallback;
   const raw = (document.body.dataset as DOMStringMap)[key];
   if (raw == null) return fallback;
   return raw === "true";
 }
+
 type Flags = {
   showProgramName: boolean;
   showHostName: boolean;
   showTalkingPoints: boolean;
 };
 
-/* ---------- Appearance types ---------- */
+/* ---------- Enums (PHONE disabled on create to match API) ---------- */
 const AppearanceType = z.enum(["ONLINE", "IN_PERSON"]);
 type TAppearanceType = z.infer<typeof AppearanceType>;
+
+const Scope = z.enum(["UNIFIED", "PER_GUEST"]);
+type TScope = z.infer<typeof Scope>;
+
+const Provisioning = z.enum(["SHARED", "PER_GUEST"]);
+type TProvisioning = z.infer<typeof Provisioning>;
 
 /* ---------- Datetime helpers ---------- */
 function nextFullHourLocalISO(): string {
@@ -48,77 +58,7 @@ function toDatetimeLocalValue(iso: string): string {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
-/* ---------- Dynamic schema builder (respects flags) ---------- */
-function buildSchema(flags: Flags) {
-  const base = z.object({
-    subject: z
-      .string({ required_error: "Subject is required" })
-      .trim()
-      .min(2, "Please enter a longer subject")
-      .max(300, "Subject is too long"),
-    newsroomName: z
-      .string({ required_error: "Newsroom name is required" })
-      .trim()
-      .min(2, "Please enter a longer newsroom name")
-      .max(200, "Newsroom name is too long"),
-    startAt: z
-      .preprocess((v) => {
-        if (typeof v === "string") return new Date(v);
-        if (v instanceof Date) return v;
-        return v;
-      }, z.date({ required_error: "Start date/time is required" }))
-      .refine((d) => d.getTime() > Date.now(), {
-        message: "Start time must be in the future",
-      }),
-    durationMins: z
-      .number({ required_error: "Duration is required" })
-      .int("Duration must be a whole number")
-      .min(5, "Duration must be at least 5 minutes")
-      .max(600, "Duration seems too long"),
-    /** FIX: allow cuid/any string — UUID check was blocking submit */
-    expertUserId: z.string().optional(),
-    expertName: z.string().trim().max(200).optional(),
-  });
-
-  const legacyCommon = z.object({
-    guestName: z
-      .string({ required_error: "Guest name is required" })
-      .trim()
-      .min(2, "Please enter at least 2 characters"),
-    programName: flags.showProgramName
-      ? z.string().trim().max(120, "Program name is too long").optional()
-      : z.undefined(),
-    hostName: flags.showHostName
-      ? z.string().trim().max(120, "Host name is too long").optional()
-      : z.undefined(),
-    talkingPoints: flags.showTalkingPoints
-      ? z.string().trim().max(2000, "Talking points are too long").optional()
-      : z.undefined(),
-  });
-
-  const Online = z.object({
-    appearanceType: z.literal(AppearanceType.Enum.ONLINE),
-    meetingLink: z
-      .string({ required_error: "Meeting link is required" })
-      .url("Please enter a valid URL"),
-  });
-  const InPerson = z.object({
-    appearanceType: z.literal(AppearanceType.Enum.IN_PERSON),
-    venueAddress: z
-      .string({ required_error: "Venue/address is required" })
-      .min(5, "Please enter a longer address"),
-  });
-
-  return z.intersection(
-    base,
-    z.discriminatedUnion("appearanceType", [
-      legacyCommon.merge(Online),
-      legacyCommon.merge(InPerson),
-    ])
-  );
-}
-
-/* ---------- UI components (namespace import + runtime fallback) ---------- */
+/* ---------- UI building blocks ---------- */
 import * as ButtonModule from "../../../../components/ui/Button";
 const UIButton: React.ElementType =
   (ButtonModule as any).Button ?? (ButtonModule as any).default;
@@ -127,20 +67,25 @@ import * as AlertModule from "../../../../components/ui/Alert";
 const UIAlert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
 
-/* ---------- Small utilities ---------- */
 function clsx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
+function useDebounce<T>(value: T, delay = 250) {
+  const [v, setV] = React.useState(value);
+  React.useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
 
 /* ===============================================================
- * Async Expert Combobox (MULTI-SELECT)
+ * Expert Search (MULTI-SELECT)
  * ===============================================================*/
 type ExpertRow = {
   id: string;
   name: string | null;
-  avatarUrl?: string | null;
   bio?: string | null;
-  kind?: "EXPERT" | "REPORTER";
   city?: string | null;
   countryCode?: string | null;
   tags?: string[];
@@ -149,20 +94,17 @@ type ExpertRow = {
     reasons?: string[];
   };
 };
-
 type Picked = { id: string; name: string };
 
 function ExpertCombobox(props: {
   startAtISO: string;
   durationMins: number;
   values: Picked[];
-  onChange: (next: Picked[]) => void; // full array
+  onChange: (next: Picked[]) => void;
 }) {
   const { startAtISO, durationMins, values, onChange } = props;
 
-  const wrapperRef = React.useRef<HTMLDivElement | null>(null);
-  const inputRef = React.useRef<HTMLInputElement | null>(null);
-
+  const wrapRef = React.useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
   const [visibility, setVisibility] = React.useState<"org" | "public" | "both">(
@@ -173,18 +115,18 @@ function ExpertCombobox(props: {
   const [items, setItems] = React.useState<ExpertRow[]>([]);
   const [nextCursor, setNextCursor] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string>("");
-  const [activeIndex, setActiveIndex] = React.useState<number>(-1);
+  const [error, setError] = React.useState("");
 
+  const [activeIndex, setActiveIndex] = React.useState(-1);
   const debouncedQ = useDebounce(q, 250);
 
   React.useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      if (!wrapperRef.current) return;
-      if (!wrapperRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current) return;
+      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
   React.useEffect(() => {
@@ -210,22 +152,16 @@ function ExpertCombobox(props: {
       const res = await fetch(`/api/experts/search?${sp.toString()}`, {
         credentials: "include",
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.error || `Failed to fetch experts (${res.status})`);
-      }
-      const j = (await res.json()) as {
-        items: ExpertRow[];
-        count: number;
-        nextCursor: string | null;
-      };
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed (${res.status})`);
+
       setItems((prev) =>
         reset ? j.items || [] : [...prev, ...(j.items || [])]
       );
       setNextCursor(j.nextCursor || null);
       setActiveIndex((x) => (reset ? (j.items?.length ? 0 : -1) : x));
     } catch (err: any) {
-      setError(err?.message || "Failed to load experts.");
+      setError(err?.message || "Failed to search experts.");
       if (reset) {
         setItems([]);
         setNextCursor(null);
@@ -235,114 +171,60 @@ function ExpertCombobox(props: {
     }
   }
 
-  function togglePick(row: ExpertRow) {
-    const exists = values.some((v) => v.id === row.id);
-    if (exists) {
-      onChange(values.filter((v) => v.id !== row.id));
-    } else {
-      onChange([...values, { id: row.id, name: row.name || "Unknown" }]);
-    }
+  function alreadyPicked(id: string) {
+    return values.some((v) => v.id === id);
   }
-
-  function setPrimary(id: string) {
-    const idx = values.findIndex((v) => v.id === id);
-    if (idx <= 0) return;
-    const next = [...values];
-    const [item] = next.splice(idx, 1);
-    next.unshift(item);
-    onChange(next);
+  function add(row: ExpertRow) {
+    if (alreadyPicked(row.id)) return;
+    onChange([...values, { id: row.id, name: row.name || "Unknown" }]);
   }
-
-  function clearAll() {
-    onChange([]);
-  }
-
-  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (!open) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActiveIndex((i) => Math.min(i + 1, items.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveIndex((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (activeIndex >= 0 && items[activeIndex])
-        togglePick(items[activeIndex]);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      setOpen(false);
-    }
+  function remove(id: string) {
+    onChange(values.filter((v) => v.id !== id));
   }
 
   return (
-    <div ref={wrapperRef} className="relative">
-      <label className="mb-1 block text-sm font-medium">
-        Select experts (search)
-      </label>
-
-      {/* Selected chips */}
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        {values.map((v, i) => (
-          <span
-            key={v.id}
-            className="inline-flex items-center gap-2 rounded-lg border px-2 py-1 text-xs"
-          >
-            <img
-              src={`https://ui-avatars.com/api/?name=${encodeURIComponent(
-                v.name
-              )}`}
-              alt={v.name}
-              className="h-5 w-5 rounded-full"
-            />
-            {v.name}
-            {i === 0 ? (
-              <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] text-yellow-900">
-                primary
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="rounded px-1 py-0.5 text-[10px] hover:bg-gray-100"
-                onClick={() => setPrimary(v.id)}
-                title="Make primary"
-              >
-                ☆ primary
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => onChange(values.filter((x) => x.id !== v.id))}
-              className="rounded p-0.5 text-gray-500 hover:bg-gray-100"
-              aria-label={`Remove ${v.name}`}
-            >
-              ×
-            </button>
-          </span>
-        ))}
+    <div className="space-y-2" ref={wrapRef}>
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">Select experts (search)</div>
         {values.length > 0 && (
           <button
             type="button"
-            onClick={clearAll}
-            className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
+            onClick={() => onChange([])}
+            className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
           >
             Clear all
           </button>
         )}
       </div>
 
-      {/* Input + browse */}
+      {/* chips */}
+      <div className="flex flex-wrap gap-2">
+        {values.map((v) => (
+          <span
+            key={v.id}
+            className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-3 py-1 text-sm"
+          >
+            <span>{v.name}</span>
+            <button
+              type="button"
+              onClick={() => remove(v.id)}
+              className="rounded p-0.5 text-gray-500 hover:bg-gray-200"
+              aria-label={`Remove ${v.name}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {/* search+toggle */}
       <div className="flex items-center gap-2">
         <input
-          ref={inputRef}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onFocus={() => setOpen(true)}
-          onKeyDown={onKeyDown}
           placeholder="Search experts…"
           className="min-w-[240px] flex-1 rounded-md border px-3 py-2"
-          aria-expanded={open}
-          aria-controls="expert-combobox-listbox"
         />
         <button
           type="button"
@@ -353,12 +235,10 @@ function ExpertCombobox(props: {
         </button>
       </div>
 
-      {/* Dropdown */}
       {open && (
-        <div className="absolute z-20 mt-2 w-full rounded-lg border bg-white shadow-lg">
-          {/* Controls */}
-          <div className="flex items-center justify-between gap-2 border-b p-2">
-            <div className="flex items-center gap-1">
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="flex items-center justify-between">
+            <div className="flex gap-1">
               {(["org", "public", "both"] as const).map((v) => (
                 <button
                   key={v}
@@ -385,127 +265,81 @@ function ExpertCombobox(props: {
             </label>
           </div>
 
-          {/* Results */}
-          <div
-            id="expert-combobox-listbox"
-            role="listbox"
-            className="max-h-80 overflow-auto p-1"
-          >
+          <div className="space-y-2">
             {loading && (
-              <div className="p-3 text-sm text-gray-600">Loading experts…</div>
+              <div className="rounded-md bg-gray-50 p-3 text-sm">Loading…</div>
             )}
             {error && (
-              <div className="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+              <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
                 {error}
               </div>
             )}
             {!loading && !error && items.length === 0 && (
-              <div className="p-3 text-sm text-gray-600">No matches.</div>
+              <div className="rounded-md bg-gray-50 p-3 text-sm">
+                No matches.
+              </div>
             )}
 
-            <ul className="space-y-1">
-              {items.map((e, idx) => {
-                const selected = values.some((v) => v.id === e.id);
-                const active = idx === activeIndex;
-                const badge =
-                  e.availability?.status === "AVAILABLE"
-                    ? "bg-green-100 text-green-800"
-                    : e.availability?.status === "BUSY"
-                    ? "bg-red-100 text-red-800"
-                    : "bg-gray-100 text-gray-700";
-
-                return (
-                  <li key={e.id}>
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      className={clsx(
-                        "flex w-full items-start gap-3 rounded-md border px-2 py-2 text-left",
-                        selected ? "ring-2 ring-black" : "",
-                        active ? "bg-gray-50" : ""
-                      )}
-                      onMouseEnter={() => setActiveIndex(idx)}
-                      onClick={() => togglePick(e)} // MULTI: toggle, do not close
+            {items.map((e, idx) => {
+              const picked = alreadyPicked(e.id);
+              const badge =
+                e.availability?.status === "AVAILABLE"
+                  ? "bg-green-100 text-green-800"
+                  : e.availability?.status === "BUSY"
+                  ? "bg-red-100 text-red-800"
+                  : "bg-gray-100 text-gray-700";
+              return (
+                <button
+                  key={e.id}
+                  type="button"
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  onClick={() => add(e)}
+                  disabled={picked}
+                  className={clsx(
+                    "w-full rounded-md border px-3 py-2 text-left",
+                    picked && "opacity-50"
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{e.name || "Unnamed"}</div>
+                    <span
+                      className={clsx("rounded px-2 py-0.5 text-xs", badge)}
                     >
-                      <img
-                        src={
-                          e.avatarUrl ||
-                          `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                            e.name || "E"
-                          )}`
-                        }
-                        alt={e.name || "Expert"}
-                        className="h-8 w-8 rounded-full object-cover"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between">
-                          <p className="truncate text-sm font-medium">
-                            {e.name || "Unnamed"}
-                          </p>
-                          <span
-                            className={clsx(
-                              "ml-2 rounded px-2 py-0.5 text-[10px]",
-                              badge
-                            )}
-                          >
-                            {e.availability?.status ?? "UNKNOWN"}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-gray-600">
-                          {e.kind && (
-                            <span className="rounded border px-1 py-0.5">
-                              {e.kind.toLowerCase()}
-                            </span>
-                          )}
-                          {e.city && <span>{e.city}</span>}
-                          {e.countryCode && (
-                            <span className="rounded border px-1 py-0.5">
-                              {e.countryCode}
-                            </span>
-                          )}
-                          {(e.tags || []).slice(0, 2).map((t) => (
-                            <span
-                              key={t}
-                              className="rounded bg-blue-50 px-1.5 py-0.5 text-blue-800"
-                            >
-                              #{t}
-                            </span>
-                          ))}
-                        </div>
-                        {e.bio && (
-                          <p className="mt-1 line-clamp-2 text-[11px] text-gray-600">
-                            {e.bio}
-                          </p>
-                        )}
-                      </div>
-                      <input
-                        type="checkbox"
-                        readOnly
-                        checked={selected}
-                        className="mt-1 h-4 w-4"
-                        aria-hidden
-                      />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                      {e.availability?.status ?? "UNKNOWN"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-gray-600">
+                    {e.city && <span className="mr-2">{e.city}</span>}
+                    {e.countryCode && (
+                      <span className="mr-2">{e.countryCode}</span>
+                    )}
+                    {(e.tags || []).slice(0, 2).map((t) => (
+                      <span key={t} className="mr-2">
+                        #{t}
+                      </span>
+                    ))}
+                  </div>
+                  {e.bio && (
+                    <div className="mt-1 line-clamp-2 text-xs text-gray-500">
+                      {e.bio}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
 
             {nextCursor && !loading && (
-              <div className="p-2">
-                <button
-                  type="button"
-                  onClick={() => fetchPage(false)}
-                  className="w-full rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
-                >
-                  Load more
-                </button>
-              </div>
+              <button
+                onClick={() => fetchPage(false)}
+                type="button"
+                className="w-full rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+              >
+                Load more
+              </button>
             )}
           </div>
 
-          <div className="flex items-center justify-end gap-2 border-t p-2">
+          <div className="mt-2 flex justify-end">
             <button
               type="button"
               onClick={() => setOpen(false)}
@@ -520,134 +354,287 @@ function ExpertCombobox(props: {
   );
 }
 
-/** Debounce hook */
-function useDebounce<T>(value: T, ms = 250): T {
-  const [v, setV] = React.useState<T>(value);
+/* ===============================================================
+ * Host Combobox (first-class object; mirrors name to legacy hostName)
+ * ===============================================================*/
+type HostRow = { id: string; name: string | null };
+function HostCombobox(props: {
+  value: HostRow | null;
+  onChange: (next: HostRow | null) => void;
+}) {
+  const { value, onChange } = props;
+
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const [items, setItems] = React.useState<HostRow[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const debouncedQ = useDebounce(q, 250);
+
   React.useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
+    if (!open) return;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const sp = new URLSearchParams({ take: "20" });
+        if (debouncedQ) sp.set("q", debouncedQ);
+        const res = await fetch(`/api/hosts/search?${sp.toString()}`, {
+          credentials: "include",
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j?.error || "Failed to load hosts");
+        setItems(j.items || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load hosts");
+        setItems([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [open, debouncedQ]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">Host (optional)</div>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+        >
+          {open ? "Hide" : "Browse"}
+        </button>
+      </div>
+
+      <input
+        placeholder="Search hosts…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => setOpen(true)}
+        className="w-full rounded-md border px-3 py-2"
+      />
+
+      {open && (
+        <div className="space-y-2 rounded-md border p-3">
+          {loading && (
+            <div className="rounded-md bg-gray-50 p-3 text-sm">
+              Loading hosts…
+            </div>
+          )}
+          {error && (
+            <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+          {!loading && !error && items.length === 0 && (
+            <div className="rounded-md bg-gray-50 p-3 text-sm">
+              No host directory available.
+            </div>
+          )}
+          {items.map((h) => (
+            <button
+              key={h.id}
+              type="button"
+              className="flex w-full items-center justify-between rounded-md border px-3 py-2 text-left hover:bg-gray-50"
+              onClick={() => {
+                onChange({ id: h.id, name: h.name || "Unknown" });
+                setOpen(false);
+              }}
+            >
+              <span>{h.name || "Unnamed"}</span>
+              <span className="text-xs text-gray-400">{h.id}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {value && (
+        <div className="text-xs text-gray-600">
+          Selected host: <span className="font-medium">{value.name}</span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ===============================================================
  * Page
  * ===============================================================*/
+type GuestRow = {
+  appearanceType: TAppearanceType;
+  joinUrl?: string;
+  venueName?: string;
+  venueAddress?: string;
+};
+
 export default function NewBookingPage() {
   const router = useRouter();
 
-  // Flags from server (RootLayout writes them to <body data-*>)
-  const [flags, setFlags] = React.useState({
-    showProgramName: true,
-    showHostName: true,
-    showTalkingPoints: true,
+  const flags: Flags = {
+    showProgramName: readBooleanDataset("flagShowProgramName", true),
+    showHostName: readBooleanDataset("flagShowHostName", true),
+    showTalkingPoints: readBooleanDataset("flagShowTalkingPoints", true),
+  };
+
+  // Minimal schema (server is source of truth for complex validation)
+  const Schema = React.useMemo(
+    () =>
+      z.object({
+        subject: z.string().min(2),
+        newsroomName: z.string().min(2),
+        startAt: z.preprocess(
+          (v) => (typeof v === "string" ? new Date(v) : v),
+          z.date()
+        ),
+        durationMins: z.number().min(5).max(600),
+        appearanceScope: Scope,
+        accessProvisioning: Provisioning,
+        unifiedType: AppearanceType.optional(),
+      }),
+    []
+  );
+
+  /* ---------- Core fields ---------- */
+  const [form, setForm] = React.useState({
+    subject: "",
+    newsroomName: "",
+    startAt: nextFullHourLocalISO(),
+    durationMins: 30,
+    appearanceScope: "UNIFIED" as TScope,
+    accessProvisioning: "SHARED" as TProvisioning,
+    unifiedType: "ONLINE" as TAppearanceType, // UNIFIED only
+    // booking defaults
+    locationUrl: "",
+    locationName: "",
+    locationAddress: "",
+    // optional extras
+    programName: "",
+    hostName: "",
+    talkingPoints: "",
   });
+
+  const [experts, setExperts] = React.useState<Picked[]>([]);
+  const [host, setHost] = React.useState<HostRow | null>(null);
+
+  // Per-guest fields when PER_GUEST
+  const [guestMap, setGuestMap] = React.useState<Record<string, GuestRow>>({});
   React.useEffect(() => {
-    setFlags({
-      showProgramName: readBooleanDataset("showProgramName", true),
-      showHostName: readBooleanDataset("showHostName", true),
-      showTalkingPoints: readBooleanDataset("showTalkingPoints", true),
+    // ensure guestMap has rows for all picked experts (initialize from unified defaults)
+    setGuestMap((prev) => {
+      const next = { ...prev };
+      for (const e of experts) {
+        if (!next[e.id]) {
+          next[e.id] = { appearanceType: "ONLINE" };
+        }
+      }
+      // prune removed
+      for (const k of Object.keys(next)) {
+        if (!experts.some((e) => e.id === k)) delete next[k];
+      }
+      return next;
     });
-  }, []);
+  }, [experts]);
 
-  const schema = React.useMemo(() => buildSchema(flags), [flags]);
-
-  // Local form state
-  const [subject, setSubject] = React.useState("TV Interview");
-  const [newsroomName, setNewsroomName] = React.useState("");
-
-  const [startAtISO, setStartAtISO] = React.useState(nextFullHourLocalISO());
-  const [durationMins, setDurationMins] = React.useState(30);
-
-  // MULTI: selected experts (first item is primary)
-  const [selected, setSelected] = React.useState<
-    Array<{ id: string; name: string }>
-  >([]);
-
-  // Derived mapping to API fields today (primary only)
-  const primary = selected[0];
-  const [appearanceType, setAppearanceType] =
-    React.useState<TAppearanceType>("ONLINE");
-  const [guestName, setGuestName] = React.useState("");
-  const [meetingLink, setMeetingLink] = React.useState("");
-  const [venueAddress, setVenueAddress] = React.useState("");
-  const [programName, setProgramName] = React.useState("");
-  const [hostName, setHostName] = React.useState("");
-  const [talkingPoints, setTalkingPoints] = React.useState("");
-
-  const [errors, setErrors] = React.useState<Record<string, string>>({});
-  const [preview, setPreview] = React.useState<any>(null);
-  const [submitting, setSubmitting] = React.useState(false);
-  const [submitError, setSubmitError] = React.useState<string | null>(null);
-
-  // Keep API fields & legacy guestName in sync with current selection
+  // Mirror selected host name to legacy hostName text field
   React.useEffect(() => {
-    if (primary) {
-      setGuestName((g) => (g ? g : primary.name)); // fill if empty
-    }
-  }, [primary?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (host?.name) setForm((f) => ({ ...f, hostName: host.name! }));
+  }, [host?.name]);
 
-  function currentPayload(): unknown {
-    const base: any = {
-      subject: subject.trim(),
-      newsroomName: newsroomName.trim(),
-      startAt: new Date(startAtISO).toISOString(),
-      durationMins,
-      // Primary mapping (compat)
-      ...(primary
-        ? { expertUserId: primary.id, expertName: primary.name }
-        : {}),
-      appearanceType,
-      guestName: guestName.trim(),
-      ...(flags.showProgramName && programName.trim()
-        ? { programName: programName.trim() }
-        : {}),
-      ...(flags.showHostName && hostName.trim()
-        ? { hostName: hostName.trim() }
-        : {}),
-      ...(flags.showTalkingPoints && talkingPoints.trim()
-        ? { talkingPoints: talkingPoints.trim() }
-        : {}),
-      ...(appearanceType === "ONLINE"
-        ? { meetingLink: meetingLink.trim() }
-        : { venueAddress: venueAddress.trim() }),
-    };
-    return base;
+  function updateGuest(id: string, patch: Partial<GuestRow>) {
+    setGuestMap((m) => ({ ...m, [id]: { ...m[id], ...patch } }));
   }
 
-  function validateAndPreview(e?: React.FormEvent) {
-    if (e) e.preventDefault();
-    const payload = currentPayload();
-    const res = schema.safeParse(payload);
-    if (!res.success) {
-      const fieldErrors: Record<string, string> = {};
-      for (const issue of res.error.issues) {
-        const path = issue.path.join(".") || "form";
-        if (!fieldErrors[path]) fieldErrors[path] = issue.message;
-      }
-      setErrors(fieldErrors);
-      setPreview(null);
-      return;
-    }
-    setErrors({});
-    // Show the whole selection in preview (even if API gets only primary)
-    setPreview({ ...res.data, selectedExperts: selected });
-  }
+  /* ---------- Submit ---------- */
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [ok, setOk] = React.useState<string | null>(null);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSubmitError(null);
+    setError(null);
+    setOk(null);
 
-    const payload = currentPayload();
-    const parsed = schema.safeParse(payload);
-    if (!parsed.success) {
-      const fieldErrors: Record<string, string> = {};
-      for (const issue of parsed.error.issues) {
-        const path = issue.path.join(".") || "form";
-        if (!fieldErrors[path]) fieldErrors[path] = issue.message;
-      }
-      setErrors(fieldErrors);
-      setPreview(null);
+    const primary = experts[0] ?? null;
+
+    // Build guests[] payload (order preserved)
+    const guests =
+      experts.length === 0
+        ? []
+        : experts.map((x, i) => {
+            const g = guestMap[x.id] || {
+              appearanceType: "ONLINE" as TAppearanceType,
+            };
+            return {
+              userId: x.id,
+              name: x.name,
+              kind: "EXPERT",
+              order: i,
+              appearanceType:
+                form.appearanceScope === "UNIFIED"
+                  ? form.unifiedType
+                  : g.appearanceType,
+              joinUrl:
+                form.appearanceScope === "PER_GUEST" &&
+                g.appearanceType === "ONLINE"
+                  ? g.joinUrl || null
+                  : null,
+              venueName:
+                form.appearanceScope === "PER_GUEST" &&
+                g.appearanceType === "IN_PERSON"
+                  ? g.venueName || null
+                  : null,
+              venueAddress:
+                form.appearanceScope === "PER_GUEST" &&
+                g.appearanceType === "IN_PERSON"
+                  ? g.venueAddress || null
+                  : null,
+            };
+          });
+
+    const payload = {
+      subject: form.subject,
+      newsroomName: form.newsroomName,
+      startAt: new Date(form.startAt).toISOString(),
+      durationMins: Number(form.durationMins),
+
+      appearanceScope: form.appearanceScope,
+      accessProvisioning: form.accessProvisioning,
+      appearanceType:
+        form.appearanceScope === "UNIFIED" ? form.unifiedType : null,
+
+      // booking defaults (server will require relevant ones based on unifiedType)
+      locationUrl: form.locationUrl || null,
+      locationName: form.locationName || null,
+      locationAddress: form.locationAddress || null,
+
+      // back-compat mirror + full guests
+      expertUserId: primary?.id,
+      expertName: primary?.name ?? undefined,
+      guests,
+
+      // optional extras
+      programName: form.programName || undefined,
+      hostName: form.hostName || undefined,
+      talkingPoints: form.talkingPoints || undefined,
+    };
+
+    // Minimal client validation, server remains the source of truth
+    try {
+      Schema.parse({
+        subject: payload.subject,
+        newsroomName: payload.newsroomName,
+        startAt: payload.startAt,
+        durationMins: payload.durationMins,
+        appearanceScope: payload.appearanceScope,
+        accessProvisioning: payload.accessProvisioning,
+        unifiedType:
+          form.appearanceScope === "UNIFIED" ? form.unifiedType : undefined,
+      });
+    } catch (err: any) {
+      const first = err?.errors?.[0]?.message ?? "Please check your inputs.";
+      setError(first);
       return;
     }
 
@@ -656,303 +643,372 @@ export default function NewBookingPage() {
       const res = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.data),
+        credentials: "include",
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) {
-        let message = "Failed to create booking";
-        try {
-          const body = await res.json();
-          message =
-            body?.error || (res.status === 400 ? "Validation error" : message);
-        } catch {
-          // ignore
-        }
-        setSubmitError(message);
-        return;
-      }
-      // Success → redirect to list
-      window.location.href = "/modules/booking?created=1";
-    } catch {
-      setSubmitError("Network error. Please try again.");
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || "Failed to create booking");
+      setOk("Booking created.");
+      router.push(`/modules/booking/${j.booking?.id}`);
+    } catch (err: any) {
+      setError(err?.message || "Failed to create booking");
     } finally {
       setSubmitting(false);
     }
   }
 
-  // Clear opposite-side field + errors on appearance switch
-  React.useEffect(() => {
-    setErrors((prev) => {
-      const copy = { ...prev };
-      delete (copy as any).meetingLink;
-      delete (copy as any).venueAddress;
-      return copy;
-    });
-    if (appearanceType === "ONLINE") setVenueAddress("");
-    if (appearanceType === "IN_PERSON") setMeetingLink("");
-  }, [appearanceType]);
-
+  /* ---------- Render ---------- */
   return (
-    <main className="mx-auto max-w-3xl space-y-4 p-4">
-      <h1 className="text-xl font-semibold">New Booking</h1>
-      <p className="text-sm text-gray-600">
-        Pick experts from your Org or Public directory. Availability is
-        slot-aware.
-      </p>
+    <div className="space-y-6">
+      <h1 className="text-xl font-semibold">New booking</h1>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Subject */}
-        <label className="block">
-          <span className="text-sm font-medium">Subject *</span>
-          <input
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-            onBlur={validateAndPreview}
-            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-            placeholder="e.g., TV Interview"
-            maxLength={300}
-            required
-          />
-          {errors.subject && (
-            <UIAlert variant="error">{errors.subject}</UIAlert>
-          )}
-        </label>
+      {error && <UIAlert intent="error">{error}</UIAlert>}
+      {ok && <UIAlert intent="success">{ok}</UIAlert>}
 
-        {/* Newsroom name */}
-        <label className="block">
-          <span className="text-sm font-medium">Newsroom name *</span>
-          <input
-            value={newsroomName}
-            onChange={(e) => setNewsroomName(e.target.value)}
-            onBlur={validateAndPreview}
-            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-            placeholder="e.g., Global Newsroom"
-            maxLength={200}
-            required
-          />
-          {errors.newsroomName && (
-            <UIAlert variant="error">{errors.newsroomName}</UIAlert>
-          )}
-        </label>
+      <form onSubmit={onSubmit} className="space-y-6">
+        {/* Basic info */}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Subject</label>
+            <input
+              className="w-full rounded-md border px-3 py-2"
+              placeholder="Interview with…"
+              value={form.subject}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, subject: e.target.value }))
+              }
+              required
+            />
+          </div>
 
-        {/* Start date/time & Duration */}
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <label className="block">
-            <span className="text-sm font-medium">Start date/time *</span>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Newsroom name</label>
+            <input
+              className="w-full rounded-md border px-3 py-2"
+              placeholder="Your newsroom"
+              value={form.newsroomName}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, newsroomName: e.target.value }))
+              }
+              required
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Start at</label>
             <input
               type="datetime-local"
-              value={toDatetimeLocalValue(startAtISO)}
-              onChange={(e) => {
-                const v = e.target.value;
-                const asDate = new Date(v);
-                setStartAtISO(asDate.toISOString());
-              }}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+              className="w-full rounded-md border px-3 py-2"
+              value={toDatetimeLocalValue(form.startAt)}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  startAt: new Date(e.target.value).toISOString(),
+                }))
+              }
               required
             />
-          </label>
+          </div>
 
-          <label className="block">
-            <span className="text-sm font-medium">Duration (minutes) *</span>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Duration (mins)</label>
             <input
               type="number"
-              value={durationMins}
-              onChange={(e) => setDurationMins(parseInt(e.target.value, 10))}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+              min={5}
+              max={600}
+              className="w-full rounded-md border px-3 py-2"
+              value={form.durationMins}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, durationMins: Number(e.target.value) }))
+              }
               required
             />
-          </label>
+          </div>
         </div>
 
-        {/* MULTI: Expert Combobox */}
+        {/* Appearance model */}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Appearance scope</label>
+            <select
+              className="w-full rounded-md border px-3 py-2"
+              value={form.appearanceScope}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  appearanceScope: e.target.value as TScope,
+                }))
+              }
+            >
+              <option value="UNIFIED">UNIFIED (single)</option>
+              <option value="PER_GUEST">PER_GUEST</option>
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Access provisioning</label>
+            <select
+              className="w-full rounded-md border px-3 py-2"
+              value={form.accessProvisioning}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  accessProvisioning: e.target.value as TProvisioning,
+                }))
+              }
+            >
+              <option value="SHARED">SHARED</option>
+              <option value="PER_GUEST">PER_GUEST</option>
+            </select>
+          </div>
+
+          {form.appearanceScope === "UNIFIED" && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Unified type</label>
+              <select
+                className="w-full rounded-md border px-3 py-2"
+                value={form.unifiedType}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    unifiedType: e.target.value as TAppearanceType,
+                  }))
+                }
+              >
+                <option value="ONLINE">ONLINE</option>
+                <option value="IN_PERSON">IN_PERSON</option>
+              </select>
+            </div>
+          )}
+        </div>
+
+        {/* Booking defaults */}
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Booking defaults</div>
+
+          {form.appearanceScope === "UNIFIED" &&
+            form.unifiedType === "ONLINE" && (
+              <div className="space-y-2">
+                <label className="text-sm">Default meeting link</label>
+                <input
+                  className="w-full rounded-md border px-3 py-2"
+                  placeholder="https://…"
+                  value={form.locationUrl}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, locationUrl: e.target.value }))
+                  }
+                />
+              </div>
+            )}
+
+          {form.appearanceScope === "UNIFIED" &&
+            form.unifiedType === "IN_PERSON" && (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm">Default venue name</label>
+                  <input
+                    className="w-full rounded-md border px-3 py-2"
+                    placeholder="e.g., Studio A"
+                    value={form.locationName}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, locationName: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm">Default address</label>
+                  <input
+                    className="w-full rounded-md border px-3 py-2"
+                    placeholder="123 Main St"
+                    value={form.locationAddress}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        locationAddress: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            )}
+
+          {form.appearanceScope === "PER_GUEST" &&
+            form.accessProvisioning === "SHARED" && (
+              <div className="rounded-md bg-gray-50 p-3 text-xs text-gray-600">
+                Tip: With **SHARED** provisioning, you may leave guest fields
+                empty and they will fall back to these booking defaults (if
+                provided).
+              </div>
+            )}
+        </div>
+
+        {/* Experts picker */}
         <ExpertCombobox
-          startAtISO={startAtISO}
-          durationMins={durationMins}
-          values={selected}
-          onChange={(next) => setSelected(next)}
+          startAtISO={form.startAt}
+          durationMins={form.durationMins}
+          values={experts}
+          onChange={setExperts}
         />
 
-        {/* Appearance */}
-        <fieldset className="space-y-2">
-          <legend className="text-sm font-medium">Appearance Type</legend>
-          <label className="mr-4 inline-flex items-center gap-2">
-            <input
-              type="radio"
-              name="appearance"
-              checked={appearanceType === "ONLINE"}
-              onChange={() => setAppearanceType("ONLINE")}
-            />
-            Online
-          </label>
-          <label className="inline-flex items-center gap-2">
-            <input
-              type="radio"
-              name="appearance"
-              checked={appearanceType === "IN_PERSON"}
-              onChange={() => setAppearanceType("IN_PERSON")}
-            />
-            In-person
-          </label>
-        </fieldset>
+        {/* Per-guest fields when PER_GUEST */}
+        {form.appearanceScope === "PER_GUEST" && experts.length > 0 && (
+          <div className="space-y-3">
+            <div className="text-sm font-medium">Guests</div>
+            <div className="space-y-3">
+              {experts.map((e, idx) => {
+                const g = guestMap[e.id] || {
+                  appearanceType: "ONLINE" as TAppearanceType,
+                };
+                return (
+                  <div key={e.id} className="rounded-md border p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <div className="font-medium">
+                        #{idx + 1} {e.name}
+                      </div>
+                      <div className="text-xs text-gray-500">{e.id}</div>
+                    </div>
 
-        {/* Guest name */}
-        <label className="block">
-          <span className="text-sm font-medium">Guest name *</span>
-          <input
-            value={guestName}
-            onChange={(e) => setGuestName(e.target.value)}
-            onBlur={validateAndPreview}
-            className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-            placeholder="e.g., Dr. Jane Doe"
-            required
-          />
-          {errors.guestName && (
-            <UIAlert variant="error">{errors.guestName}</UIAlert>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div className="space-y-1">
+                        <label className="text-xs">Appearance</label>
+                        <select
+                          className="w-full rounded-md border px-2 py-2"
+                          value={g.appearanceType}
+                          onChange={(ev) =>
+                            updateGuest(e.id, {
+                              appearanceType: ev.target
+                                .value as TAppearanceType,
+                              joinUrl: undefined,
+                              venueName: undefined,
+                              venueAddress: undefined,
+                            })
+                          }
+                        >
+                          <option value="ONLINE">ONLINE</option>
+                          <option value="IN_PERSON">IN_PERSON</option>
+                        </select>
+                      </div>
+
+                      {g.appearanceType === "ONLINE" && (
+                        <div className="space-y-1 md:col-span-2">
+                          <label className="text-xs">Join URL</label>
+                          <input
+                            className="w-full rounded-md border px-3 py-2"
+                            placeholder="https://…"
+                            value={g.joinUrl || ""}
+                            onChange={(ev) =>
+                              updateGuest(e.id, { joinUrl: ev.target.value })
+                            }
+                          />
+                        </div>
+                      )}
+
+                      {g.appearanceType === "IN_PERSON" && (
+                        <>
+                          <div className="space-y-1">
+                            <label className="text-xs">Venue name</label>
+                            <input
+                              className="w-full rounded-md border px-3 py-2"
+                              placeholder="e.g., Studio A"
+                              value={g.venueName || ""}
+                              onChange={(ev) =>
+                                updateGuest(e.id, {
+                                  venueName: ev.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1 md:col-span-2">
+                            <label className="text-xs">Venue address</label>
+                            <input
+                              className="w-full rounded-md border px-3 py-2"
+                              placeholder="123 Main St"
+                              value={g.venueAddress || ""}
+                              onChange={(ev) =>
+                                updateGuest(e.id, {
+                                  venueAddress: ev.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {form.accessProvisioning === "SHARED" && (
+                      <div className="mt-2 text-xs text-gray-500">
+                        Leave blank to use booking defaults (if any).
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Host */}
+        <HostCombobox value={host} onChange={setHost} />
+
+        {/* Optionals via flags */}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {flags.showProgramName && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Program name</label>
+              <input
+                className="w-full rounded-md border px-3 py-2"
+                value={form.programName}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, programName: e.target.value }))
+                }
+                placeholder="Program"
+              />
+            </div>
           )}
-        </label>
 
-        {/* Online vs In-person specific */}
-        {appearanceType === "ONLINE" ? (
-          <label className="block">
-            <span className="text-sm font-medium">Meeting link *</span>
-            <input
-              value={meetingLink}
-              onChange={(e) => setMeetingLink(e.target.value)}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="https://…"
-              required
-            />
-            {errors.meetingLink && (
-              <UIAlert variant="error">{errors.meetingLink}</UIAlert>
-            )}
-          </label>
-        ) : (
-          <label className="block">
-            <span className="text-sm font-medium">Venue / address *</span>
-            <input
-              value={venueAddress}
-              onChange={(e) => setVenueAddress(e.target.value)}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="123 Main St, City…"
-              required
-            />
-            {errors.venueAddress && (
-              <UIAlert variant="error">{errors.venueAddress}</UIAlert>
-            )}
-          </label>
-        )}
-
-        {/* Conditional (DB-flagged) fields */}
-        {flags.showProgramName && (
-          <label className="block">
-            <span className="text-sm font-medium">Program name (optional)</span>
-            <input
-              value={programName}
-              onChange={(e) => setProgramName(e.target.value)}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="e.g., Nightly News"
-            />
-            {errors.programName && (
-              <UIAlert variant="error">{errors.programName}</UIAlert>
-            )}
-          </label>
-        )}
-
-        {flags.showHostName && (
-          <label className="block">
-            <span className="text-sm font-medium">Host name (optional)</span>
-            <input
-              value={hostName}
-              onChange={(e) => setHostName(e.target.value)}
-              onBlur={validateAndPreview}
-              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="e.g., John Smith"
-            />
-            {errors.hostName && (
-              <UIAlert variant="error">{errors.hostName}</UIAlert>
-            )}
-          </label>
-        )}
+          {flags.showHostName && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Host name (legacy)</label>
+              <input
+                className="w-full rounded-md border px-3 py-2"
+                value={form.hostName}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, hostName: e.target.value }))
+                }
+                placeholder="Leave empty if you selected a host above"
+              />
+            </div>
+          )}
+        </div>
 
         {flags.showTalkingPoints && (
-          <label className="block">
-            <span className="text-sm font-medium">
-              Talking points (optional)
-            </span>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Talking points</label>
             <textarea
-              value={talkingPoints}
-              onChange={(e) => setTalkingPoints(e.target.value)}
-              onBlur={validateAndPreview}
-              className="mt-1 h-28 w-full rounded-lg border px-3 py-2 text-sm"
-              placeholder="Bullet points for the segment…"
+              className="w-full rounded-md border px-3 py-2"
+              rows={3}
+              value={form.talkingPoints}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, talkingPoints: e.target.value }))
+              }
+              placeholder="Optional"
             />
-            {errors.talkingPoints && (
-              <UIAlert variant="error">{errors.talkingPoints}</UIAlert>
-            )}
-          </label>
+          </div>
         )}
 
-        {/* Actions */}
-        <div className="flex items-center gap-3">
-          <UIButton
-            type="submit"
-            disabled={submitting}
-            className="px-4 py-2 text-sm"
-          >
-            {submitting ? "Submitting…" : "Submit"}
-          </UIButton>
-          <UIButton
-            type="button"
-            className="border px-4 py-2 text-sm"
-            onClick={validateAndPreview}
-          >
-            Validate & Preview
-          </UIButton>
-          <UIButton
-            type="button"
-            className="border px-4 py-2 text-sm"
-            onClick={() => {
-              setSubject("TV Interview");
-              setNewsroomName("");
-              setStartAtISO(nextFullHourLocalISO());
-              setDurationMins(30);
-              setSelected([]);
-              setGuestName("");
-              setMeetingLink("");
-              setVenueAddress("");
-              setProgramName("");
-              setHostName("");
-              setTalkingPoints("");
-              setErrors({});
-              setPreview(null);
-              setSubmitError(null);
-            }}
-          >
-            Reset
+        <div>
+          <UIButton type="submit" disabled={submitting}>
+            {submitting ? "Creating…" : "Create booking"}
           </UIButton>
         </div>
 
-        {submitError && <UIAlert variant="error">{submitError}</UIAlert>}
-      </form>
-
-      {/* Preview */}
-      <section className="rounded-xl border p-4">
-        <h2 className="mb-2 text-lg font-semibold">Preview</h2>
-        {preview ? (
-          <pre className="overflow-auto rounded bg-gray-50 p-3 text-xs">
-            {JSON.stringify(preview, null, 2)}
-          </pre>
-        ) : (
-          <p className="text-sm text-gray-600">
-            Fill the form and click “Validate & Preview” (or blur a field) to
-            see validated data here.
-          </p>
+        {form.appearanceScope === "UNIFIED" && (
+          <div className="text-xs text-gray-500">
+            Tip: when UNIFIED, only the unified type’s default fields are
+            required.
+          </div>
         )}
-      </section>
-    </main>
+      </form>
+    </div>
   );
 }

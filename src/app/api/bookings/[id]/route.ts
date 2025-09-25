@@ -4,7 +4,6 @@ import prisma from "../../../../lib/prisma";
 import {
   resolveViewerFromRequest,
   canEditBooking,
-  buildBookingReadWhere,
   TENANCY_ON,
 } from "../../../../lib/viewer";
 
@@ -63,7 +62,9 @@ function validateUnified(
   if (scope !== "UNIFIED") return;
   if (!type)
     throw new Error("appearanceType is required when appearanceScope=UNIFIED");
+
   if (type === "ONLINE") requireField(body.locationUrl, "locationUrl");
+
   if (
     type === "IN_PERSON" &&
     !(
@@ -75,6 +76,7 @@ function validateUnified(
       "locationName or locationAddress is required when UNIFIED+IN_PERSON"
     );
   }
+
   if (type === "PHONE") requireField(body.dialInfo, "dialInfo");
 }
 
@@ -98,22 +100,26 @@ function validatePerGuest(payload: UpdatePayload) {
 
 function validateFallbacks(payload: UpdatePayload) {
   if (payload.appearanceScope !== "PER_GUEST") return;
+
   const guests: GuestInput[] = (payload.guests ?? []) as GuestInput[];
   const shared = payload.accessProvisioning === "SHARED";
 
   for (const g of guests) {
     const hasOwn = hasPerGuestField(g);
     if (hasOwn) continue;
+
     if (!shared) {
       throw new Error(
         `Guest "${g.name}" is missing required access detail for ${g.appearanceType} and accessProvisioning is PER_GUEST`
       );
     }
+
     if (g.appearanceType === "ONLINE" && !payload.locationUrl?.trim()) {
       throw new Error(
         `Guest "${g.name}" requires joinUrl or a booking default locationUrl`
       );
     }
+
     if (
       g.appearanceType === "IN_PERSON" &&
       !(
@@ -125,6 +131,7 @@ function validateFallbacks(payload: UpdatePayload) {
         `Guest "${g.name}" requires venue fields or booking default locationName/locationAddress`
       );
     }
+
     if (g.appearanceType === "PHONE" && !payload.dialInfo?.trim()) {
       throw new Error(
         `Guest "${g.name}" requires dialInfo or booking default dialInfo`
@@ -148,7 +155,9 @@ function sanitizeGuests(guests: GuestInput[]): GuestInput[] {
     .sort((a, b) => a.order - b.order);
 }
 
-/** ===== GET ===== */
+/** ===== GET =====
+ * Hosts are authorized for read via DB role check (no ViewerRole typing issues).
+ */
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -162,9 +171,32 @@ export async function GET(
       );
     }
 
-    // Use the SAME where logic used by your list route/viewer helpers
-    const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
-    const booking = await prisma.booking.findFirst({ where });
+    // 1) Load booking
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
+      select: {
+        id: true,
+        orgId: true,
+        subject: true,
+        newsroomName: true,
+        programName: true,
+        hostName: true,
+        talkingPoints: true,
+        appearanceScope: true,
+        appearanceType: true,
+        accessProvisioning: true,
+        locationUrl: true,
+        locationName: true,
+        locationAddress: true,
+        dialInfo: true,
+        expertUserId: true,
+        expertName: true,
+        startAt: true,
+        durationMins: true,
+        status: true,
+      },
+    });
+
     if (!booking) {
       return NextResponse.json(
         { ok: false, error: "Not found" },
@@ -172,12 +204,51 @@ export async function GET(
       );
     }
 
+    // 2) Authorization (read)
+    const isStaff = canEditBooking(viewer, booking.orgId); // OWNER/ADMIN/PRODUCER
+    let isHost = false;
+
+    if (TENANCY_ON && booking.orgId && viewer.userId) {
+      const hostRow = await prisma.organizationMembership.findFirst({
+        where: {
+          orgId: booking.orgId,
+          userId: viewer.userId,
+          role: "HOST" as any,
+        },
+        select: { id: true },
+      });
+      isHost = !!hostRow;
+    }
+
+    const isExpert =
+      (!!viewer.userId && booking.expertUserId === viewer.userId) ||
+      (!!viewer.name && booking.expertName === viewer.name); // legacy fallback
+
+    const isGuest = viewer.userId
+      ? !!(await (prisma as any).bookingGuest.findFirst({
+          where: { bookingId: booking.id, userId: viewer.userId },
+          select: { id: true },
+        }))
+      : false;
+
+    const canRead = isStaff || isHost || isExpert || isGuest;
+
+    if (!canRead) {
+      // Keep page UX the same: 404 when unauthorized
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    // 3) Load guests and respond
     const guests = await (prisma as any).bookingGuest.findMany({
       where: { bookingId: booking.id },
       orderBy: { order: "asc" },
     });
 
-    const canEdit = canEditBooking(viewer, booking.orgId);
+    const canEdit = canEditBooking(viewer, booking.orgId); // HOST stays read-only
+
     return NextResponse.json({
       ok: true,
       booking: { ...booking, guests },
@@ -192,7 +263,111 @@ export async function GET(
   }
 }
 
-/** ===== PATCH/PUT ===== */
+/** ===== POST (NEW) — Create note for a booking =====
+ * Allowed: newsroom staff (OWNER/ADMIN/PRODUCER/HOST), the booking's expert, or any guest.
+ * Returns 201 with the created note; keeps 404 for unauthorized to match page UX.
+ */
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer.isSignedIn) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
+      select: {
+        id: true,
+        orgId: true,
+        expertUserId: true,
+        expertName: true,
+      },
+    });
+
+    if (!booking) {
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    // Authorization for posting a note
+    const isStaff = canEditBooking(viewer, booking.orgId); // OWNER/ADMIN/PRODUCER
+    let isHost = false;
+
+    if (TENANCY_ON && booking.orgId && viewer.userId) {
+      const hostRow = await prisma.organizationMembership.findFirst({
+        where: {
+          orgId: booking.orgId,
+          userId: viewer.userId,
+          role: "HOST" as any,
+        },
+        select: { id: true },
+      });
+      isHost = !!hostRow;
+    }
+
+    const isExpert =
+      (!!viewer.userId && booking.expertUserId === viewer.userId) ||
+      (!!viewer.name && booking.expertName === viewer.name);
+
+    const isGuest = viewer.userId
+      ? !!(await (prisma as any).bookingGuest.findFirst({
+          where: { bookingId: booking.id, userId: viewer.userId },
+          select: { id: true },
+        }))
+      : false;
+
+    const canPost = isStaff || isHost || isExpert || isGuest;
+    if (!canPost) {
+      // match page UX
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    const bodyJson = await req.json().catch(() => ({} as any));
+    const text =
+      (typeof bodyJson?.body === "string" ? bodyJson.body.trim() : "") || "";
+    if (!text) {
+      return NextResponse.json(
+        { ok: false, error: "Note body is required." },
+        { status: 400 }
+      );
+    }
+
+    const note = await prisma.bookingNote.create({
+      data: {
+        bookingId: booking.id,
+        authorId: viewer.userId!,
+        body: text,
+      },
+      select: {
+        id: true,
+        body: true,
+        createdAt: true,
+        author: { select: { id: true, name: true } },
+      },
+    });
+
+    return NextResponse.json({ ok: true, note }, { status: 201 });
+  } catch (err) {
+    console.error("POST /api/bookings/[id] note error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to post note" },
+      { status: 500 }
+    );
+  }
+}
+
+/** ===== PATCH/PUT (unchanged from your original behaviour) ===== */
 async function updateBooking(id: string, body: UpdatePayload) {
   const current = await prisma.booking.findUnique({ where: { id } });
   if (!current) throw new Error("Not found");
@@ -262,7 +437,9 @@ async function updateBooking(id: string, body: UpdatePayload) {
     // 2) Replace guests if provided
     if (nextGuests) {
       const ptx = tx as any;
+
       await ptx.bookingGuest.deleteMany({ where: { bookingId: id } });
+
       if (nextGuests.length) {
         await ptx.bookingGuest.createMany({
           data: nextGuests.map((g) => ({
@@ -312,7 +489,9 @@ async function handleWrite(req: NextRequest, params: { id: string }) {
   }
 
   // Must be newsroom staff of this booking's org to edit
-  const bk = await prisma.booking.findUnique({ where: { id: params.id } });
+  const bk = await prisma.booking.findUnique({
+    where: { id: params.id },
+  });
   if (!bk)
     return NextResponse.json(
       { ok: false, error: "Not found" },
@@ -362,6 +541,7 @@ async function handleWrite(req: NextRequest, params: { id: string }) {
 export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   return handleWrite(req, ctx.params);
 }
+
 export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
   return handleWrite(req, ctx.params);
 }

@@ -1,152 +1,56 @@
-import { NextRequest, NextResponse } from "next/server";
+// src/app/api/bookings/[id]/notes/route.ts
+import { NextResponse, NextRequest } from "next/server";
 import prisma from "../../../../../lib/prisma";
 import {
   resolveViewerFromRequest,
-  buildBookingReadWhere,
+  canEditBooking,
   TENANCY_ON,
 } from "../../../../../lib/viewer";
-import { Role } from "@prisma/client"; // ✅ use Prisma enum
 
-// Treat these roles as newsroom staff for note visibility (Prisma enum, not strings)
-const STAFF_ROLES: Role[] = [Role.OWNER, Role.ADMIN, Role.PRODUCER, Role.HOST];
+/**
+ * Auth model:
+ * - Staff can READ + POST notes (OWNER/ADMIN/PRODUCER/HOST).
+ * - Experts/Guests: cannot read staff notes (403) and cannot post (403).
+ *   (Your page already treats 403 on GET as "no visible notes".)
+ */
 
-function isStaffInOrg(viewer: any, orgId: string | null | undefined) {
-  const ms = viewer?.memberships ?? viewer?.orgMemberships ?? [];
-  return ms.some(
-    (m: any) =>
-      (!TENANCY_ON || !orgId || m.orgId === orgId) &&
-      // viewer roles may be strings; coerce to Role for comparison
-      STAFF_ROLES.includes((m.role as Role) ?? ("" as unknown as Role))
-  );
+// ---------- utils ----------
+async function isHostOfOrg(
+  userId: string | null,
+  orgId: string | null
+): Promise<boolean> {
+  if (!TENANCY_ON || !userId || !orgId) return false;
+  const row = await prisma.organizationMembership.findFirst({
+    where: { userId, orgId, role: "HOST" as any },
+    select: { id: true },
+  });
+  return !!row;
 }
 
-// GET /api/bookings/:id/notes
+function staffCanReadOrPost(
+  viewer: Awaited<ReturnType<typeof resolveViewerFromRequest>>,
+  orgId: string | null
+) {
+  // canEditBooking = OWNER/ADMIN/PRODUCER
+  return orgId ? canEditBooking(viewer, orgId) : false;
+}
+
+// ---------- GET /api/bookings/[id]/notes ----------
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const viewer = await resolveViewerFromRequest(req);
-    if (!viewer?.isSignedIn) {
+    if (!viewer.isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
         { status: 401 }
       );
     }
 
-    // Must be able to read the booking first (staff or guest)
-    const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
-    const booking = await prisma.booking.findFirst({
-      where,
-      select: { id: true, orgId: true, expertName: true },
-    });
-    if (!booking) {
-      return NextResponse.json(
-        { ok: false, error: "Not found" },
-        { status: 404 }
-      );
-    }
-
-    // Who are the guests of this booking (with userIds)?
-    const guestRows = await prisma.bookingGuest.findMany({
-      where: { bookingId: booking.id, userId: { not: null } },
-      select: { userId: true },
-    });
-    const guestUserIds = guestRows
-      .map((g) => g.userId)
-      .filter(Boolean) as string[];
-
-    const isStaff = isStaffInOrg(viewer, booking.orgId);
-
-    // Guest detection fallback:
-    const isGuest =
-      !!viewer.userId &&
-      (guestUserIds.includes(viewer.userId) ||
-        (!!booking.expertName && booking.expertName === (viewer.name ?? "__")));
-
-    let notes;
-    if (isStaff) {
-      // ✅ Staff: only org-staff-authored notes
-      const orgId = booking.orgId ?? null;
-      const staffUserIds =
-        orgId === null
-          ? [] // safer: no org → no staff scope
-          : ((
-              await prisma.organizationMembership.findMany({
-                where: {
-                  orgId,
-                  role: { in: STAFF_ROLES }, // ✅ enum-typed
-                },
-                select: { userId: true },
-              })
-            )
-              .map((r) => r.userId)
-              .filter(Boolean) as string[]);
-
-      notes = await prisma.bookingNote.findMany({
-        where: {
-          bookingId: booking.id,
-          authorId: staffUserIds.length ? { in: staffUserIds } : "__NO_MATCH__", // return []
-        },
-        orderBy: { createdAt: "asc" },
-        include: { author: { select: { id: true, name: true } } },
-      });
-    } else if (isGuest) {
-      // ✅ Guest: only their own notes
-      notes = await prisma.bookingNote.findMany({
-        where: {
-          bookingId: booking.id,
-          authorId: viewer.userId as string,
-        },
-        orderBy: { createdAt: "asc" },
-        include: { author: { select: { id: true, name: true } } },
-      });
-    } else {
-      // Not staff and not a recognized guest → explicit 403
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    const shaped = notes.map((n) => ({
-      id: n.id,
-      bookingId: n.bookingId,
-      authorId: n.authorId,
-      authorName: (n as any).author?.name ?? "Unknown",
-      body: n.body,
-      createdAt: n.createdAt,
-      updatedAt: n.updatedAt,
-    }));
-
-    return NextResponse.json({ ok: true, notes: shaped });
-  } catch (e) {
-    console.error("GET /api/bookings/[id]/notes error:", e);
-    return NextResponse.json(
-      { ok: false, error: "Server error" },
-      { status: 500 }
-    );
-  }
-}
-
-// POST /api/bookings/:id/notes { body }
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const viewer = await resolveViewerFromRequest(req);
-    if (!viewer?.isSignedIn) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
-
-    // Viewer must be able to read this booking (staff or guest)
-    const where = buildBookingReadWhere(params.id, viewer, TENANCY_ON);
-    const booking = await prisma.booking.findFirst({
-      where,
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
       select: { id: true, orgId: true },
     });
     if (!booking) {
@@ -156,26 +60,91 @@ export async function POST(
       );
     }
 
-    let payload: { body?: string };
-    try {
-      payload = (await req.json()) as { body?: string };
-    } catch {
+    const isStaff = staffCanReadOrPost(viewer, booking.orgId);
+    const isHost = await isHostOfOrg(viewer.userId, booking.orgId);
+
+    if (!isStaff && !isHost) {
+      // Experts/Guests are not allowed to read newsroom notes
       return NextResponse.json(
-        { ok: false, error: "Invalid JSON" },
-        { status: 400 }
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
       );
     }
 
-    const body = (payload.body ?? "").trim();
+    const notes = await prisma.bookingNote.findMany({
+      where: { bookingId: booking.id },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        bookingId: true,
+        authorId: true,
+        body: true,
+        createdAt: true,
+        updatedAt: true,
+        author: { select: { id: true, name: true } },
+      },
+    });
+
+    const shaped = notes.map((n) => ({
+      id: n.id,
+      bookingId: n.bookingId,
+      authorId: n.authorId,
+      authorName: n.author?.name ?? "Someone",
+      body: n.body,
+      createdAt: n.createdAt.toISOString(),
+      updatedAt: n.updatedAt.toISOString(),
+    }));
+
+    return NextResponse.json({ ok: true, notes: shaped }, { status: 200 });
+  } catch (err) {
+    console.error("GET /api/bookings/[id]/notes error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to load notes" },
+      { status: 500 }
+    );
+  }
+}
+
+// ---------- POST /api/bookings/[id]/notes ----------
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer.isSignedIn || !viewer.userId) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
+      select: { id: true, orgId: true },
+    });
+    if (!booking) {
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    const isStaff = staffCanReadOrPost(viewer, booking.orgId);
+    const isHost = await isHostOfOrg(viewer.userId, booking.orgId);
+
+    if (!isStaff && !isHost) {
+      return NextResponse.json(
+        { ok: false, error: "You don’t have permission to add notes." },
+        { status: 403 }
+      );
+    }
+
+    const json = await req.json().catch(() => ({} as any));
+    const body = (typeof json?.body === "string" ? json.body.trim() : "") || "";
     if (!body) {
       return NextResponse.json(
         { ok: false, error: "Note body is required." },
-        { status: 400 }
-      );
-    }
-    if (body.length > 4000) {
-      return NextResponse.json(
-        { ok: false, error: "Note is too long (max 4000 chars)." },
         { status: 400 }
       );
     }
@@ -183,26 +152,39 @@ export async function POST(
     const note = await prisma.bookingNote.create({
       data: {
         bookingId: booking.id,
-        authorId: viewer.userId as string, // viewer.isSignedIn guarantees presence
+        authorId: viewer.userId,
         body,
+      },
+      select: {
+        id: true,
+        bookingId: true,
+        authorId: true,
+        body: true,
+        createdAt: true,
+        updatedAt: true,
+        author: { select: { id: true, name: true } },
       },
     });
 
-    const shaped = {
-      id: note.id,
-      bookingId: note.bookingId,
-      authorId: note.authorId,
-      authorName: viewer.name ?? "Unknown",
-      body: note.body,
-      createdAt: note.createdAt,
-      updatedAt: note.updatedAt,
-    };
-
-    return NextResponse.json({ ok: true, note: shaped });
-  } catch (e) {
-    console.error("POST /api/bookings/[id]/notes error:", e);
     return NextResponse.json(
-      { ok: false, error: "Server error" },
+      {
+        ok: true,
+        note: {
+          id: note.id,
+          bookingId: note.bookingId,
+          authorId: note.authorId,
+          authorName: note.author?.name ?? "Someone",
+          body: note.body,
+          createdAt: note.createdAt.toISOString(),
+          updatedAt: note.updatedAt.toISOString(),
+        },
+      },
+      { status: 201 }
+    );
+  } catch (err) {
+    console.error("POST /api/bookings/[id]/notes error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to add note" },
       { status: 500 }
     );
   }
