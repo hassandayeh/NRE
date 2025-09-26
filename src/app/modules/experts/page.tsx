@@ -1,504 +1,457 @@
-// src/app/modules/experts/page.tsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+/**
+ * Experts Directory (UI-only tweaks)
+ * - No prefilled defaults on load (all filters blank / "Any")
+ * - Removed "Refresh" button (Search handles it)
+ * - Proper <form> submit so pressing Enter anywhere runs Search
+ * - Still supports slot-aware availability when checked
+ *
+ * Blast radius: this page only calls GET /api/experts/search.
+ * No changes to APIs, bookings, hosts, or notes.
+ */
 
-/** Minimal client-side types to match our API */
-type Availability = {
-  status: "AVAILABLE" | "BUSY" | "UNKNOWN";
-  reasons?: string[];
-};
-type ExpertItem = {
+import * as React from "react";
+
+/* ---------- Small helpers ---------- */
+function clsx(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
+function nextFullHourISO(): string {
+  const d = new Date();
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.toISOString();
+}
+
+/* ---------- UI primitives with safe fallbacks ---------- */
+import * as ButtonModule from "../../../components/ui/Button";
+const UIButton: React.ElementType =
+  (ButtonModule as any).Button ?? (ButtonModule as any).default;
+
+import * as AlertModule from "../../../components/ui/Alert";
+const UIAlert: React.ElementType =
+  (AlertModule as any).Alert ?? (AlertModule as any).default;
+
+/* ---------- Types expected from /api/experts/search ---------- */
+type ExpertRow = {
   id: string;
   name: string | null;
-  slug?: string | null;
-  avatarUrl?: string | null;
   bio?: string | null;
+  city?: string | null;
+  countryCode?: string | null;
   languages?: string[];
   tags?: string[];
-  timezone?: string;
-  countryCode?: string | null;
-  city?: string | null;
-  supportsOnline?: boolean;
-  supportsInPerson?: boolean;
-  expertStatus?: "PUBLIC" | "EXCLUSIVE" | null;
-  exclusiveOrgId?: string | null;
-  rankBoost?: number;
-  kind?: "EXPERT" | "REPORTER";
-  availability?: Availability;
+  supportsOnline?: boolean | null;
+  supportsInPerson?: boolean | null;
+  avatarUrl?: string | null;
+  availability?: {
+    status: "AVAILABLE" | "BUSY" | "UNKNOWN";
+    reasons?: string[];
+  };
+};
+
+type ApiResponse = {
+  items?: ExpertRow[];
+  nextCursor?: string | null;
+  total?: number | null;
+  error?: string;
 };
 
 export default function ExpertsDirectoryPage() {
-  // ---- Filters (Mode-1 by default) ----
-  const [mode, setMode] = useState<"public" | "org">("public");
-  const [q, setQ] = useState<string>("");
-  const [languages, setLanguages] = useState<string>(""); // comma separated
-  const [tags, setTags] = useState<string>(""); // comma separated
-  const [supportsOnline, setSupportsOnline] = useState<"" | "true" | "false">(
-    ""
-  );
-  const [supportsInPerson, setSupportsInPerson] = useState<
-    "" | "true" | "false"
-  >("");
-  const [countryCode, setCountryCode] = useState<string>("");
-  const [city, setCity] = useState<string>("");
-  const [limit, setLimit] = useState<number>(12);
+  /* =========================
+   * Filters & local state
+   * ========================= */
+  const [mode, setMode] = React.useState<"public" | "org" | "both">("public");
 
-  // Optional slot-aware (demo/preview)
-  const [slotAware, setSlotAware] = useState<boolean>(false);
-  const [startAt, setStartAt] = useState<string>(""); // datetime-local
-  const [durationMins, setDurationMins] = useState<number>(60);
+  // All empty by default (no prefilled values)
+  const [q, setQ] = React.useState("");
+  const [languages, setLanguages] = React.useState("");
+  const [tags, setTags] = React.useState("");
+  const [supportsOnline, setSupportsOnline] = React.useState<
+    "any" | "yes" | "no"
+  >("any");
+  const [supportsInPerson, setSupportsInPerson] = React.useState<
+    "any" | "yes" | "no"
+  >("any");
+  const [city, setCity] = React.useState("");
+  const [countryCode, setCountryCode] = React.useState("");
+  // Keep limit as a string so it can be empty
+  const [limit, setLimit] = React.useState<string>("");
 
-  // ---- Data state ----
-  const [items, setItems] = useState<ExpertItem[]>([]);
-  const [count, setCount] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string>("");
+  // Availability (slot-aware)
+  const [checkAvailability, setCheckAvailability] = React.useState(false);
+  const [startAtISO] = React.useState<string>(() => nextFullHourISO());
+  const [durationMins] = React.useState<number>(60);
 
-  const controllerRef = useRef<AbortController | null>(null);
+  // Results
+  const [items, setItems] = React.useState<ExpertRow[]>([]);
+  const [total, setTotal] = React.useState<number | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [hasSearched, setHasSearched] = React.useState(false);
 
-  /** Build a query URL from the provided values (or current state if omitted) */
-  function buildUrl(
-    overrides?: Partial<{
-      mode: "public" | "org";
-      q: string;
-      languages: string;
-      tags: string;
-      supportsOnline: "" | "true" | "false";
-      supportsInPerson: "" | "true" | "false";
-      countryCode: string;
-      city: string;
-      limit: number;
-      slotAware: boolean;
-      startAt: string;
-      durationMins: number;
-    }>
-  ) {
-    const v = {
-      mode,
-      q,
-      languages,
-      tags,
-      supportsOnline,
-      supportsInPerson,
-      countryCode,
-      city,
-      limit,
-      slotAware,
-      startAt,
-      durationMins,
-      ...overrides,
-    };
+  // Pagination (optional)
+  const [nextCursor, setNextCursor] = React.useState<string | null>(null);
 
-    const sp = new URLSearchParams();
-    sp.set("mode", v.mode);
-    if (v.q) sp.set("q", v.q);
-    if (v.languages) sp.set("languages", v.languages);
-    if (v.tags) sp.set("tags", v.tags);
-    if (v.supportsOnline) sp.set("supportsOnline", v.supportsOnline);
-    if (v.supportsInPerson) sp.set("supportsInPerson", v.supportsInPerson);
-    if (v.countryCode) sp.set("countryCode", v.countryCode.toUpperCase());
-    if (v.city) sp.set("city", v.city);
-    sp.set("limit", String(v.limit));
-
-    if (v.slotAware && v.startAt && (v.durationMins || 0) > 0) {
-      sp.set("startAt", new Date(v.startAt).toISOString());
-      sp.set("durationMins", String(v.durationMins));
-    }
-
-    return `/api/experts/search?${sp.toString()}`;
-  }
-
-  /** Fetch using the current state, or an override URL (used by Reset) */
-  async function fetchExperts(urlOverride?: string) {
+  /* =========================
+   * Fetch logic
+   * ========================= */
+  async function runSearch(reset = true) {
     try {
       setLoading(true);
-      setError("");
-
-      controllerRef.current?.abort();
-      const ac = new AbortController();
-      controllerRef.current = ac;
-
-      const url = urlOverride ?? buildUrl();
-      const res = await fetch(url, { signal: ac.signal });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `Request failed (${res.status})`);
+      setError(null);
+      setHasSearched(true);
+      if (reset) {
+        setItems([]);
+        setNextCursor(null);
       }
-      const data = (await res.json()) as { items: ExpertItem[]; count: number };
-      setItems(data.items ?? []);
-      setCount(data.count ?? 0);
+
+      const sp = new URLSearchParams();
+      sp.set("visibility", mode); // "public" | "org" | "both"
+
+      if (q.trim()) sp.set("q", q.trim());
+      if (languages.trim()) sp.set("languages", languages.trim());
+      if (tags.trim()) sp.set("tags", tags.trim());
+      if (city.trim()) sp.set("city", city.trim());
+      if (countryCode.trim()) sp.set("countryCode", countryCode.trim());
+
+      // Limit only when user sets it (no implicit default)
+      const limitNum = parseInt(limit, 10);
+      if (!Number.isNaN(limitNum) && limitNum > 0)
+        sp.set("take", String(limitNum));
+
+      // Supports Online/In-Person: only pass when not "any"
+      if (supportsOnline !== "any")
+        sp.set("supportsOnline", supportsOnline === "yes" ? "true" : "false");
+      if (supportsInPerson !== "any")
+        sp.set(
+          "supportsInPerson",
+          supportsInPerson === "yes" ? "true" : "false"
+        );
+
+      // Slot-aware availability
+      if (checkAvailability) {
+        sp.set("startAt", new Date(startAtISO).toISOString());
+        sp.set("durationMins", String(durationMins));
+        // If your API supports it, you can also send onlyAvailable=true
+        // sp.set("onlyAvailable", "false");
+      }
+
+      if (!reset && nextCursor) sp.set("cursor", nextCursor);
+
+      const res = await fetch(`/api/experts/search?${sp.toString()}`, {
+        credentials: "include",
+      });
+      const data: ApiResponse = await res
+        .json()
+        .catch(() => ({} as ApiResponse));
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+
+      setItems((prev) =>
+        reset ? data.items || [] : [...prev, ...(data.items || [])]
+      );
+      setNextCursor(data.nextCursor || null);
+      setTotal(data.total ?? null);
     } catch (err: any) {
-      if (err?.name === "AbortError") return;
-      setError(err?.message || "Failed to load experts.");
-      setItems([]);
-      setCount(0);
+      setError(err?.message || "Failed to search experts.");
     } finally {
       setLoading(false);
     }
   }
 
-  // Load on first mount
-  useEffect(() => {
-    fetchExperts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Re-query when switching mode
-  useEffect(() => {
-    fetchExperts();
+  // Optional: change Mode triggers a fresh search if the user already searched once
+  React.useEffect(() => {
+    if (hasSearched) void runSearch(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ---- Reset in ONE click: clear state AND fetch clean results immediately
-  function resetFilters() {
-    // 1) Clear UI state
+  function onReset() {
     setQ("");
     setLanguages("");
     setTags("");
-    setSupportsOnline("");
-    setSupportsInPerson("");
-    setCountryCode("");
+    setSupportsOnline("any");
+    setSupportsInPerson("any");
     setCity("");
-    setLimit(12);
-    setSlotAware(false);
-    setStartAt("");
-    setDurationMins(60);
-
-    // 2) Immediately fetch with clean params (no need to wait for state re-render)
-    const freshUrl = buildUrl({
-      q: "",
-      languages: "",
-      tags: "",
-      supportsOnline: "",
-      supportsInPerson: "",
-      countryCode: "",
-      city: "",
-      limit: 12,
-      slotAware: false,
-      startAt: "",
-      durationMins: 60,
-    });
-    fetchExperts(freshUrl);
+    setCountryCode("");
+    setLimit("");
+    setCheckAvailability(false);
+    setTotal(null);
+    setItems([]);
+    setHasSearched(false);
+    setNextCursor(null);
+    setError(null);
   }
 
+  /* =========================
+   * Render
+   * ========================= */
   return (
-    <main className="mx-auto max-w-6xl p-6 space-y-6">
-      <header className="flex items-start justify-between gap-4">
+    <div className="mx-auto max-w-6xl space-y-6 p-4">
+      {/* Header */}
+      <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Experts Directory
-          </h1>
-          <p className="text-sm text-gray-600">
-            Browse experts (PUBLIC). Switch to “Org” to view your org’s
-            EXCLUSIVE experts and reporters.
+          <h1 className="text-2xl font-semibold">Experts Directory</h1>
+          <p className="mt-1 text-sm text-gray-600">
+            Browse experts (PUBLIC). Switch to “Org” to include your org’s
+            EXCLUSIVE experts.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <label className="text-sm font-medium" htmlFor="mode-select">
-            Mode
-          </label>
+          <label className="text-sm">Mode</label>
           <select
-            id="mode-select"
             value={mode}
-            onChange={(e) => setMode(e.target.value as "public" | "org")}
+            onChange={(e) => setMode(e.target.value as typeof mode)}
             className="rounded-md border px-2 py-1 text-sm"
-            aria-label="Directory mode"
           >
             <option value="public">Public</option>
             <option value="org">Org</option>
+            <option value="both">Both</option>
           </select>
         </div>
-      </header>
+      </div>
 
-      {/* Filters */}
-      <section className="rounded-lg border bg-white p-4 shadow-sm">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div>
-            <label className="block text-sm font-medium">Search</label>
+      {/* Search form */}
+      <form
+        className="space-y-4 rounded-lg border p-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void runSearch(true);
+        }}
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Search</span>
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="name or bio…"
-              className="mt-1 w-full rounded-md border px-3 py-2"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium">
-              Languages (comma)
-            </label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Languages (comma)</span>
             <input
               value={languages}
               onChange={(e) => setLanguages(e.target.value)}
-              placeholder="en,ar"
-              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder="e.g. en,ar"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium">Tags (comma)</label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Tags (comma)</span>
             <input
               value={tags}
               onChange={(e) => setTags(e.target.value)}
-              placeholder="technology,ai"
-              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder="e.g. technology,ai"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
+        </div>
 
-          <div>
-            <label className="block text-sm font-medium">Supports Online</label>
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Supports Online</span>
             <select
               value={supportsOnline}
-              onChange={(e) =>
-                setSupportsOnline(e.target.value as "" | "true" | "false")
-              }
-              className="mt-1 w-full rounded-md border px-2 py-2"
+              onChange={(e) => setSupportsOnline(e.target.value as any)}
+              className="w-full rounded-md border px-3 py-2"
             >
-              <option value="">Any</option>
-              <option value="true">Yes</option>
-              <option value="false">No</option>
+              <option value="any">Any</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
             </select>
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium">
-              Supports In-Person
-            </label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Supports In-Person</span>
             <select
               value={supportsInPerson}
-              onChange={(e) =>
-                setSupportsInPerson(e.target.value as "" | "true" | "false")
-              }
-              className="mt-1 w-full rounded-md border px-2 py-2"
+              onChange={(e) => setSupportsInPerson(e.target.value as any)}
+              className="w-full rounded-md border px-3 py-2"
             >
-              <option value="">Any</option>
-              <option value="true">Yes</option>
-              <option value="false">No</option>
+              <option value="any">Any</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
             </select>
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium">Country code</label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Country code</span>
             <input
               value={countryCode}
-              onChange={(e) => setCountryCode(e.target.value.toUpperCase())}
-              placeholder="US"
-              className="mt-1 w-full rounded-md border px-3 py-2 uppercase"
-              maxLength={2}
+              onChange={(e) => setCountryCode(e.target.value)}
+              placeholder="e.g. US"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
+        </div>
 
-          <div>
-            <label className="block text-sm font-medium">City</label>
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="space-y-1">
+            <span className="text-sm font-medium">City</span>
             <input
               value={city}
               onChange={(e) => setCity(e.target.value)}
-              placeholder="Beirut"
-              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder="e.g. Beirut"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium">Limit</label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium">Limit</span>
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={limit}
-              onChange={(e) =>
-                setLimit(Math.max(1, Math.min(50, Number(e.target.value) || 1)))
-              }
-              className="mt-1 w-full rounded-md border px-3 py-2"
+              onChange={(e) => setLimit(e.target.value)}
+              placeholder="12"
+              className="w-full rounded-md border px-3 py-2"
             />
-          </div>
+          </label>
 
-          {/* Optional: slot-aware preview */}
-          <div className="md:col-span-3 rounded-md border p-3">
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={slotAware}
-                onChange={(e) => setSlotAware(e.target.checked)}
-              />
-              Show availability (slot-aware)
-            </label>
-
-            {slotAware && (
-              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-                <div>
-                  <label className="block text-sm font-medium">Start</label>
-                  <input
-                    type="datetime-local"
-                    value={startAt}
-                    onChange={(e) => setStartAt(e.target.value)}
-                    className="mt-1 w-full rounded-md border px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium">
-                    Duration (mins)
-                  </label>
-                  <input
-                    type="number"
-                    value={durationMins}
-                    onChange={(e) =>
-                      setDurationMins(Math.max(1, Number(e.target.value) || 60))
-                    }
-                    className="mt-1 w-full rounded-md border px-3 py-2"
-                  />
-                </div>
-                <div className="flex items-end gap-2">
-                  <button
-                    onClick={() => fetchExperts()}
-                    className="mt-1 inline-flex items-center rounded-md border bg-black px-4 py-2 text-white hover:opacity-90"
-                    aria-label="Search"
-                  >
-                    Search
-                  </button>
-                  <button
-                    onClick={resetFilters}
-                    className="mt-1 inline-flex items-center rounded-md border px-4 py-2 hover:bg-gray-50"
-                    aria-label="Reset"
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          <label className="flex items-center gap-2 self-end">
+            <input
+              type="checkbox"
+              checked={checkAvailability}
+              onChange={(e) => setCheckAvailability(e.target.checked)}
+            />
+            <span className="text-sm">Show availability (slot-aware)</span>
+          </label>
         </div>
 
-        {!slotAware && (
-          <div className="mt-3 flex items-center gap-2">
-            <button
-              onClick={() => fetchExperts()}
-              className="inline-flex items-center rounded-md border bg-black px-4 py-2 text-white hover:opacity-90"
-              aria-label="Search"
-            >
-              Search
-            </button>
-            <button
-              onClick={resetFilters}
-              className="inline-flex items-center rounded-md border px-4 py-2 hover:bg-gray-50"
-              aria-label="Reset"
-            >
-              Reset
-            </button>
+        <div className="flex items-center gap-3">
+          <UIButton type="submit">Search</UIButton>
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Reset
+          </button>
+        </div>
+
+        {/* Availability note (informative only) */}
+        {checkAvailability && (
+          <div className="text-xs text-gray-600">
+            Checking availability for{" "}
+            <b>{new Date(startAtISO).toLocaleString()}</b> (+{durationMins}{" "}
+            mins).
           </div>
         )}
-      </section>
+      </form>
 
-      {/* Results */}
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-gray-600">
-            {loading
-              ? "Loading…"
-              : `Found ${count} result${count === 1 ? "" : "s"}`}
-          </p>
+      {/* Results header */}
+      <div className="flex items-center justify-between">
+        <div className="text-sm text-gray-600">
+          {!hasSearched
+            ? "Use filters and click Search."
+            : loading
+            ? "Searching…"
+            : error
+            ? null
+            : `Found ${items.length}${
+                total != null ? ` of ${total}` : ""
+              } results`}
         </div>
-
         {error && (
-          <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          <UIAlert
+            className="bg-red-50 px-3 py-2 text-sm text-red-800"
+            role="alert"
+          >
             {error}
-          </div>
+          </UIAlert>
         )}
+      </div>
 
-        {!loading && !error && items.length === 0 && (
-          <div className="rounded-lg border bg-white p-6 text-center text-gray-600">
-            No experts match your filters.
-          </div>
-        )}
+      {/* Cards */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {items.map((e) => {
+          const avail =
+            e.availability?.status ??
+            (checkAvailability
+              ? "UNKNOWN"
+              : undefined); /* hide when not asked */
 
-        <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {items.map((e) => (
-            <li key={e.id} className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex items-start gap-3">
-                <img
-                  src={
-                    e.avatarUrl ||
-                    `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                      e.name || "E"
-                    )}`
-                  }
-                  alt={e.name || "Expert"}
-                  className="h-12 w-12 rounded-full object-cover"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="text-base font-semibold">
-                      {e.name || "Unnamed"}{" "}
-                      {e.kind && (
-                        <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700">
-                          {e.kind.toLowerCase()}
-                        </span>
-                      )}
-                    </h3>
-                    {slotAware && e.availability && (
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${
-                          e.availability.status === "AVAILABLE"
-                            ? "bg-green-100 text-green-800"
-                            : e.availability.status === "BUSY"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-gray-100 text-gray-700"
-                        }`}
-                        title={e.availability.reasons?.join(", ")}
-                      >
-                        {e.availability.status}
-                      </span>
-                    )}
-                  </div>
+          const availBadge =
+            avail === "AVAILABLE"
+              ? "bg-green-100 text-green-800"
+              : avail === "BUSY"
+              ? "bg-red-100 text-red-800"
+              : "bg-gray-100 text-gray-700";
 
-                  {e.bio && (
-                    <p className="mt-1 line-clamp-2 text-sm text-gray-600">
-                      {e.bio}
-                    </p>
-                  )}
-
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    {e.languages?.map((l) => (
-                      <span
-                        key={l}
-                        className="rounded-full bg-gray-100 px-2 py-0.5 text-xs"
-                      >
-                        {l}
-                      </span>
-                    ))}
-                    {e.tags?.slice(0, 4).map((t) => (
-                      <span
-                        key={t}
-                        className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-800"
-                      >
-                        #{t}
-                      </span>
-                    ))}
-                  </div>
-
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-600">
-                    {e.city && <span>{e.city}</span>}
-                    {e.countryCode && (
-                      <span className="rounded border px-1.5 py-0.5">
-                        {e.countryCode}
-                      </span>
-                    )}
-                    {e.supportsOnline && (
-                      <span className="rounded bg-gray-100 px-1.5 py-0.5">
-                        Online
-                      </span>
-                    )}
-                    {e.supportsInPerson && (
-                      <span className="rounded bg-gray-100 px-1.5 py-0.5">
-                        In-person
-                      </span>
-                    )}
+          return (
+            <div key={e.id} className="rounded-xl border p-4">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm text-gray-500">{e.id}</div>
+                  <div className="truncate text-base font-semibold">
+                    {e.name || "Unnamed"}
                   </div>
                 </div>
+                {avail && (
+                  <span
+                    className={clsx("rounded px-2 py-0.5 text-xs", availBadge)}
+                  >
+                    {avail}
+                  </span>
+                )}
               </div>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </main>
+
+              {e.bio && (
+                <p className="line-clamp-2 text-sm text-gray-700">{e.bio}</p>
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-700">
+                {(e.languages || []).map((l) => (
+                  <span key={l} className="rounded bg-gray-100 px-2 py-0.5">
+                    {l}
+                  </span>
+                ))}
+                {(e.tags || []).map((t) => (
+                  <span key={t} className="rounded bg-blue-50 px-2 py-0.5">
+                    #{t}
+                  </span>
+                ))}
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                {e.city && <span>{e.city}</span>}
+                {e.countryCode && (
+                  <span className="rounded border px-1">{e.countryCode}</span>
+                )}
+                {e.supportsOnline ? (
+                  <span className="rounded bg-gray-100 px-2 py-0.5">
+                    Online
+                  </span>
+                ) : null}
+                {e.supportsInPerson ? (
+                  <span className="rounded bg-gray-100 px-2 py-0.5">
+                    In-person
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Cursor-based pagination (if API returns it) */}
+      {nextCursor && !loading && hasSearched && (
+        <div className="text-center">
+          <button
+            type="button"
+            onClick={() => void runSearch(false)}
+            className="rounded-md border px-4 py-2 text-sm hover:bg-gray-50"
+          >
+            Load more
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
