@@ -6,8 +6,8 @@
  * - UNIFIED defaults: ONLINE (join) | IN_PERSON (venue) | PHONE (dial)
  * - PER_GUEST: appearance-specific detail with SHARED fallbacks
  * - Host is first-class (user) or "None"
- * - ✨ Notes thread restored (GET/POST /api/bookings/[id]/notes)
- * - No external UI imports to avoid path issues
+ * - Notes thread restored (GET/POST /api/bookings/[id]/notes)
+ * - Edit & New buttons are shown only when canEdit === true
  */
 
 import * as React from "react";
@@ -38,6 +38,7 @@ type GuestRow = {
 
 type BookingDto = {
   id: string;
+  orgId?: string;
   subject: string;
   newsroomName: string;
   startAt: string;
@@ -45,7 +46,7 @@ type BookingDto = {
 
   appearanceScope: TScope;
   accessProvisioning: TProvisioning;
-  appearanceType: TAppearance | null;
+  appearanceType: TAppearance | null; // UNIFIED default
 
   // UNIFIED defaults
   locationUrl?: string | null;
@@ -57,11 +58,11 @@ type BookingDto = {
   programName?: string | null;
   talkingPoints?: string | null;
 
-  // host (first-class)
+  // host (first-class + legacy mirror)
   hostUserId?: string | null;
   hostName?: string | null;
 
-  // legacy mirrors (ignored here but tolerated)
+  // legacy mirrors (still present)
   expertUserId?: string | null;
   expertName?: string | null;
 
@@ -83,6 +84,7 @@ function fmtDateRange(startISO: string, durationMins: number) {
   const start = new Date(startISO);
   const end = new Date(start.getTime() + durationMins * 60_000);
   const sameDay = start.toDateString() === end.toDateString();
+
   const d = (x: Date) =>
     x.toLocaleString(undefined, {
       year: "numeric",
@@ -91,8 +93,10 @@ function fmtDateRange(startISO: string, durationMins: number) {
       hour: "2-digit",
       minute: "2-digit",
     });
+
   const t = (x: Date) =>
     x.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
   return sameDay ? `${d(start)} — ${t(end)}` : `${d(start)} → ${d(end)}`;
 }
 
@@ -110,24 +114,28 @@ function ExternalLink(props: { href: string; children: React.ReactNode }) {
     <a
       href={href}
       target="_blank"
-      rel="noreferrer noopener"
-      className="text-blue-700 underline hover:text-blue-900"
+      rel="noopener noreferrer"
+      className="underline underline-offset-2 hover:opacity-80"
     >
       {children}
     </a>
   );
 }
 
-/* Minimal inline UI primitives (no external deps) */
+/* Minimal inline UI primitives */
 function ButtonLike(props: React.ComponentProps<"button">) {
   const { className = "", ...rest } = props;
   return (
     <button
-      className={`inline-flex items-center rounded-md border px-3 py-2 text-sm hover:bg-gray-50 ${className}`}
       {...rest}
+      className={
+        "inline-flex items-center rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50 " +
+        className
+      }
     />
   );
 }
+
 function AlertBox(props: {
   children: React.ReactNode;
   variant?: "error" | "success";
@@ -137,7 +145,11 @@ function AlertBox(props: {
     variant === "success"
       ? "border-green-200 bg-green-50 text-green-800"
       : "border-red-200 bg-red-50 text-red-800";
-  return <div className={`rounded-md border p-2 ${styles}`}>{children}</div>;
+  return (
+    <div role="status" className={`rounded-md border p-2 text-sm ${styles}`}>
+      {children}
+    </div>
+  );
 }
 
 /* Effective value for a guest when provisioning is SHARED (fallback to defaults) */
@@ -186,7 +198,9 @@ export default function BookingViewPage() {
 
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+
   const [booking, setBooking] = React.useState<BookingDto | null>(null);
+  const [canEdit, setCanEdit] = React.useState(false);
 
   // Notes state (restored)
   const [notesLoading, setNotesLoading] = React.useState(true);
@@ -216,7 +230,10 @@ export default function BookingViewPage() {
           .sort((a, z) => (a.order ?? 0) - (z.order ?? 0));
         if (!PHONE_ENABLED && b.appearanceType === "PHONE")
           b.appearanceType = "ONLINE";
-        if (alive) setBooking(b);
+        if (alive) {
+          setBooking(b);
+          setCanEdit(!!j?.canEdit);
+        }
       } catch (e: any) {
         if (alive) setError(e?.message || "Failed to load booking");
       } finally {
@@ -228,7 +245,7 @@ export default function BookingViewPage() {
     };
   }, [id]);
 
-  // Load notes (restored, expert-safe handling)
+  // Load notes (expert-safe handling)
   React.useEffect(() => {
     let cancelled = false;
     async function loadNotes() {
@@ -245,7 +262,7 @@ export default function BookingViewPage() {
         if (res.ok && json?.ok) {
           setNotes(json.notes || []);
         } else if (res.status === 403) {
-          // Experts aren’t allowed to read newsroom/staff notes — show nothing (no red alert)
+          // Some viewers (e.g., expert) can't read newsroom notes; fail silent.
           setNotes([]);
         } else {
           setNotes([]);
@@ -310,10 +327,16 @@ export default function BookingViewPage() {
     }
   }
 
-  if (loading) return <div className="p-4">Loading…</div>;
+  if (loading)
+    return (
+      <div className="p-4 text-sm text-gray-600" aria-busy="true">
+        Loading…
+      </div>
+    );
+
   if (error || !booking) {
     return (
-      <div className="p-4">
+      <div className="space-y-2 p-4">
         <AlertBox>{error || "Not found"}</AlertBox>
       </div>
     );
@@ -322,182 +345,184 @@ export default function BookingViewPage() {
   const b = booking;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-4">
+    <div className="space-y-8 p-4">
       {/* Title */}
-      <div className="flex items-start justify-between gap-3">
+      <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">{b.subject}</h1>
+          <div className="text-sm text-gray-600">{b.newsroomName}</div>
+          <div className="text-sm text-gray-600">
+            {fmtDateRange(b.startAt, b.durationMins)}
+          </div>
         </div>
-        <Link href={`/modules/booking/${b.id}/edit`} className="shrink-0">
-          <ButtonLike type="button">Edit</ButtonLike>
-        </Link>
-      </div>
-      <div className="text-sm text-gray-600">{b.newsroomName}</div>
-      <div className="text-sm">{fmtDateRange(b.startAt, b.durationMins)}</div>
+
+        <div className="flex items-center gap-2">
+          {canEdit && (
+            <>
+              <Link
+                href={`/modules/booking/${b.id}/edit`}
+                className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                Edit
+              </Link>
+              <Link
+                href="/modules/booking/new"
+                className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                New booking
+              </Link>
+            </>
+          )}
+        </div>
+      </header>
 
       {/* Host */}
-      <section className="rounded-md border p-4">
-        <div className="font-medium">Host</div>
+      <section className="space-y-2 rounded-md border p-3">
+        <div className="text-sm font-semibold">Host</div>
         {b.hostUserId ? (
-          <div className="mt-2 text-sm">
-            <span className="font-medium">{b.hostName || "Host"}</span>
-            <div className="text-[11px] text-gray-500 mt-0.5">
-              {b.hostUserId}
-            </div>
+          <div className="text-sm">
+            <div className="font-medium">{b.hostName || "Host"}</div>
+            <div className="text-xs text-gray-500">{b.hostUserId}</div>
           </div>
         ) : (
-          <div className="mt-2 text-sm text-gray-600">None</div>
+          <div className="text-sm text-gray-600">None</div>
         )}
       </section>
 
       {/* Booking defaults (UNIFIED) */}
       {b.appearanceScope === "UNIFIED" && (
-        <section className="rounded-md border p-4">
-          <div className="font-medium">Booking defaults</div>
-          <div className="mt-2 text-sm">
-            <div>
-              <span className="rounded border px-1 text-[10px]">
-                {b.appearanceType ?? "ONLINE"}
-              </span>
+        <section className="space-y-2 rounded-md border p-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold">Booking defaults</div>
+            <div className="text-xs uppercase tracking-wide text-gray-600">
+              {b.appearanceType ?? "ONLINE"}
             </div>
-
-            {(b.appearanceType ?? "ONLINE") === "ONLINE" && (
-              <div className="mt-1">
-                {b.locationUrl ? (
-                  <ExternalLink href={b.locationUrl}>Join link</ExternalLink>
-                ) : (
-                  <em className="text-gray-600">No link provided.</em>
-                )}
-              </div>
-            )}
-
-            {(b.appearanceType ?? "ONLINE") === "IN_PERSON" && (
-              <div className="mt-1 space-y-0.5">
-                <div>
-                  <span className="text-gray-500">Venue:</span>{" "}
-                  {b.locationName || <em className="text-gray-600">—</em>}
-                </div>
-                <div>
-                  <span className="text-gray-500">Address:</span>{" "}
-                  {b.locationAddress || <em className="text-gray-600">—</em>}
-                </div>
-              </div>
-            )}
-
-            {PHONE_ENABLED && (b.appearanceType ?? "ONLINE") === "PHONE" && (
-              <div className="mt-1">
-                <span className="text-gray-500">Dial info:</span>{" "}
-                {b.dialInfo || <em className="text-gray-600">—</em>}
-              </div>
-            )}
           </div>
+
+          {(b.appearanceType ?? "ONLINE") === "ONLINE" && (
+            <div className="text-sm">
+              {b.locationUrl ? (
+                <ExternalLink href={b.locationUrl}>Join link</ExternalLink>
+              ) : (
+                <span className="text-gray-600">No link provided.</span>
+              )}
+            </div>
+          )}
+
+          {(b.appearanceType ?? "ONLINE") === "IN_PERSON" && (
+            <div className="space-y-1 text-sm">
+              <div>
+                <span className="font-medium">Venue:</span>{" "}
+                {b.locationName || "—"}
+              </div>
+              <div>
+                <span className="font-medium">Address:</span>{" "}
+                {b.locationAddress || "—"}
+              </div>
+            </div>
+          )}
+
+          {PHONE_ENABLED && (b.appearanceType ?? "ONLINE") === "PHONE" && (
+            <div className="text-sm">
+              <span className="font-medium">Dial info:</span>{" "}
+              {b.dialInfo || "—"}
+            </div>
+          )}
         </section>
       )}
 
       {/* Guests */}
-      <section className="rounded-md border p-4">
-        <div className="font-medium">Guests</div>
+      <section className="space-y-3 rounded-md border p-3">
+        <div className="text-sm font-semibold">Guests</div>
+
         {(!b.guests || b.guests.length === 0) && (
-          <div className="mt-2 rounded-md border bg-gray-50 p-3 text-sm text-gray-600">
-            None added.
-          </div>
+          <div className="text-sm text-gray-600">None added.</div>
         )}
 
-        <div className="mt-2 space-y-3">
-          {(b.guests || []).map((g, idx) => {
-            const eff = effectiveForGuest(g, b);
-            const tagClass =
-              g.appearanceType === "ONLINE"
-                ? "bg-blue-100 text-blue-800"
-                : g.appearanceType === "IN_PERSON"
-                ? "bg-amber-100 text-amber-800"
-                : "bg-purple-100 text-purple-800";
+        {(b.guests || []).map((g, idx) => {
+          const eff = effectiveForGuest(g, b);
+          const tagClass =
+            g.appearanceType === "ONLINE"
+              ? "bg-blue-100 text-blue-800"
+              : g.appearanceType === "IN_PERSON"
+              ? "bg-amber-100 text-amber-800"
+              : "bg-purple-100 text-purple-800";
 
-            return (
-              <div
-                key={g.id ?? `${g.userId}-${idx}`}
-                className="rounded-md border p-3"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="text-sm font-medium">
-                    #{idx + 1} {g.name}
-                    <span className="ml-2 rounded px-1 text-[10px] border">
-                      {g.kind}
-                    </span>
-                  </div>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] ${tagClass}`}
-                  >
-                    {g.appearanceType}
+          return (
+            <div key={idx} className="space-y-1 rounded-md border p-3">
+              <div className="flex items-center justify-between">
+                <div className="font-medium">
+                  #{idx + 1} {g.name}{" "}
+                  <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs">
+                    {g.kind}
                   </span>
                 </div>
+                <span className={`rounded px-2 py-0.5 text-xs ${tagClass}`}>
+                  {g.appearanceType}
+                </span>
+              </div>
 
-                {g.userId && (
-                  <div className="mt-0.5 text-[11px] text-gray-500">
-                    {g.userId}
-                  </div>
-                )}
+              {g.userId && (
+                <div className="text-xs text-gray-500">{g.userId}</div>
+              )}
 
-                {/* Appearance-specific detail (effective) */}
-                <div className="mt-2 text-sm">
-                  {eff.kind === "ONLINE" && (
-                    <div>
-                      <span className="text-gray-500">Join:</span>{" "}
-                      {eff.value ? (
-                        <ExternalLink href={eff.value}>Link</ExternalLink>
-                      ) : (
-                        <em className="text-gray-600">—</em>
-                      )}
-                      {eff.usedFallback && (
-                        <span className="ml-1 text-[11px] text-gray-500">
-                          (using default)
-                        </span>
-                      )}
-                    </div>
+              {/* Appearance-specific detail (effective) */}
+              {eff.kind === "ONLINE" && (
+                <div className="text-sm">
+                  <span className="font-medium">Join:</span>{" "}
+                  {eff.value ? (
+                    <ExternalLink href={eff.value}>Link</ExternalLink>
+                  ) : (
+                    "—"
                   )}
-
-                  {eff.kind === "IN_PERSON" && (
-                    <div>
-                      <span className="text-gray-500">Venue/address:</span>{" "}
-                      {eff.value || <em className="text-gray-600">—</em>}
-                      {eff.usedFallback && (
-                        <span className="ml-1 text-[11px] text-gray-500">
-                          (using default)
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {PHONE_ENABLED && eff.kind === "PHONE" && (
-                    <div>
-                      <span className="text-gray-500">Dial info:</span>{" "}
-                      {eff.value || <em className="text-gray-600">—</em>}
-                      {eff.usedFallback && (
-                        <span className="ml-1 text-[11px] text-gray-500">
-                          (using default)
-                        </span>
-                      )}
-                    </div>
+                  {eff.usedFallback && (
+                    <span className="ml-2 text-xs text-gray-600">
+                      (using default)
+                    </span>
                   )}
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              )}
+
+              {eff.kind === "IN_PERSON" && (
+                <div className="text-sm">
+                  <span className="font-medium">Venue/address:</span>{" "}
+                  {eff.value || "—"}
+                  {eff.usedFallback && (
+                    <span className="ml-2 text-xs text-gray-600">
+                      (using default)
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {PHONE_ENABLED && eff.kind === "PHONE" && (
+                <div className="text-sm">
+                  <span className="font-medium">Dial info:</span>{" "}
+                  {eff.value || "—"}
+                  {eff.usedFallback && (
+                    <span className="ml-2 text-xs text-gray-600">
+                      (using default)
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </section>
 
-      {/* Additional details (program/talking points) */}
+      {/* Additional details (program / talking points) */}
       {(b.programName || b.talkingPoints) && (
-        <section className="rounded-md border p-4">
-          <div className="font-medium">Additional details</div>
+        <section className="space-y-2 rounded-md border p-3">
+          <div className="text-sm font-semibold">Additional details</div>
           {b.programName && (
-            <div className="mt-2 text-sm">
-              <span className="text-gray-500">Program:</span> {b.programName}
+            <div className="text-sm">
+              <span className="font-medium">Program:</span> {b.programName}
             </div>
           )}
           {b.talkingPoints && (
-            <div className="mt-2 text-sm">
-              <div className="text-gray-500">Talking points:</div>
+            <div className="space-y-1 text-sm">
+              <div className="font-medium">Talking points:</div>
               <div className="whitespace-pre-wrap">{b.talkingPoints}</div>
             </div>
           )}
@@ -505,28 +530,25 @@ export default function BookingViewPage() {
       )}
 
       {/* Notes (restored) */}
-      <section className="rounded-md border p-4">
-        <div className="font-medium">Notes</div>
+      <section className="space-y-2 rounded-md border p-3">
+        <div className="text-sm font-semibold">Notes</div>
 
         {noteMsg && (
-          <div className="mt-2">
-            <AlertBox variant={noteMsg.tone}>{noteMsg.text}</AlertBox>
-          </div>
+          <AlertBox variant={noteMsg.tone === "success" ? "success" : "error"}>
+            {noteMsg.text}
+          </AlertBox>
         )}
 
         {notesLoading ? (
-          <div className="mt-2 text-sm text-gray-600">Loading notes…</div>
+          <div className="text-sm text-gray-600">Loading notes…</div>
         ) : notes.length === 0 ? (
-          <div className="mt-2 text-sm text-gray-600">No notes yet.</div>
+          <div className="text-sm text-gray-600">No notes yet.</div>
         ) : (
-          <ul className="mt-2 space-y-3">
+          <ul className="space-y-2">
             {notes.map((n) => (
               <li key={n.id} className="rounded-md border p-2">
-                <div className="text-sm">
-                  <span className="font-medium">{n.authorName}</span>{" "}
-                  <span className="text-gray-500">
-                    • {fmtDate(n.createdAt)}
-                  </span>
+                <div className="text-xs text-gray-600">
+                  <strong>{n.authorName}</strong> • {fmtDate(n.createdAt)}
                 </div>
                 <div className="whitespace-pre-wrap text-sm">{n.body}</div>
               </li>
@@ -534,8 +556,8 @@ export default function BookingViewPage() {
           </ul>
         )}
 
-        {/* Composer */}
-        <div className="mt-3">
+        {/* Composer (all roles may post; server enforces who sees what) */}
+        <div>
           <textarea
             value={noteBody}
             onChange={(e) => setNoteBody(e.target.value)}
@@ -543,7 +565,12 @@ export default function BookingViewPage() {
             className="h-24 w-full rounded-md border p-2 text-sm focus:outline-none focus:ring-2 focus:ring-black"
           />
           <div className="mt-2">
-            <ButtonLike type="button" onClick={postNote} disabled={posting}>
+            <ButtonLike
+              type="button"
+              onClick={postNote}
+              disabled={posting}
+              aria-label="Post note"
+            >
               {posting ? "Posting…" : "Post note"}
             </ButtonLike>
           </div>
