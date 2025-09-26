@@ -9,10 +9,10 @@ import type { Booking, Role } from "@prisma/client";
  * Features
  * - Legacy create path kept as-is (UNIFIED, ONLINE/IN_PERSON, single expert).
  * - New path (behind BOOKING_GUESTS_V2=true):
- *    • Supports PHONE appearance and full per-guest payload (UNIFIED | PER_GUEST).
- *    • Persists guests into BookingGuest with sane fallbacks.
- *    • Mirrors first EXPERT guest to booking.expertUserId/expertName (back-compat).
- *    • Enforces expert exclusivity for any internal EXPERT guests.
+ *   • Supports PHONE appearance and full per-guest payload (UNIFIED | PER_GUEST).
+ *   • Persists guests into BookingGuest with sane fallbacks.
+ *   • Mirrors first EXPERT guest to booking.expertUserId/expertName (back-compat).
+ *   • Enforces expert exclusivity for any internal EXPERT guests.
  */
 
 type Appearance = "ONLINE" | "IN_PERSON" | "PHONE";
@@ -110,7 +110,6 @@ export async function GET() {
   try {
     const { isSignedIn, userName, userId, activeOrgId, rolesByOrg } =
       await getAuthContext();
-
     if (!isSignedIn) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
@@ -129,7 +128,6 @@ export async function GET() {
 
     // Staff view → list by their org (HOST included as read-only staff)
     const staffOrgId = activeOrgId ?? firstStaffOrg(rolesByOrg);
-
     if (staffOrgId) {
       bookings = await prisma.booking.findMany({
         where: { orgId: staffOrgId },
@@ -171,7 +169,8 @@ export async function POST(req: Request) {
       );
     }
 
-    // Staff-only create (OWNER/PRODUCER only). HOST is view-only by product rules.
+    // Staff-only create (OWNER/PRODUCER only).
+    // HOST is view-only by product rules.
     const producerOrgId =
       activeOrgId ??
       (() => {
@@ -180,6 +179,7 @@ export async function POST(req: Request) {
         }
         return null;
       })();
+
     if (!producerOrgId) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
@@ -191,13 +191,12 @@ export async function POST(req: Request) {
 
     const subject = asTrimmed(body.subject);
     const newsroomName = asTrimmed(body.newsroomName);
-
     const startAt = coerceISODate(body.startAt);
     const durationMins = coerceInt(body.durationMins);
-
     const programName = asTrimmed(body.programName);
     const hostName = asTrimmed(body.hostName); // legacy text field (kept for now)
     const hostUserIdInput = asTrimmed(body.hostUserId);
+    const talkingPoints = asTrimmed(body.talkingPoints); // <-- added: parsed top-level for both paths
 
     if (!subject)
       return NextResponse.json(
@@ -302,7 +301,6 @@ export async function POST(req: Request) {
       const rawGuests: GuestInput[] = Array.isArray(body.guests)
         ? body.guests
         : [];
-
       const guests = rawGuests.map((g, idx) => {
         const gi = {
           userId: asTrimmed(g.userId),
@@ -319,18 +317,15 @@ export async function POST(req: Request) {
           venueName: asTrimmed(g.venueName),
           venueAddress: asTrimmed(g.venueAddress),
           dialInfo: asTrimmed(g.dialInfo),
-          order: Number.isFinite(g.order) ? Number(g.order) : idx,
+          order: Number.isFinite(g.order as any) ? Number(g.order) : idx,
         };
-
         return gi;
       });
 
       // Determine the primary EXPERT (for back-compat mirroring to booking.expert*)
       const primaryExpert =
-        guests.find((g) => g.kind === "EXPERT") ??
-        // As a last resort, any guest
+        guests.find((g) => g.kind === "EXPERT") ?? // As a last resort, any guest
         guests[0];
-
       if (!primaryExpert) {
         return NextResponse.json(
           { ok: false, error: "At least one guest is required." },
@@ -373,17 +368,17 @@ export async function POST(req: Request) {
         }
       }
 
-      // Build booking create data  ✅ FIX: include required startAt & durationMins
+      // Build booking create data
       const bookingData = {
         subject,
         newsroomName,
         programName: programName ?? "",
         hostName: hostName ?? "",
+        talkingPoints: talkingPoints ?? "", // <-- added: persist talkingPoints on V2 create
         appearanceScope,
         accessProvisioning,
         appearanceType:
-          appearanceScope === "UNIFIED" ? unifiedAppearanceType : null,
-        // defaults/fallbacks
+          appearanceScope === "UNIFIED" ? unifiedAppearanceType : null, // defaults/fallbacks
         locationUrl: locationUrl ?? "",
         locationName: locationName ?? "",
         locationAddress: locationAddress ?? "",
@@ -394,10 +389,7 @@ export async function POST(req: Request) {
         // tenancy
         organization: { connect: { id: producerOrgId } },
         // back-compat mirror
-        expertName:
-          (primaryExpert.name as string) ??
-          // fallback for safety
-          "Expert",
+        expertName: (primaryExpert.name as string) ?? "Expert",
         ...(primaryExpert.userId
           ? { expert: { connect: { id: primaryExpert.userId } } }
           : {}),
@@ -464,7 +456,7 @@ export async function POST(req: Request) {
     const appearanceType = coerceAppearance(body.appearanceType);
     const locationName = asTrimmed(body.locationName);
     const locationUrl = asTrimmed(body.locationUrl ?? body.meetingLink);
-    const talkingPoints = asTrimmed(body.talkingPoints);
+    // talkingPoints is already parsed above
 
     if (!expertUserIdInput && !expertNameInput)
       return NextResponse.json(
