@@ -1,43 +1,39 @@
 "use client";
 
 /**
- * Edit Booking
- * - Final rule agreed:
- *   • If Appearance scope = PER_GUEST → Access provisioning is forced to PER_GUEST (selector hidden).
- *     Booking defaults are hidden; guests carry their own access fields based on appearance.
- *   • If Appearance scope = UNIFIED → provisioning selector is shown (SHARED or PER_GUEST).
- * - Validation:
- *   • UNIFIED + IN_PERSON + SHARED -> require booking-level venue name OR address.
+ * Edit Booking — multi-host + reporters in org directory.
+ * This revision fixes host availability badges in AddHostPicker.
  */
 
 import * as React from "react";
 import { useRouter, useParams } from "next/navigation";
 import { z } from "zod";
 
-/* Safe UI imports */
+/* ---------- small UI helpers ---------- */
 import * as ButtonModule from "../../../../../components/ui/Button";
 const UIButton: React.ElementType =
   (ButtonModule as any).Button ?? (ButtonModule as any).default;
+
 import * as AlertModule from "../../../../../components/ui/Alert";
 const UIAlert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
 
-/* Flags (PHONE option toggle for selects) */
+/* ---------- flags ---------- */
 const PHONE_ENABLED =
   (process.env.NEXT_PUBLIC_APPEARANCE_PHONE ?? "true") !== "false";
+const MULTI_HOSTS_ENABLED =
+  (process.env.NEXT_PUBLIC_FEATURE_MULTI_HOSTS ?? "false") === "true";
 
-/* Utils */
-function toDatetimeLocalValue(iso: string): string {
+/* ---------- utils ---------- */
+const clsx = (...xs: any[]) => xs.filter(Boolean).join(" ");
+const pad = (n: number) => String(n).padStart(2, "0");
+const toDatetimeLocalValue = (iso: string) => {
   const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
     d.getHours()
-  )}:${p(d.getMinutes())}`;
-}
-function clsx(...xs: any[]) {
-  return xs.filter(Boolean).join(" ");
-}
-function useDebounce<T>(v: T, delay = 250): T {
+  )}:${pad(d.getMinutes())}`;
+};
+function useDebounce<T>(v: T, delay = 250) {
   const [s, setS] = React.useState(v);
   React.useEffect(() => {
     const t = setTimeout(() => setS(v), delay);
@@ -46,69 +42,97 @@ function useDebounce<T>(v: T, delay = 250): T {
   return s;
 }
 
-/* Types */
+/* ---------- types ---------- */
 type TAppearance = "ONLINE" | "IN_PERSON" | "PHONE";
 type TScope = "UNIFIED" | "PER_GUEST";
 type TProvisioning = "SHARED" | "PER_GUEST";
 
-type PickerItem = {
+type THostScope = "UNIFIED" | "PER_HOST";
+type THostProvisioning = "SHARED" | "PER_HOST";
+
+type TKind = "EXPERT" | "REPORTER";
+
+type ParticipantRow = {
   id: string;
   name: string | null;
-  kind: "EXPERT" | "REPORTER";
+  kind: TKind;
   city?: string | null;
   countryCode?: string | null;
   tags?: string[] | null;
-  availability?: { status: "AVAILABLE" | "BUSY" } | null;
-};
-
-type HostRow = {
-  id: string;
-  name: string | null;
-  availability?: "AVAILABLE" | "BUSY" | null;
+  availability?: { status: "AVAILABLE" | "BUSY" | "UNKNOWN" } | null;
 };
 
 type GuestRow = {
   id?: string;
-  userId?: string | null;
+  userId: string | null;
   name: string;
-  kind: "EXPERT" | "REPORTER";
+  kind: TKind;
   order: number;
   appearanceType: TAppearance;
-  joinUrl?: string | null;
-  venueName?: string | null;
-  venueAddress?: string | null;
-  dialInfo?: string | null;
+  joinUrl: string | null;
+  venueName: string | null;
+  venueAddress: string | null;
+  dialInfo: string | null;
+};
+
+type HostRow = {
+  id?: string;
+  userId: string | null;
+  name: string;
+  order: number;
+  appearanceType: TAppearance;
+  joinUrl: string | null;
+  venueName: string | null;
+  venueAddress: string | null;
+  dialInfo: string | null;
 };
 
 type BookingDto = {
   id: string;
+  orgId?: string | null;
+
   subject: string;
   newsroomName: string;
-  startAt: string;
+  programName?: string | null;
+  talkingPoints?: string | null;
+
+  startAt: string; // ISO
   durationMins: number;
+
   appearanceScope: TScope;
   accessProvisioning: TProvisioning;
   appearanceType: TAppearance | null;
+
   locationUrl?: string | null;
   locationName?: string | null;
   locationAddress?: string | null;
   dialInfo?: string | null;
-  programName?: string | null;
-  hostName?: string | null;
-  talkingPoints?: string | null;
+
+  hostAppearanceScope: THostScope;
+  hostAccessProvisioning: THostProvisioning;
+  hostAppearanceType: TAppearance | null;
+
+  hostLocationUrl?: string | null;
+  hostLocationName?: string | null;
+  hostLocationAddress?: string | null;
+  hostDialInfo?: string | null;
+
+  expertUserId?: string | null;
+  expertName: string;
   hostUserId?: string | null;
-  guests?: GuestRow[];
+  hostName?: string | null;
+
+  guests: GuestRow[];
+  hosts?: HostRow[];
 };
 
-/* -------- Unified Add-Guest Picker (Org / Public / All) -------- */
+/* =======================================================================
+   Guest picker (reporters + experts from org; public experts too)
+======================================================================= */
 function AddGuestPicker(props: {
   startAtISO: string;
   durationMins: number;
-  onPick: (row: {
-    id: string;
-    name: string;
-    kind: "EXPERT" | "REPORTER";
-  }) => void;
+  onPick: (row: { id: string; name: string; kind: TKind }) => void;
   existingIds: string[];
 }) {
   const { startAtISO, durationMins, onPick, existingIds } = props;
@@ -120,11 +144,12 @@ function AddGuestPicker(props: {
   );
   const [onlyAvailable, setOnlyAvailable] = React.useState(false);
 
-  const [items, setItems] = React.useState<PickerItem[]>([]);
+  const [items, setItems] = React.useState<ParticipantRow[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const debouncedQ = useDebounce(q, 250);
+
   const haveWindow = !!(startAtISO && durationMins > 0);
+  const debouncedQ = useDebounce(q, 250);
 
   React.useEffect(() => {
     if (!open) return;
@@ -132,17 +157,36 @@ function AddGuestPicker(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, debouncedQ, visibility, onlyAvailable, startAtISO, durationMins]);
 
-  async function fetchOrgRows(): Promise<PickerItem[]> {
+  function normalizeOrgRows(dirItems: any[]): ParticipantRow[] {
+    let rows = dirItems
+      .filter((u: any) => u?.kind === "REPORTER" || u?.kind === "EXPERT")
+      .map((u: any) => ({
+        id: String(u.id),
+        name: (u.displayName as string) ?? null,
+        kind: (u.kind as TKind) ?? "EXPERT",
+        city: u.city ?? null,
+        countryCode: u.countryCode ?? null,
+        tags: u.tags ?? [],
+        availability:
+          u.availability === "AVAILABLE" || u.availability === "BUSY"
+            ? { status: u.availability }
+            : { status: "UNKNOWN" as const },
+      })) as ParticipantRow[];
+
+    if (onlyAvailable && haveWindow) {
+      rows = rows.filter((r) => r.availability?.status === "AVAILABLE");
+    }
+    return rows;
+  }
+
+  async function fetchOrgRows(): Promise<ParticipantRow[]> {
     const sp = new URLSearchParams();
     if (debouncedQ) sp.set("q", debouncedQ);
     if (haveWindow) {
-      sp.set("start", new Date(startAtISO).toISOString());
-      sp.set(
-        "end",
-        new Date(
-          new Date(startAtISO).getTime() + durationMins * 60_000
-        ).toISOString()
-      );
+      const start = new Date(startAtISO);
+      const end = new Date(start.getTime() + durationMins * 60_000);
+      sp.set("start", start.toISOString());
+      sp.set("end", end.toISOString());
     }
     const res = await fetch(`/api/directory/org?${sp.toString()}`, {
       credentials: "include",
@@ -151,42 +195,20 @@ function AddGuestPicker(props: {
     if (!res.ok)
       throw new Error(j?.error || `Directory failed (${res.status})`);
     const dirItems = Array.isArray(j.items) ? j.items : [];
-    let rows = dirItems
-      .filter((u: any) => u?.kind === "REPORTER" || u?.kind === "EXPERT")
-      .map((u: any) => ({
-        id: String(u.id),
-        name: (u.displayName as string) ?? null,
-        kind: (u.kind as "EXPERT" | "REPORTER") ?? "EXPERT",
-        city: u.city ?? null,
-        countryCode: u.countryCode ?? null,
-        tags: u.tags ?? [],
-        availability:
-          u.availability === "AVAILABLE" || u.availability === "BUSY"
-            ? { status: u.availability }
-            : null,
-      })) as PickerItem[];
-    if (onlyAvailable && haveWindow) {
-      rows = rows.filter((r) => r.availability?.status === "AVAILABLE");
-    }
-    return rows;
+    return normalizeOrgRows(dirItems);
   }
 
-  async function fetchPublicRows(): Promise<PickerItem[]> {
+  async function fetchPublicRows(): Promise<ParticipantRow[]> {
     const sp = new URLSearchParams({ visibility: "public", take: "20" });
     if (debouncedQ) sp.set("q", debouncedQ);
-    if (haveWindow) {
-      sp.set("startAt", new Date(startAtISO).toISOString());
-      sp.set("durationMins", String(durationMins));
-      if (onlyAvailable) sp.set("onlyAvailable", "true");
-    }
     const res = await fetch(`/api/experts/search?${sp.toString()}`, {
       credentials: "include",
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok)
       throw new Error(j?.error || `Public search failed (${res.status})`);
-    const expItems = Array.isArray(j.items) ? j.items : [];
-    return expItems.map((e: any) => ({
+    const items: any[] = Array.isArray(j.items) ? j.items : [];
+    return items.map((e: any) => ({
       id: String(e.id),
       name: (e.name as string) ?? null,
       kind: "EXPERT" as const,
@@ -195,7 +217,7 @@ function AddGuestPicker(props: {
       tags: e.tags ?? [],
       availability: e.availability?.status
         ? { status: e.availability.status }
-        : null,
+        : { status: "UNKNOWN" as const },
     }));
   }
 
@@ -203,6 +225,7 @@ function AddGuestPicker(props: {
     try {
       setLoading(true);
       setError(null);
+
       if (visibility === "org") {
         setItems(await fetchOrgRows());
         return;
@@ -211,20 +234,19 @@ function AddGuestPicker(props: {
         setItems(await fetchPublicRows());
         return;
       }
-      // all => union
-      let orgRows: PickerItem[] = [];
-      let pubRows: PickerItem[] = [];
+      let orgRows: ParticipantRow[] = [];
+      let pubRows: ParticipantRow[] = [];
       try {
         orgRows = await fetchOrgRows();
       } catch {}
       try {
         pubRows = await fetchPublicRows();
       } catch {}
-      const byId = new Map<string, PickerItem>();
-      [...orgRows, ...pubRows].forEach((r) =>
-        byId.set(r.id, byId.get(r.id) ?? r)
-      );
-      setItems([...byId.values()]);
+      const map = new Map<string, ParticipantRow>();
+      [...orgRows, ...pubRows].forEach((r) => {
+        if (!map.has(r.id)) map.set(r.id, r);
+      });
+      setItems([...map.values()]);
     } catch (e: any) {
       setError(e?.message || "Failed to load directory.");
       setItems([]);
@@ -234,8 +256,8 @@ function AddGuestPicker(props: {
   }
 
   return (
-    <div className="rounded-md border p-3">
-      <div className="mb-2">
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
@@ -243,127 +265,341 @@ function AddGuestPicker(props: {
         >
           {open ? "Hide" : "Browse"}
         </button>
+        <label className="text-sm text-gray-600">
+          Add guest (expert/reporter)
+        </label>
+      </div>
+
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+        placeholder={
+          visibility === "org"
+            ? "Search org directory…"
+            : visibility === "public"
+            ? "Search public experts…"
+            : "Search everyone…"
+        }
+        className="min-w-[240px] w-full rounded-md border px-3 py-2"
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
+        {(["org", "public", "all"] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setVisibility(v)}
+            className={clsx(
+              "rounded-md border px-2 py-1 text-xs capitalize",
+              visibility === v ? "bg-black text-white" : "hover:bg-gray-50"
+            )}
+          >
+            {v === "all" ? "Both" : v}
+          </button>
+        ))}
+        <label className="ml-2 inline-flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={onlyAvailable}
+            onChange={(e) => setOnlyAvailable(e.target.checked)}
+          />
+          Only available
+        </label>
       </div>
 
       {open && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
-              placeholder={
-                visibility === "org"
-                  ? "Search org directory…"
-                  : visibility === "public"
-                  ? "Search public experts…"
-                  : "Search everyone…"
-              }
-              className="min-w-[240px] flex-1 rounded-md border px-3 py-2"
-            />
-            {(["org", "public", "all"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setVisibility(v)}
-                className={clsx(
-                  "rounded-md border px-2 py-1 text-xs capitalize",
-                  visibility === v ? "bg-black text-white" : "hover:bg-gray-50"
-                )}
-              >
-                {v === "all" ? "All" : v}
-              </button>
-            ))}
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={onlyAvailable}
-                onChange={(e) => setOnlyAvailable(e.target.checked)}
-              />
-              Only available
-            </label>
-          </div>
-
-          {loading && (
-            <div className="rounded-md border bg-white px-3 py-2 text-sm">
-              Loading…
-            </div>
-          )}
-
+        <div className="space-y-2">
+          {loading && <div className="text-sm text-gray-500">Loading…</div>}
           {error && <UIAlert intent="error">{error}</UIAlert>}
           {!loading && !error && items.length === 0 && (
-            <div className="rounded-md border bg-white px-3 py-2 text-sm">
+            <div className="rounded-md border px-3 py-2 text-sm text-gray-600">
               No matches.
             </div>
           )}
 
-          <div className="grid gap-2">
-            {items.map((row) => {
-              const disabled = existingIds.includes(row.id);
-              const status = row.availability?.status;
-              const badge =
-                status === "AVAILABLE"
-                  ? "bg-green-100 text-green-800"
-                  : status === "BUSY"
-                  ? "bg-red-100 text-red-800"
-                  : null;
-
-              return (
-                <button
-                  key={row.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() =>
-                    onPick({
-                      id: row.id,
-                      name:
-                        row.name ||
-                        (row.kind === "REPORTER" ? "Reporter" : "Expert"),
-                      kind: row.kind,
-                    })
-                  }
-                  className={clsx(
-                    "w-full rounded-md border px-3 py-2 text-left",
-                    disabled && "opacity-50"
-                  )}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium">
-                      {row.name ||
-                        (row.kind === "REPORTER" ? "Reporter" : "Unnamed")}
-                      <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] uppercase text-gray-700">
-                        {row.kind}
-                      </span>
-                    </div>
-                    {badge && (
-                      <span
-                        className={clsx("rounded px-2 py-0.5 text-xs", badge)}
-                      >
-                        {status}
-                      </span>
-                    )}
+          {items.map((p) => {
+            const disabled = existingIds.includes(p.id);
+            const status = p.availability?.status;
+            const badge =
+              status === "AVAILABLE"
+                ? "bg-green-100 text-green-800"
+                : status === "BUSY"
+                ? "bg-red-100 text-red-800"
+                : "bg-gray-100 text-gray-700";
+            const roleBadge =
+              p.kind === "REPORTER"
+                ? "bg-blue-100 text-blue-800"
+                : "bg-purple-100 text-purple-800";
+            return (
+              <button
+                key={p.id}
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  onPick({
+                    id: p.id,
+                    name:
+                      p.name || (p.kind === "REPORTER" ? "Reporter" : "Expert"),
+                    kind: p.kind,
+                  })
+                }
+                className={clsx(
+                  "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
+                  disabled && "opacity-50"
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{p.name || "Unnamed"}</span>
+                    <span
+                      className={clsx(
+                        "rounded px-1.5 py-0.5 text-[10px]",
+                        roleBadge
+                      )}
+                    >
+                      {p.kind}
+                    </span>
                   </div>
-                </button>
-              );
-            })}
-          </div>
+                  <span className={clsx("rounded px-2 py-0.5 text-xs", badge)}>
+                    {status ?? "UNKNOWN"}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-600">
+                  {p.city && <span>{p.city}</span>}{" "}
+                  {p.countryCode && <span>({p.countryCode})</span>}{" "}
+                  {(p.tags || []).slice(0, 2).map((t) => (
+                    <span key={t} className="ml-1">
+                      #{t}
+                    </span>
+                  ))}
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-/* Host combobox (unchanged) */
-function HostCombobox(props: {
-  value: HostRow | null;
-  onChange: (next: HostRow | null) => void;
+/* =======================================================================
+   Host picker — FIXED availability badge
+======================================================================= */
+
+type HostDirectoryRow = { id: string; name: string | null };
+
+function AddHostPicker(props: {
+  onPick: (row: HostDirectoryRow) => void;
+  existingIds: string[];
   startAtISO: string;
   durationMins: number;
 }) {
-  const { value, onChange, startAtISO, durationMins } = props;
+  const { onPick, existingIds, startAtISO, durationMins } = props;
+
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
-  const [items, setItems] = React.useState<HostRow[]>([]);
+  const [items, setItems] = React.useState<any[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const debouncedQ = useDebounce(q, 250);
+
+  const haveWindow = !!(startAtISO && durationMins > 0);
+  const windowStart = React.useMemo(
+    () => (haveWindow ? new Date(startAtISO) : null),
+    [haveWindow, startAtISO]
+  );
+  const windowEnd = React.useMemo(
+    () =>
+      haveWindow && windowStart
+        ? new Date(windowStart.getTime() + durationMins * 60_000)
+        : null,
+    [haveWindow, windowStart, durationMins]
+  );
+
+  React.useEffect(() => {
+    if (!open) return;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const sp = new URLSearchParams();
+        if (debouncedQ) sp.set("q", debouncedQ);
+
+        // Send BOTH shapes so we don't rely on guesses.
+        if (haveWindow && windowStart && windowEnd) {
+          sp.set("start", windowStart.toISOString());
+          sp.set("end", windowEnd.toISOString());
+          sp.set("startAt", windowStart.toISOString());
+          sp.set("durationMins", String(durationMins));
+        }
+
+        const res = await fetch(`/api/hosts/search?${sp.toString()}`, {
+          credentials: "include",
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j?.error || "Failed to load hosts");
+        setItems(Array.isArray(j.items) ? j.items : []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load hosts");
+        setItems([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, debouncedQ, startAtISO, durationMins]);
+
+  function overlaps(a0: Date, a1: Date, b0: any, b1: any) {
+    const s = b0 ?? (Array.isArray(b0) ? b0[0] : undefined);
+    const e = b1 ?? (Array.isArray(b1) ? b1[1] : undefined);
+    if (!s || !e) return false;
+    const bs = new Date(typeof s === "string" ? s : String(s));
+    const be = new Date(typeof e === "string" ? e : String(e));
+    return bs < a1 && be > a0;
+  }
+
+  function hostStatus(it: any): "AVAILABLE" | "BUSY" | "UNKNOWN" {
+    if (!it) return "UNKNOWN";
+
+    // 1) Explicit signals
+    const a = it.availability;
+    if (a && typeof a === "object") {
+      const s = (a.status ?? a.state) as string | undefined;
+      if (s === "AVAILABLE" || s === "BUSY") return s;
+      if (typeof a.isAvailable === "boolean")
+        return a.isAvailable ? "AVAILABLE" : "BUSY";
+      if (typeof a.available === "boolean")
+        return a.available ? "AVAILABLE" : "BUSY";
+      if (Array.isArray(a.busy) && windowStart && windowEnd) {
+        const hit = a.busy.some((w: any) =>
+          overlaps(windowStart, windowEnd, w?.start ?? w?.s, w?.end ?? w?.e)
+        );
+        return hit ? "BUSY" : "AVAILABLE";
+      }
+    }
+    if (typeof a === "string")
+      return a === "AVAILABLE" || a === "BUSY" ? a : "UNKNOWN";
+
+    if (typeof it.status === "string") {
+      const s = it.status.toUpperCase();
+      if (s === "AVAILABLE" || s === "BUSY") return s as any;
+    }
+    if (typeof it.isAvailable === "boolean")
+      return it.isAvailable ? "AVAILABLE" : "BUSY";
+    if (typeof it.available === "boolean")
+      return it.available ? "AVAILABLE" : "BUSY";
+    if (typeof it.busy === "boolean") return it.busy ? "BUSY" : "AVAILABLE";
+
+    // 2) Derive from busy windows arrays
+    const arrays = [
+      it.busy,
+      it.busyWindows,
+      it.calendarBusy,
+      it.blocks,
+      it.availability?.busy,
+      it.calendar?.busy,
+    ].filter(Boolean);
+
+    if (arrays.length && windowStart && windowEnd) {
+      let sawAny = false;
+      for (const arr of arrays) {
+        if (!Array.isArray(arr)) continue;
+        sawAny = true;
+        for (const w of arr) {
+          const s = w?.start ?? w?.s ?? w?.[0];
+          const e = w?.end ?? w?.e ?? w?.[1];
+          if (s && e && overlaps(windowStart, windowEnd, s, e)) return "BUSY";
+        }
+      }
+      if (sawAny) return "AVAILABLE";
+    }
+
+    return "UNKNOWN";
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
+        >
+          {open ? "Hide" : "Browse"}
+        </button>
+        <label className="text-sm text-gray-600">Add host</label>
+      </div>
+
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+        className="w-full rounded-md border px-3 py-2"
+        placeholder="Search hosts…"
+      />
+
+      {open && (
+        <div className="space-y-2">
+          {loading && (
+            <div className="text-sm text-gray-500">Loading hosts…</div>
+          )}
+          {error && <UIAlert intent="error">{error}</UIAlert>}
+          {!loading && !error && items.length === 0 && (
+            <div className="rounded-md border px-3 py-2 text-sm text-gray-600">
+              No host directory available.
+            </div>
+          )}
+          {items.map((h: any) => {
+            const disabled = existingIds.includes(h.id);
+            const status = hostStatus(h);
+            const badge =
+              status === "AVAILABLE"
+                ? "bg-green-100 text-green-800"
+                : status === "BUSY"
+                ? "bg-red-100 text-red-800"
+                : "bg-gray-100 text-gray-700";
+            return (
+              <button
+                key={h.id}
+                type="button"
+                disabled={disabled}
+                onClick={() => onPick({ id: h.id, name: h.name || "Host" })}
+                className={clsx(
+                  "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
+                  disabled && "opacity-50"
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{h.name || "Unnamed"}</div>
+                    <div className="text-[11px] text-gray-500">{h.id}</div>
+                  </div>
+                  <span className={clsx("rounded px-2 py-0.5 text-xs", badge)}>
+                    {status}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* =======================================================================
+   Legacy single-host combobox (kept intact; hidden when multi-hosts enabled)
+======================================================================= */
+function HostCombobox(props: {
+  value: { id: string; name: string | null } | null;
+  onChange: (next: { id: string; name: string | null } | null) => void;
+}) {
+  const { value, onChange } = props;
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const [items, setItems] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const debouncedQ = useDebounce(q, 250);
@@ -376,60 +612,24 @@ function HostCombobox(props: {
         setError(null);
         const sp = new URLSearchParams();
         if (debouncedQ) sp.set("q", debouncedQ);
-        if (startAtISO && durationMins > 0) {
-          sp.set("start", new Date(startAtISO).toISOString());
-          sp.set(
-            "end",
-            new Date(
-              new Date(startAtISO).getTime() + durationMins * 60_000
-            ).toISOString()
-          );
-        }
-        const res = await fetch(`/api/directory/org?${sp.toString()}`, {
+        const res = await fetch(`/api/hosts/search?${sp.toString()}`, {
           credentials: "include",
         });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(j?.error || "Failed to load directory");
-        const list: HostRow[] = Array.isArray(j.items)
-          ? j.items
-              .filter((u: any) => u?.kind === "HOST")
-              .map((u: any) => ({
-                id: u.id,
-                name: u.displayName ?? null,
-                availability: u.availability ?? null,
-              }))
-          : [];
-        setItems(list);
+        const j = await res.json();
+        if (!res.ok) throw new Error(j?.error || "Failed to load hosts");
+        setItems(Array.isArray(j.items) ? j.items : []);
       } catch (e: any) {
-        setError(e?.message || "Failed to load directory");
+        setError(e?.message || "Failed to load hosts");
         setItems([]);
       } finally {
         setLoading(false);
       }
     })();
-  }, [open, debouncedQ, startAtISO, durationMins]);
-
-  function AvailabilityBadge({
-    status,
-  }: {
-    status: "AVAILABLE" | "BUSY" | null;
-  }) {
-    if (!status) return null;
-    const klass =
-      status === "AVAILABLE"
-        ? "bg-green-100 text-green-800"
-        : "bg-red-100 text-red-800";
-    return (
-      <span className={clsx("rounded px-2 py-0.5 text-xs", klass)}>
-        {status}
-      </span>
-    );
-  }
+  }, [open, debouncedQ]);
 
   return (
-    <div className="rounded-md border p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="text-sm font-medium">Host</span>
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
@@ -437,6 +637,7 @@ function HostCombobox(props: {
         >
           {open ? "Hide" : "Browse"}
         </button>
+
         {value && (
           <button
             type="button"
@@ -453,49 +654,56 @@ function HostCombobox(props: {
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onFocus={() => setOpen(true)}
-        onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.preventDefault();
+        }}
         className="w-full rounded-md border px-3 py-2"
         placeholder="Search hosts…"
       />
 
       {open && (
-        <div className="mt-2 grid gap-2">
-          {items.map((h) => (
+        <div className="space-y-2">
+          {loading && <div>Loading hosts…</div>}
+          {error && <UIAlert intent="error">{error}</UIAlert>}
+          {!loading && !error && items.length === 0 && (
+            <div className="rounded-md border px-3 py-2 text-sm text-gray-600">
+              No host directory available.
+            </div>
+          )}
+          {items.map((h: any) => (
             <button
               key={h.id}
               type="button"
               onClick={() => {
-                onChange({
-                  id: h.id,
-                  name: h.name || "Unknown",
-                  availability: h.availability ?? null,
-                });
+                onChange({ id: h.id, name: h.name || "Unknown" });
                 setOpen(false);
               }}
               className="w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50"
             >
-              <div className="flex items-center justify-between">
-                <div className="font-medium">{h.name || "Unnamed"}</div>
-                <AvailabilityBadge status={h.availability ?? null} />
-              </div>
-              <div className="mt-1 text-xs text-gray-500">{h.id}</div>
+              <div className="font-medium">{h.name || "Unnamed"}</div>
+              <div className="text-[11px] text-gray-500">{h.id}</div>
             </button>
           ))}
         </div>
       )}
 
-      <div className="mt-2 text-sm text-gray-700">
-        Selected host: <strong>{value ? value.name : "none"}</strong>
+      <div className="text-sm text-gray-700">
+        Selected host: {value ? <b>{value.name}</b> : <i>none</i>}
       </div>
     </div>
   );
 }
 
-/* -------- Page -------- */
+/* =======================================================================
+   Page
+======================================================================= */
 
-type FieldErrors = {
-  locationName?: string;
-  locationAddress?: string;
+type FieldErrors = { locationName?: string; locationAddress?: string };
+type HostDefaultsErrors = {
+  hostLocationUrl?: string;
+  hostLocationName?: string;
+  hostLocationAddress?: string;
+  hostDialInfo?: string;
 };
 type GuestFieldErrors = {
   joinUrl?: string;
@@ -503,11 +711,10 @@ type GuestFieldErrors = {
   venueAddress?: string;
   dialInfo?: string;
 };
+type HostFieldErrors = GuestFieldErrors;
 
 export default function EditBookingPage() {
   const router = useRouter();
-
-  // robust params guard
   const params = useParams<{ id: string }>();
   const rawId = (params as any)?.id;
   const id =
@@ -523,10 +730,19 @@ export default function EditBookingPage() {
   const [ok, setOk] = React.useState<string | null>(null);
 
   const [form, setForm] = React.useState<BookingDto | null>(null);
-  const [hostPick, setHostPick] = React.useState<HostRow | null>(null);
+
+  // Legacy single-host (flag off)
+  const [hostPick, setHostPick] = React.useState<{
+    id: string;
+    name: string | null;
+  } | null>(null);
 
   const [fieldErrors, setFieldErrors] = React.useState<FieldErrors>({});
+  const [hostDefaultsErrors, setHostDefaultsErrors] =
+    React.useState<HostDefaultsErrors>({});
   const [guestErrors, setGuestErrors] = React.useState<GuestFieldErrors[]>([]);
+  const [hostErrors, setHostErrors] = React.useState<HostFieldErrors[]>([]);
+
   const deletedGuestIdsRef = React.useRef<string[]>([]);
 
   React.useEffect(() => {
@@ -537,7 +753,7 @@ export default function EditBookingPage() {
       try {
         setLoading(true);
         setLoadError(null);
-        setSaveError(null); // clear any stale banner on fresh load
+        setSaveError(null);
 
         const res = await fetch(`/api/bookings/${id}`, {
           credentials: "include",
@@ -545,13 +761,55 @@ export default function EditBookingPage() {
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j?.error || "Failed to load booking");
 
-        const b: BookingDto = j?.booking ?? j;
-        b.appearanceScope = (b.appearanceScope ?? "UNIFIED") as TScope;
-        b.accessProvisioning = (b.accessProvisioning ??
-          "SHARED") as TProvisioning;
-        b.guests = (b.guests || [])
+        const b = (j?.booking ?? j) as any;
+
+        const dto: BookingDto = {
+          id: b.id,
+          orgId: b.orgId ?? null,
+          subject: b.subject,
+          newsroomName: b.newsroomName,
+          programName: b.programName ?? null,
+          talkingPoints: b.talkingPoints ?? null,
+          startAt: b.startAt,
+          durationMins: b.durationMins,
+
+          appearanceScope: (b.appearanceScope ?? "UNIFIED") as TScope,
+          accessProvisioning: (b.accessProvisioning ??
+            "SHARED") as TProvisioning,
+          appearanceType: (b.appearanceType ?? null) as TAppearance | null,
+
+          locationUrl: b.locationUrl ?? null,
+          locationName: b.locationName ?? null,
+          locationAddress: b.locationAddress ?? null,
+          dialInfo: b.dialInfo ?? null,
+
+          hostAppearanceScope: (b.hostAppearanceScope ??
+            "UNIFIED") as THostScope,
+          hostAccessProvisioning: (b.hostAccessProvisioning ??
+            "SHARED") as THostProvisioning,
+          hostAppearanceType: (b.hostAppearanceType ??
+            b.appearanceType ??
+            "ONLINE") as TAppearance | null,
+
+          hostLocationUrl: b.hostLocationUrl ?? b.locationUrl ?? null,
+          hostLocationName: b.hostLocationName ?? b.locationName ?? null,
+          hostLocationAddress:
+            b.hostLocationAddress ?? b.locationAddress ?? null,
+          hostDialInfo: b.hostDialInfo ?? b.dialInfo ?? null,
+
+          expertUserId: b.expertUserId ?? null,
+          expertName: b.expertName ?? "",
+
+          hostUserId: b.hostUserId ?? null,
+          hostName: b.hostName ?? null,
+
+          guests: [],
+          hosts: [],
+        };
+
+        dto.guests = (b.guests || [])
           .slice()
-          .sort((a, b2) => (a.order ?? 0) - (b2.order ?? 0))
+          .sort((a: any, b2: any) => (a.order ?? 0) - (b2.order ?? 0))
           .map((g: any, i: number) => ({
             id: g.id,
             userId: g.userId ?? null,
@@ -565,15 +823,61 @@ export default function EditBookingPage() {
             dialInfo: g.dialInfo ?? null,
           }));
 
-        if (!PHONE_ENABLED && b.appearanceType === "PHONE")
-          b.appearanceType = "ONLINE";
+        const apiHosts: HostRow[] =
+          (b.hosts || [])
+            .slice()
+            .sort((a: any, b2: any) => (a.order ?? 0) - (b2.order ?? 0))
+            .map((h: any, i: number) => ({
+              id: h.id,
+              userId: h.userId ?? null,
+              name: h.name ?? "Host",
+              order: Number.isFinite(h.order) ? h.order : i,
+              appearanceType: (h.appearanceType as any) ?? "ONLINE",
+              joinUrl: h.joinUrl ?? null,
+              venueName: h.venueName ?? null,
+              venueAddress: h.venueAddress ?? null,
+              dialInfo: h.dialInfo ?? null,
+            })) || [];
+
+        if (MULTI_HOSTS_ENABLED) {
+          if (
+            (!apiHosts || apiHosts.length === 0) &&
+            (dto.hostUserId || dto.hostName)
+          ) {
+            dto.hosts = [
+              {
+                userId: dto.hostUserId ?? null,
+                name: dto.hostName ?? "Host",
+                order: 0,
+                appearanceType:
+                  dto.hostAppearanceScope === "UNIFIED"
+                    ? dto.hostAppearanceType ?? "ONLINE"
+                    : "ONLINE",
+                joinUrl: null,
+                venueName: null,
+                venueAddress: null,
+                dialInfo: null,
+              },
+            ];
+          } else {
+            dto.hosts = apiHosts;
+          }
+        }
+
+        if (!PHONE_ENABLED && dto.appearanceType === "PHONE")
+          dto.appearanceType = "ONLINE";
+        if (!PHONE_ENABLED && dto.hostAppearanceType === "PHONE")
+          dto.hostAppearanceType = "ONLINE";
 
         if (alive) {
-          setForm(b);
+          setForm(dto);
           setHostPick(
-            b.hostUserId ? { id: b.hostUserId, name: b.hostName ?? null } : null
+            dto.hostUserId
+              ? { id: dto.hostUserId, name: dto.hostName ?? null }
+              : null
           );
-          setGuestErrors(new Array((b.guests || []).length).fill({}));
+          setGuestErrors(new Array((dto.guests || []).length).fill({}));
+          setHostErrors(new Array((dto.hosts || []).length).fill({}));
         }
       } catch (e: any) {
         if (alive) setLoadError(e?.message || "Failed to load booking");
@@ -587,10 +891,11 @@ export default function EditBookingPage() {
     };
   }, [id]);
 
-  /* patch helpers clear errors as user edits */
+  /* ---------- patch helpers ---------- */
   function patch(p: Partial<BookingDto>) {
     setSaveError(null);
     setFieldErrors({});
+    setHostDefaultsErrors({});
     setForm((f) => (f ? { ...f, ...p } : f));
   }
   function patchGuest(idx: number, p: Partial<GuestRow>) {
@@ -607,6 +912,20 @@ export default function EditBookingPage() {
       return { ...f, guests: list };
     });
   }
+  function patchHost(idx: number, p: Partial<HostRow>) {
+    setSaveError(null);
+    setHostErrors((errs) => {
+      const next = errs.slice();
+      next[idx] = {};
+      return next;
+    });
+    setForm((f) => {
+      if (!f) return f;
+      const list = (f.hosts || []).slice();
+      list[idx] = { ...list[idx], ...p };
+      return { ...f, hosts: list };
+    });
+  }
 
   const BaseSchema = React.useMemo(
     () =>
@@ -620,16 +939,19 @@ export default function EditBookingPage() {
         durationMins: z.number().min(5).max(600),
         appearanceScope: z.enum(["UNIFIED", "PER_GUEST"]),
         accessProvisioning: z.enum(["SHARED", "PER_GUEST"]),
+        hostAppearanceScope: z.enum(["UNIFIED", "PER_HOST"]),
+        hostAccessProvisioning: z.enum(["SHARED", "PER_HOST"]),
       }),
     []
   );
 
-  /* ---- Client-side validation that mirrors server rules ---- */
+  /* ---------- client validation (unchanged) ---------- */
   function validateClient(f: BookingDto) {
     const errs: FieldErrors = {};
+    const hostDefErrs: HostDefaultsErrors = {};
     const gErrs: GuestFieldErrors[] = [];
+    const hErrs: HostFieldErrors[] = [];
 
-    // UNIFIED + IN_PERSON + SHARED => require booking-level Name or Address
     if (
       f.accessProvisioning === "SHARED" &&
       f.appearanceScope === "UNIFIED" &&
@@ -649,10 +971,8 @@ export default function EditBookingPage() {
 
     (f.guests || []).forEach((g, i) => {
       const ge: GuestFieldErrors = {};
-
       if (perGuestProvisioned) {
         if (f.appearanceScope === "UNIFIED") {
-          // Validate against the unified appearance type
           const t = (f.appearanceType ?? "ONLINE") as TAppearance;
           if (t === "ONLINE") {
             if (!String(g.joinUrl ?? "").trim())
@@ -668,7 +988,6 @@ export default function EditBookingPage() {
               ge.dialInfo = "Dial info is required (per-guest access).";
           }
         } else {
-          // PER_GUEST scope: validate using guest.appearanceType
           if (g.appearanceType === "ONLINE") {
             if (!String(g.joinUrl ?? "").trim())
               ge.joinUrl = "Join URL is required (per-guest access).";
@@ -678,25 +997,106 @@ export default function EditBookingPage() {
             if (!vn && !va)
               ge.venueName = ge.venueAddress =
                 "Venue name or address is required (per-guest access).";
-          } else if (g.appearanceType === "PHONE") {
+          } else if (g.appearanceType === "PHONE" && PHONE_ENABLED) {
             if (!String(g.dialInfo ?? "").trim())
               ge.dialInfo = "Dial info is required (per-guest access).";
           }
         }
       }
-
       gErrs[i] = ge;
     });
 
-    const guestIssues = gErrs.some((o) => Object.keys(o || {}).length > 0);
-    const ok = Object.keys(errs).length === 0 && !guestIssues;
+    if (MULTI_HOSTS_ENABLED) {
+      const hScope = f.hostAppearanceScope;
+      const hProv = f.hostAccessProvisioning;
+      const hUnifiedType = (f.hostAppearanceType ?? "ONLINE") as TAppearance;
 
-    // Banner summary (explicit & specific)
+      if (hScope === "UNIFIED") {
+        if (!f.hostAppearanceType) {
+          hostDefErrs.hostLocationUrl = "Host appearance type is required.";
+        }
+        if (hProv === "SHARED") {
+          if (hUnifiedType === "ONLINE") {
+            if (!String(f.hostLocationUrl ?? "").trim())
+              hostDefErrs.hostLocationUrl =
+                "Host default meeting link is required.";
+          } else if (hUnifiedType === "IN_PERSON") {
+            const vn = String(f.hostLocationName ?? "").trim();
+            const va = String(f.hostLocationAddress ?? "").trim();
+            if (!vn && !va) {
+              const m = "Provide host venue name or address (host defaults).";
+              hostDefErrs.hostLocationName = m;
+              hostDefErrs.hostLocationAddress = m;
+            }
+          } else if (hUnifiedType === "PHONE" && PHONE_ENABLED) {
+            if (!String(f.hostDialInfo ?? "").trim())
+              hostDefErrs.hostDialInfo = "Host default dial info is required.";
+          }
+        } else {
+          (f.hosts || []).forEach((h, i) => {
+            const he: HostFieldErrors = {};
+            if (hUnifiedType === "ONLINE") {
+              if (!String(h.joinUrl ?? "").trim())
+                he.joinUrl = "Join URL is required (per-host access).";
+            } else if (hUnifiedType === "IN_PERSON") {
+              const vn = String(h.venueName ?? "").trim();
+              const va = String(h.venueAddress ?? "").trim();
+              if (!vn && !va)
+                he.venueName = he.venueAddress =
+                  "Venue name or address is required (per-host access).";
+            } else if (hUnifiedType === "PHONE" && PHONE_ENABLED) {
+              if (!String(h.dialInfo ?? "").trim())
+                he.dialInfo = "Dial info is required (per-host access).";
+            }
+            hErrs[i] = he;
+          });
+        }
+      } else {
+        if (hProv !== "PER_HOST") {
+          hostDefErrs.hostLocationUrl =
+            "When host scope is PER_HOST, provisioning must be PER_HOST.";
+        }
+        (f.hosts || []).forEach((h, i) => {
+          const he: HostFieldErrors = {};
+          if (h.appearanceType === "ONLINE") {
+            if (!String(h.joinUrl ?? "").trim())
+              he.joinUrl = "Join URL is required (per-host access).";
+          } else if (h.appearanceType === "IN_PERSON") {
+            const vn = String(h.venueName ?? "").trim();
+            const va = String(h.venueAddress ?? "").trim();
+            if (!vn && !va)
+              he.venueName = he.venueAddress =
+                "Venue name or address is required (per-host access).";
+          } else if (h.appearanceType === "PHONE" && PHONE_ENABLED) {
+            if (!String(h.dialInfo ?? "").trim())
+              he.dialInfo = "Dial info is required (per-host access).";
+          }
+          hErrs[i] = he;
+        });
+      }
+    }
+
+    const hasGuestIssues = gErrs.some((o) => Object.keys(o || {}).length > 0);
+    const hasHostIssues = hErrs.some((o) => Object.keys(o || {}).length > 0);
+    const hasHostDefaultIssues = Object.keys(hostDefErrs).length > 0;
+    const ok =
+      Object.keys(errs).length === 0 &&
+      !hasGuestIssues &&
+      !hasHostIssues &&
+      !hasHostDefaultIssues;
+
     let banner: string | null = null;
     if (!ok) {
       const parts: string[] = [];
       if (errs.locationName || errs.locationAddress)
-        parts.push("Booking defaults (venue name or address)");
+        parts.push("Guest defaults (venue name or address)");
+      if (hasHostDefaultIssues) {
+        if (hostDefErrs.hostLocationUrl)
+          parts.push("Host defaults (meeting link)");
+        if (hostDefErrs.hostLocationName || hostDefErrs.hostLocationAddress)
+          parts.push("Host defaults (venue name/address)");
+        if (hostDefErrs.hostDialInfo) parts.push("Host defaults (dial info)");
+      }
       gErrs.forEach((ge, i) => {
         if (Object.keys(ge).length) {
           const needs = ge.joinUrl
@@ -707,14 +1107,32 @@ export default function EditBookingPage() {
           parts.push(`Guest #${i + 1} (${needs})`);
         }
       });
+      (MULTI_HOSTS_ENABLED ? hErrs : []).forEach((he, i) => {
+        if (Object.keys(he).length) {
+          const needs = he.joinUrl
+            ? "join URL"
+            : he.dialInfo
+            ? "dial info"
+            : "venue name or address";
+          parts.push(`Host #${i + 1} (${needs})`);
+        }
+      });
       banner = `Fix ${parts.length} item${
         parts.length > 1 ? "s" : ""
       }: ${parts.join("; ")}.`;
     }
 
-    return { ok, fieldErrs: errs, guestErrs: gErrs, banner };
+    return {
+      ok,
+      fieldErrs: errs,
+      hostDefErrs: hostDefErrs,
+      guestErrs: gErrs,
+      hostErrs: hErrs,
+      banner,
+    };
   }
 
+  /* ---------- list ops ---------- */
   function removeGuest(idx: number) {
     setForm((f) => {
       if (!f) return f;
@@ -734,18 +1152,42 @@ export default function EditBookingPage() {
       return { ...f, guests: list };
     });
   }
+  function moveHost(idx: number, dir: -1 | 1) {
+    setForm((f) => {
+      if (!f) return f;
+      const list = (f.hosts || []).slice();
+      const j = idx + dir;
+      if (j < 0 || j >= list.length) return f;
+      const tmp = list[idx];
+      list[idx] = list[j];
+      list[j] = tmp;
+      list.forEach((h, i) => (h.order = i));
+      return { ...f, hosts: list };
+    });
+  }
+  function removeHost(idx: number) {
+    setForm((f) => {
+      if (!f) return f;
+      const list = (f.hosts || []).slice();
+      list.splice(idx, 1);
+      list.forEach((h, i) => (h.order = i));
+      setHostErrors((old) => {
+        const next = old.slice();
+        next.splice(idx, 1);
+        return next;
+      });
+      return { ...f, hosts: list };
+    });
+  }
 
-  function addPerson(
-    kind: "EXPERT" | "REPORTER",
-    row: { id: string; name: string }
-  ) {
+  function addPerson(row: { id: string; name: string; kind: TKind }) {
     setForm((f) => {
       if (!f) return f;
       if ((f.guests || []).some((g) => g.userId === row.id)) return f;
       const next: GuestRow = {
         userId: row.id,
-        name: row.name || (kind === "REPORTER" ? "Reporter" : "Expert"),
-        kind,
+        name: row.name || (row.kind === "REPORTER" ? "Reporter" : "Expert"),
+        kind: row.kind,
         order: f.guests?.length ?? 0,
         appearanceType: "ONLINE",
         joinUrl: null,
@@ -753,23 +1195,38 @@ export default function EditBookingPage() {
         venueAddress: null,
         dialInfo: null,
       };
-      setGuestErrors((errs) => [...errs, {}]);
+      setGuestErrors((errs) => [...errs, {} as GuestFieldErrors]);
       return { ...f, guests: [...(f.guests || []), next] };
     });
   }
 
-  function onPickParticipant(row: {
-    id: string;
-    name: string;
-    kind: "EXPERT" | "REPORTER";
-  }) {
-    addPerson(row.kind, row);
+  function addHost(row: { id: string; name: string | null }) {
+    setForm((f) => {
+      if (!f) return f;
+      if ((f.hosts || []).some((h) => h.userId === row.id)) return f;
+      const type: TAppearance =
+        f.hostAppearanceScope === "UNIFIED"
+          ? f.hostAppearanceType ?? "ONLINE"
+          : "ONLINE";
+      const next: HostRow = {
+        userId: row.id,
+        name: row.name || "Host",
+        order: f.hosts?.length ?? 0,
+        appearanceType: type,
+        joinUrl: null,
+        venueName: null,
+        venueAddress: null,
+        dialInfo: null,
+      };
+      setHostErrors((errs) => [...errs, {} as HostFieldErrors]);
+      return { ...f, hosts: [...(f.hosts || []), next] };
+    });
   }
 
+  /* ---------- submit ---------- */
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form) return;
-
     setOk(null);
     setSaveError(null);
 
@@ -781,6 +1238,8 @@ export default function EditBookingPage() {
         durationMins: form.durationMins,
         appearanceScope: form.appearanceScope,
         accessProvisioning: form.accessProvisioning,
+        hostAppearanceScope: form.hostAppearanceScope,
+        hostAccessProvisioning: form.hostAccessProvisioning,
       });
     } catch (err: any) {
       setSaveError(err?.errors?.[0]?.message ?? "Please check your inputs.");
@@ -790,21 +1249,28 @@ export default function EditBookingPage() {
     const v = validateClient(form);
     if (!v.ok) {
       setFieldErrors(v.fieldErrs);
+      setHostDefaultsErrors(v.hostDefErrs);
       setGuestErrors(v.guestErrs);
+      setHostErrors(v.hostErrs);
       setSaveError(v.banner || "Fix the highlighted fields.");
       return;
     }
-    setFieldErrors({});
-    setGuestErrors([]);
 
-    // Construct payload
+    setFieldErrors({});
+    setHostDefaultsErrors({});
+    setGuestErrors([]);
+    setHostErrors([]);
+
     const payload: any = {
       subject: form.subject,
       newsroomName: form.newsroomName,
       startAt: new Date(form.startAt).toISOString(),
       durationMins: Number(form.durationMins),
       appearanceScope: form.appearanceScope,
-      accessProvisioning: form.accessProvisioning,
+      accessProvisioning:
+        form.appearanceScope === "PER_GUEST"
+          ? "PER_GUEST"
+          : form.accessProvisioning,
       appearanceType:
         form.appearanceScope === "UNIFIED"
           ? form.appearanceType ?? "ONLINE"
@@ -815,20 +1281,46 @@ export default function EditBookingPage() {
       dialInfo: form.dialInfo || null,
       programName: form.programName || null,
       talkingPoints: form.talkingPoints || null,
-      hostUserId: hostPick ? hostPick.id : null,
-      hostName: hostPick ? hostPick.name || null : null,
+
+      hostAppearanceScope: form.hostAppearanceScope,
+      hostAccessProvisioning:
+        form.hostAppearanceScope === "PER_HOST"
+          ? "PER_HOST"
+          : form.hostAccessProvisioning,
+      hostAppearanceType:
+        form.hostAppearanceScope === "UNIFIED"
+          ? form.hostAppearanceType ?? "ONLINE"
+          : null,
+      hostLocationUrl:
+        form.hostAppearanceScope === "UNIFIED" &&
+        form.hostAccessProvisioning === "SHARED"
+          ? form.hostLocationUrl || null
+          : null,
+      hostLocationName:
+        form.hostAppearanceScope === "UNIFIED" &&
+        form.hostAccessProvisioning === "SHARED"
+          ? form.hostLocationName || null
+          : null,
+      hostLocationAddress:
+        form.hostAppearanceScope === "UNIFIED" &&
+        form.hostAccessProvisioning === "SHARED"
+          ? form.hostLocationAddress || null
+          : null,
+      hostDialInfo:
+        form.hostAppearanceScope === "UNIFIED" &&
+        form.hostAccessProvisioning === "SHARED"
+          ? form.hostDialInfo || null
+          : null,
     };
 
     if (form.appearanceScope === "PER_GUEST") {
-      // Forced PER_GUEST provisioning; each guest must supply their access for their type
       payload.guests = (form.guests || []).map((g, i) => {
         const t = g.appearanceType;
         return {
           id: g.id,
           userId: g.userId ?? null,
           name: g.name,
-          // TEMP until backend supports REPORTER explicitly
-          kind: g.kind === "REPORTER" ? "EXPERT" : g.kind,
+          kind: g.kind,
           order: Number.isFinite(g.order) ? g.order : i,
           appearanceType: t,
           joinUrl: t === "ONLINE" ? g.joinUrl || null : null,
@@ -838,13 +1330,12 @@ export default function EditBookingPage() {
         };
       });
     } else {
-      // UNIFIED scope: guests inherit unified type; access may be shared or per-guest
       const unifiedType: TAppearance = form.appearanceType ?? "ONLINE";
       payload.guests = (form.guests || []).map((g, i) => ({
         id: g.id,
         userId: g.userId ?? null,
         name: g.name,
-        kind: g.kind === "REPORTER" ? "EXPERT" : g.kind,
+        kind: g.kind,
         order: Number.isFinite(g.order) ? g.order : i,
         appearanceType: unifiedType,
         joinUrl:
@@ -864,6 +1355,57 @@ export default function EditBookingPage() {
             ? g.dialInfo || null
             : null,
       }));
+    }
+
+    if (!MULTI_HOSTS_ENABLED) {
+      payload.hostUserId = hostPick ? hostPick.id : null;
+      payload.hostName = hostPick ? hostPick.name || null : null;
+    } else {
+      if (form.hostAppearanceScope === "PER_HOST") {
+        payload.hosts = (form.hosts || []).map((h, i) => {
+          const t = h.appearanceType;
+          return {
+            id: h.id,
+            userId: h.userId ?? null,
+            name: h.name,
+            order: Number.isFinite(h.order) ? h.order : i,
+            appearanceType: t,
+            joinUrl: t === "ONLINE" ? h.joinUrl || null : null,
+            venueName: t === "IN_PERSON" ? h.venueName || null : null,
+            venueAddress: t === "IN_PERSON" ? h.venueAddress || null : null,
+            dialInfo: t === "PHONE" ? h.dialInfo || null : null,
+          };
+        });
+      } else {
+        const unifiedType: TAppearance = form.hostAppearanceType ?? "ONLINE";
+        payload.hosts = (form.hosts || []).map((h, i) => ({
+          id: h.id,
+          userId: h.userId ?? null,
+          name: h.name,
+          order: Number.isFinite(h.order) ? h.order : i,
+          appearanceType: unifiedType,
+          joinUrl:
+            form.hostAccessProvisioning === "PER_HOST" &&
+            unifiedType === "ONLINE"
+              ? h.joinUrl || null
+              : null,
+          venueName:
+            form.hostAccessProvisioning === "PER_HOST" &&
+            unifiedType === "IN_PERSON"
+              ? h.venueName || null
+              : null,
+          venueAddress:
+            form.hostAccessProvisioning === "PER_HOST" &&
+            unifiedType === "IN_PERSON"
+              ? h.venueAddress || null
+              : null,
+          dialInfo:
+            form.hostAccessProvisioning === "PER_HOST" &&
+            unifiedType === "PHONE"
+              ? h.dialInfo || null
+              : null,
+        }));
+      }
     }
 
     if (deletedGuestIdsRef.current.length) {
@@ -889,64 +1431,64 @@ export default function EditBookingPage() {
     }
   }
 
+  /* ---------- render ---------- */
   if (loading)
     return (
-      <div className="rounded-md border bg-white p-4 text-sm">Loading…</div>
+      <div className="p-6">
+        <div className="text-sm text-gray-600">Loading…</div>
+      </div>
     );
 
   if (!form) {
     return (
-      <div className="rounded-md border bg-white p-4">
+      <div className="p-6">
         <UIAlert intent="error">{loadError || "Not found"}</UIAlert>
       </div>
     );
   }
 
-  const existingUserIds = (form.guests || [])
+  const existingGuestUserIds = (form.guests || [])
     .filter((g) => g.userId)
     .map((g) => g.userId as string);
 
-  const unifiedInPerson =
-    form.accessProvisioning === "SHARED" &&
-    form.appearanceScope === "UNIFIED" &&
-    (form.appearanceType ?? "ONLINE") === "IN_PERSON";
-  const perGuestProvisioned =
-    form.appearanceScope === "PER_GUEST" ||
-    form.accessProvisioning === "PER_GUEST";
-  const sharedProvisioned = form.accessProvisioning === "SHARED";
-  const unified = form.appearanceScope === "UNIFIED";
+  const guestsSharedProvisioned = form.accessProvisioning === "SHARED";
+  const guestsUnified = form.appearanceScope === "UNIFIED";
+
+  const hostsUnified = form.hostAppearanceScope === "UNIFIED";
+  const hostsShared = form.hostAccessProvisioning === "SHARED";
+  const hostUnifiedType = (form.hostAppearanceType ?? "ONLINE") as TAppearance;
 
   return (
-    <form className="grid gap-4" onSubmit={onSubmit}>
+    <form onSubmit={onSubmit} className="mx-auto max-w-3xl space-y-6 p-6">
       <h1 className="text-xl font-semibold">Edit booking</h1>
 
       {saveError && <UIAlert intent="error">{saveError}</UIAlert>}
       {ok && <UIAlert intent="success">{ok}</UIAlert>}
 
       {/* Basic */}
-      <div className="grid gap-2 rounded-md border p-3">
-        <label className="grid gap-1 text-sm">
-          <span>Subject</span>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-sm">Subject</span>
           <input
-            value={form.subject || ""}
+            value={form.subject}
             onChange={(e) => patch({ subject: e.target.value })}
             className="w-full rounded-md border px-3 py-2"
             required
           />
         </label>
 
-        <label className="grid gap-1 text-sm">
-          <span>Newsroom name</span>
+        <label className="space-y-1">
+          <span className="text-sm">Newsroom name</span>
           <input
-            value={form.newsroomName || ""}
+            value={form.newsroomName}
             onChange={(e) => patch({ newsroomName: e.target.value })}
             className="w-full rounded-md border px-3 py-2"
             required
           />
         </label>
 
-        <label className="grid gap-1 text-sm">
-          <span>Start at</span>
+        <label className="space-y-1">
+          <span className="text-sm">Start at</span>
           <input
             type="datetime-local"
             value={toDatetimeLocalValue(form.startAt)}
@@ -958,13 +1500,13 @@ export default function EditBookingPage() {
           />
         </label>
 
-        <label className="grid gap-1 text-sm">
-          <span>Duration (mins)</span>
+        <label className="space-y-1">
+          <span className="text-sm">Duration (mins)</span>
           <input
             type="number"
             min={5}
             max={600}
-            value={form.durationMins ?? 30}
+            value={form.durationMins}
             onChange={(e) => patch({ durationMins: Number(e.target.value) })}
             className="w-full rounded-md border px-3 py-2"
             required
@@ -972,16 +1514,15 @@ export default function EditBookingPage() {
         </label>
       </div>
 
-      {/* Model */}
-      <div className="grid gap-2 rounded-md border p-3">
-        <label className="grid gap-1 text-sm">
-          <span>Appearance scope</span>
+      {/* Guests controls */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <label className="space-y-1 md:col-span-1">
+          <span className="text-sm">Appearance scope (guests)</span>
           <select
             value={form.appearanceScope}
             onChange={(e) => {
               const next = e.target.value as TScope;
               if (next === "PER_GUEST") {
-                // Force provisioning to PER_GUEST and hide it
                 patch({
                   appearanceScope: next,
                   accessProvisioning: "PER_GUEST",
@@ -999,8 +1540,8 @@ export default function EditBookingPage() {
 
         {form.appearanceScope === "UNIFIED" ? (
           <>
-            <label className="grid gap-1 text-sm">
-              <span>Access provisioning</span>
+            <label className="space-y-1">
+              <span className="text-sm">Access provisioning (guests)</span>
               <select
                 value={form.accessProvisioning}
                 onChange={(e) =>
@@ -1013,8 +1554,8 @@ export default function EditBookingPage() {
               </select>
             </label>
 
-            <label className="grid gap-1 text-sm">
-              <span>Unified type</span>
+            <label className="space-y-1">
+              <span className="text-sm">Unified type (guests)</span>
               <select
                 value={form.appearanceType ?? "ONLINE"}
                 onChange={(e) =>
@@ -1029,26 +1570,26 @@ export default function EditBookingPage() {
             </label>
           </>
         ) : (
-          // PER_GUEST scope -> provisioning fixed to PER_GUEST
-          <div className="rounded-md bg-gray-50 p-2 text-xs text-gray-600">
-            Each guest selects their own appearance and access. Provisioning is
-            per guest.
+          <div className="md:col-span-2">
+            <div className="rounded-md border px-3 py-2 text-sm text-gray-700">
+              Each guest selects their own appearance and access. Provisioning
+              is per guest.
+            </div>
           </div>
         )}
       </div>
 
-      {/* Booking defaults — only UNIFIED + SHARED */}
-      {sharedProvisioned && unified && (
-        <div className="grid gap-2 rounded-md border p-3">
-          <span className="text-sm font-medium">Booking defaults</span>
+      {/* Guest defaults (UNIFIED + SHARED) */}
+      {guestsSharedProvisioned && guestsUnified && (
+        <div className="space-y-3">
+          <div className="font-medium">Guest defaults</div>
 
           {(form.appearanceType ?? "ONLINE") === "ONLINE" && (
-            <label className="grid gap-1 text-sm">
-              <span>Default meeting link</span>
+            <label className="space-y-1">
+              <span className="text-sm">Default meeting link (guests)</span>
               <input
                 value={form.locationUrl ?? ""}
                 onChange={(e) => patch({ locationUrl: e.target.value })}
-                onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
                 className="w-full rounded-md border px-3 py-2"
                 placeholder="https://…"
               />
@@ -1057,53 +1598,47 @@ export default function EditBookingPage() {
 
           {(form.appearanceType ?? "ONLINE") === "IN_PERSON" && (
             <>
-              <label className="grid gap-1 text-sm">
-                <span>Default venue name</span>
+              <label className="space-y-1">
+                <span className="text-sm">Default venue name (guests)</span>
                 <input
                   value={form.locationName ?? ""}
                   onChange={(e) => patch({ locationName: e.target.value })}
                   className={clsx(
                     "w-full rounded-md border px-3 py-2",
-                    unifiedInPerson &&
-                      fieldErrors.locationName &&
-                      "border-red-500"
+                    fieldErrors.locationName && "border-red-500"
                   )}
                   placeholder="Studio A"
-                  aria-invalid={!!fieldErrors.locationName}
                 />
-                {unifiedInPerson && fieldErrors.locationName && (
-                  <p className="mt-1 text-xs text-red-600">
+                {fieldErrors.locationName && (
+                  <div className="text-xs text-red-600">
                     {fieldErrors.locationName}
-                  </p>
+                  </div>
                 )}
               </label>
 
-              <label className="grid gap-1 text-sm">
-                <span>Default address</span>
+              <label className="space-y-1">
+                <span className="text-sm">Default address (guests)</span>
                 <input
                   value={form.locationAddress ?? ""}
                   onChange={(e) => patch({ locationAddress: e.target.value })}
                   className={clsx(
                     "w-full rounded-md border px-3 py-2",
-                    unifiedInPerson &&
-                      fieldErrors.locationAddress &&
-                      "border-red-500"
+                    fieldErrors.locationAddress && "border-red-500"
                   )}
                   placeholder="123 Example St…"
-                  aria-invalid={!!fieldErrors.locationAddress}
                 />
-                {unifiedInPerson && fieldErrors.locationAddress && (
-                  <p className="mt-1 text-xs text-red-600">
+                {fieldErrors.locationAddress && (
+                  <div className="text-xs text-red-600">
                     {fieldErrors.locationAddress}
-                  </p>
+                  </div>
                 )}
               </label>
             </>
           )}
 
-          {(form.appearanceType ?? "ONLINE") === "PHONE" && (
-            <label className="grid gap-1 text-sm">
-              <span>Default dial info</span>
+          {(form.appearanceType ?? "ONLINE") === "PHONE" && PHONE_ENABLED && (
+            <label className="space-y-1">
+              <span className="text-sm">Default dial info (guests)</span>
               <input
                 value={form.dialInfo ?? ""}
                 onChange={(e) => patch({ dialInfo: e.target.value })}
@@ -1115,12 +1650,17 @@ export default function EditBookingPage() {
         </div>
       )}
 
-      {/* Guests */}
-      <div className="grid gap-2 rounded-md border p-3">
-        <span className="text-sm font-medium">Guests</span>
+      {/* Guests list */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="font-medium">Guests</div>
+          <div className="text-xs text-gray-600">
+            {form.guests?.length ?? 0} selected
+          </div>
+        </div>
 
         {(form.guests || []).length === 0 && (
-          <div className="rounded-md border bg-white px-3 py-2 text-sm">
+          <div className="rounded-md border px-3 py-2 text-sm text-gray-600">
             No guests yet. Use “Add guest” below to append experts or reporters.
           </div>
         )}
@@ -1128,13 +1668,12 @@ export default function EditBookingPage() {
         {form.guests?.map((g, idx) => {
           const ge = guestErrors[idx] || {};
           const unifiedType = (form.appearanceType ?? "ONLINE") as TAppearance;
-
           return (
-            <div key={idx} className="rounded-md border p-2">
-              <div className="mb-2 flex items-center justify-between text-sm">
+            <div key={idx} className="rounded-xl border p-3">
+              <div className="flex items-center justify-between">
                 <div className="font-medium">
                   #{idx + 1} {g.name}{" "}
-                  <span className="text-gray-500">{g.kind}</span>
+                  <span className="text-xs text-gray-500">({g.kind})</span>
                 </div>
                 <button
                   type="button"
@@ -1147,24 +1686,21 @@ export default function EditBookingPage() {
               </div>
 
               {g.userId && (
-                <div className="mb-2 text-xs text-gray-500">{g.userId}</div>
+                <div className="mt-1 text-[11px] text-gray-500">{g.userId}</div>
               )}
 
-              {/* UNIFIED scope */}
-              {unified ? (
+              {form.appearanceScope === "UNIFIED" ? (
                 <>
-                  {/* No appearance selector in UNIFIED */}
-                  {sharedProvisioned ? (
-                    <div className="mt-1 rounded-md bg-gray-50 p-2 text-xs text-gray-600">
+                  {form.accessProvisioning === "SHARED" ? (
+                    <div className="mt-2 text-sm text-gray-700">
                       Using unified settings ({form.appearanceType ?? "ONLINE"}
                       ). No per-guest access fields.
                     </div>
                   ) : (
-                    // UNIFIED + PER_GUEST provisioning: per-guest access based on unified type
-                    <>
+                    <div className="mt-2 space-y-2">
                       {unifiedType === "ONLINE" && (
-                        <label className="grid gap-1 text-sm">
-                          <span>Join URL</span>
+                        <label className="space-y-1">
+                          <span className="text-sm">Join URL</span>
                           <input
                             value={g.joinUrl ?? ""}
                             onChange={(ev) =>
@@ -1177,17 +1713,17 @@ export default function EditBookingPage() {
                             placeholder="https://…"
                           />
                           {ge.joinUrl && (
-                            <p className="mt-1 text-xs text-red-600">
+                            <div className="text-xs text-red-600">
                               {ge.joinUrl}
-                            </p>
+                            </div>
                           )}
                         </label>
                       )}
 
                       {unifiedType === "IN_PERSON" && (
                         <>
-                          <label className="mt-2 grid gap-1 text-sm">
-                            <span>Venue name</span>
+                          <label className="space-y-1">
+                            <span className="text-sm">Venue name</span>
                             <input
                               value={g.venueName ?? ""}
                               onChange={(ev) =>
@@ -1200,14 +1736,14 @@ export default function EditBookingPage() {
                               placeholder="Studio A"
                             />
                             {ge.venueName && (
-                              <p className="mt-1 text-xs text-red-600">
+                              <div className="text-xs text-red-600">
                                 {ge.venueName}
-                              </p>
+                              </div>
                             )}
                           </label>
 
-                          <label className="mt-2 grid gap-1 text-sm">
-                            <span>Venue address</span>
+                          <label className="space-y-1">
+                            <span className="text-sm">Venue address</span>
                             <input
                               value={g.venueAddress ?? ""}
                               onChange={(ev) =>
@@ -1222,17 +1758,17 @@ export default function EditBookingPage() {
                               placeholder="123 Example St…"
                             />
                             {ge.venueAddress && (
-                              <p className="mt-1 text-xs text-red-600">
+                              <div className="text-xs text-red-600">
                                 {ge.venueAddress}
-                              </p>
+                              </div>
                             )}
                           </label>
                         </>
                       )}
 
                       {unifiedType === "PHONE" && PHONE_ENABLED && (
-                        <label className="mt-2 grid gap-1 text-sm">
-                          <span>Dial info</span>
+                        <label className="space-y-1">
+                          <span className="text-sm">Dial info</span>
                           <input
                             value={g.dialInfo ?? ""}
                             onChange={(ev) =>
@@ -1245,20 +1781,19 @@ export default function EditBookingPage() {
                             placeholder="e.g., +1 555 123 4567 PIN 0000"
                           />
                           {ge.dialInfo && (
-                            <p className="mt-1 text-xs text-red-600">
+                            <div className="text-xs text-red-600">
                               {ge.dialInfo}
-                            </p>
+                            </div>
                           )}
                         </label>
                       )}
-                    </>
+                    </div>
                   )}
                 </>
               ) : (
-                // PER_GUEST scope (forced per-guest provisioning)
-                <>
-                  <label className="grid gap-1 text-sm">
-                    <span>Appearance</span>
+                <div className="mt-2 space-y-2">
+                  <label className="space-y-1">
+                    <span className="text-sm">Appearance</span>
                     <select
                       value={g.appearanceType}
                       onChange={(ev) =>
@@ -1278,10 +1813,9 @@ export default function EditBookingPage() {
                     </select>
                   </label>
 
-                  {/* Access fields always visible in PER_GUEST scope */}
                   {g.appearanceType === "ONLINE" && (
-                    <label className="mt-2 grid gap-1 text-sm">
-                      <span>Join URL</span>
+                    <label className="space-y-1">
+                      <span className="text-sm">Join URL</span>
                       <input
                         value={g.joinUrl ?? ""}
                         onChange={(ev) =>
@@ -1294,17 +1828,15 @@ export default function EditBookingPage() {
                         placeholder="https://…"
                       />
                       {ge.joinUrl && (
-                        <p className="mt-1 text-xs text-red-600">
-                          {ge.joinUrl}
-                        </p>
+                        <div className="text-xs text-red-600">{ge.joinUrl}</div>
                       )}
                     </label>
                   )}
 
                   {g.appearanceType === "IN_PERSON" && (
                     <>
-                      <label className="mt-2 grid gap-1 text-sm">
-                        <span>Venue name</span>
+                      <label className="space-y-1">
+                        <span className="text-sm">Venue name</span>
                         <input
                           value={g.venueName ?? ""}
                           onChange={(ev) =>
@@ -1317,14 +1849,14 @@ export default function EditBookingPage() {
                           placeholder="Studio A"
                         />
                         {ge.venueName && (
-                          <p className="mt-1 text-xs text-red-600">
+                          <div className="text-xs text-red-600">
                             {ge.venueName}
-                          </p>
+                          </div>
                         )}
                       </label>
 
-                      <label className="mt-2 grid gap-1 text-sm">
-                        <span>Venue address</span>
+                      <label className="space-y-1">
+                        <span className="text-sm">Venue address</span>
                         <input
                           value={g.venueAddress ?? ""}
                           onChange={(ev) =>
@@ -1337,17 +1869,17 @@ export default function EditBookingPage() {
                           placeholder="123 Example St…"
                         />
                         {ge.venueAddress && (
-                          <p className="mt-1 text-xs text-red-600">
+                          <div className="text-xs text-red-600">
                             {ge.venueAddress}
-                          </p>
+                          </div>
                         )}
                       </label>
                     </>
                   )}
 
                   {g.appearanceType === "PHONE" && PHONE_ENABLED && (
-                    <label className="mt-2 grid gap-1 text-sm">
-                      <span>Dial info</span>
+                    <label className="space-y-1">
+                      <span className="text-sm">Dial info</span>
                       <input
                         value={g.dialInfo ?? ""}
                         onChange={(ev) =>
@@ -1359,14 +1891,12 @@ export default function EditBookingPage() {
                         )}
                         placeholder="e.g., +1 555 123 4567 PIN 0000"
                       />
-                      {ge.dialInfo && (
-                        <p className="mt-1 text-xs text-red-600">
-                          {ge.dialInfo}
-                        </p>
+                      {g.dialInfo && (
+                        <div className="text-xs text-red-600">{g.dialInfo}</div>
                       )}
                     </label>
                   )}
-                </>
+                </div>
               )}
             </div>
           );
@@ -1375,23 +1905,489 @@ export default function EditBookingPage() {
         <AddGuestPicker
           startAtISO={form.startAt}
           durationMins={form.durationMins}
-          onPick={onPickParticipant}
-          existingIds={existingUserIds}
+          onPick={(row) => addPerson(row)}
+          existingIds={existingGuestUserIds}
         />
       </div>
 
-      {/* Host */}
-      <HostCombobox
-        value={hostPick}
-        onChange={(h) => setHostPick(h)}
-        startAtISO={form.startAt}
-        durationMins={form.durationMins}
-      />
+      {/* Hosts UI */}
+      {!MULTI_HOSTS_ENABLED ? (
+        <div className="space-y-2">
+          <div className="font-medium">Host</div>
+          <HostCombobox value={hostPick} onChange={(h) => setHostPick(h)} />
+        </div>
+      ) : (
+        <>
+          {/* Host model controls */}
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <label className="space-y-1 md:col-span-1">
+                <span className="text-sm">Appearance scope (hosts)</span>
+                <select
+                  value={form.hostAppearanceScope}
+                  onChange={(e) => {
+                    const next = e.target.value as THostScope;
+                    if (next === "PER_HOST") {
+                      patch({
+                        hostAppearanceScope: next,
+                        hostAccessProvisioning: "PER_HOST",
+                      });
+                    } else {
+                      patch({ hostAppearanceScope: next });
+                    }
+                  }}
+                  className="w-full rounded-md border px-3 py-2"
+                >
+                  <option value="UNIFIED">UNIFIED (single)</option>
+                  <option value="PER_HOST">PER_HOST</option>
+                </select>
+              </label>
+
+              {form.hostAppearanceScope === "UNIFIED" ? (
+                <>
+                  <label className="space-y-1">
+                    <span className="text-sm">Access provisioning (hosts)</span>
+                    <select
+                      value={form.hostAccessProvisioning}
+                      onChange={(e) =>
+                        patch({
+                          hostAccessProvisioning: e.target
+                            .value as THostProvisioning,
+                        })
+                      }
+                      className="w-full rounded-md border px-3 py-2"
+                    >
+                      <option value="SHARED">SHARED</option>
+                      <option value="PER_HOST">PER_HOST</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-sm">Unified type (hosts)</span>
+                    <select
+                      value={form.hostAppearanceType ?? "ONLINE"}
+                      onChange={(e) =>
+                        patch({
+                          hostAppearanceType: e.target.value as TAppearance,
+                        })
+                      }
+                      className="w-full rounded-md border px-3 py-2"
+                    >
+                      <option value="ONLINE">ONLINE</option>
+                      <option value="IN_PERSON">IN_PERSON</option>
+                      {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
+                    </select>
+                  </label>
+                </>
+              ) : (
+                <div className="md:col-span-2">
+                  <div className="rounded-md border px-3 py-2 text-sm text-gray-700">
+                    Each host selects their own appearance and access.
+                    Provisioning is per host.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Host defaults (only UNIFIED + SHARED) */}
+            {form.hostAppearanceScope === "UNIFIED" &&
+              form.hostAccessProvisioning === "SHARED" && (
+                <div className="space-y-3">
+                  <div className="font-medium">Host defaults</div>
+
+                  {hostUnifiedType === "ONLINE" && (
+                    <label className="space-y-1">
+                      <span className="text-sm">
+                        Default meeting link (hosts)
+                      </span>
+                      <input
+                        value={form.hostLocationUrl ?? ""}
+                        onChange={(e) =>
+                          patch({ hostLocationUrl: e.target.value })
+                        }
+                        className={clsx(
+                          "w-full rounded-md border px-3 py-2",
+                          hostDefaultsErrors.hostLocationUrl && "border-red-500"
+                        )}
+                        placeholder="https://…"
+                      />
+                      {hostDefaultsErrors.hostLocationUrl && (
+                        <div className="text-xs text-red-600">
+                          {hostDefaultsErrors.hostLocationUrl}
+                        </div>
+                      )}
+                    </label>
+                  )}
+
+                  {hostUnifiedType === "IN_PERSON" && (
+                    <>
+                      <label className="space-y-1">
+                        <span className="text-sm">Default host venue name</span>
+                        <input
+                          value={form.hostLocationName ?? ""}
+                          onChange={(e) =>
+                            patch({ hostLocationName: e.target.value })
+                          }
+                          className={clsx(
+                            "w-full rounded-md border px-3 py-2",
+                            hostDefaultsErrors.hostLocationName &&
+                              "border-red-500"
+                          )}
+                          placeholder="Studio A"
+                        />
+                        {hostDefaultsErrors.hostLocationName && (
+                          <div className="text-xs text-red-600">
+                            {hostDefaultsErrors.hostLocationName}
+                          </div>
+                        )}
+                      </label>
+
+                      <label className="space-y-1">
+                        <span className="text-sm">Default host address</span>
+                        <input
+                          value={form.hostLocationAddress ?? ""}
+                          onChange={(e) =>
+                            patch({ hostLocationAddress: e.target.value })
+                          }
+                          className={clsx(
+                            "w-full rounded-md border px-3 py-2",
+                            hostDefaultsErrors.hostLocationAddress &&
+                              "border-red-500"
+                          )}
+                          placeholder="123 Example St…"
+                        />
+                        {hostDefaultsErrors.hostLocationAddress && (
+                          <div className="text-xs text-red-600">
+                            {hostDefaultsErrors.hostLocationAddress}
+                          </div>
+                        )}
+                      </label>
+                    </>
+                  )}
+
+                  {hostUnifiedType === "PHONE" && PHONE_ENABLED && (
+                    <label className="space-y-1">
+                      <span className="text-sm">Default host dial info</span>
+                      <input
+                        value={form.hostDialInfo ?? ""}
+                        onChange={(e) =>
+                          patch({ hostDialInfo: e.target.value })
+                        }
+                        className={clsx(
+                          "w-full rounded-md border px-3 py-2",
+                          hostDefaultsErrors.hostDialInfo && "border-red-500"
+                        )}
+                        placeholder="e.g., +1 555 123 4567 PIN 0000"
+                      />
+                      {hostDefaultsErrors.hostDialInfo && (
+                        <div className="text-xs text-red-600">
+                          {hostDefaultsErrors.hostDialInfo}
+                        </div>
+                      )}
+                    </label>
+                  )}
+                </div>
+              )}
+          </div>
+
+          {/* Hosts list */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="font-medium">Hosts</div>
+              <div className="text-xs text-gray-600">
+                {form.hosts?.length ?? 0} selected
+              </div>
+            </div>
+
+            {(form.hosts || []).length === 0 && (
+              <div className="rounded-md border px-3 py-2 text-sm text-gray-600">
+                No hosts yet. Use “Add host” to append hosts.
+              </div>
+            )}
+
+            {form.hosts?.map((h, idx) => {
+              const he = hostErrors[idx] || {};
+              return (
+                <div key={idx} className="rounded-xl border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">
+                      #{idx + 1} {h.name}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => moveHost(idx, -1)}
+                        className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
+                        title="Move up"
+                      >
+                        Up
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveHost(idx, +1)}
+                        className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
+                        title="Move down"
+                      >
+                        Down
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeHost(idx)}
+                        className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                        title="Remove host"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+
+                  {h.userId && (
+                    <div className="mt-1 text-[11px] text-gray-500">
+                      {h.userId}
+                    </div>
+                  )}
+
+                  {/* Host access fields */}
+                  {form.hostAppearanceScope === "UNIFIED" ? (
+                    <>
+                      {form.hostAccessProvisioning === "SHARED" ? (
+                        <div className="mt-2 text-sm text-gray-700">
+                          Using host defaults (
+                          {form.hostAppearanceType ?? "ONLINE"}).
+                        </div>
+                      ) : (
+                        <div className="mt-2 space-y-2">
+                          {hostUnifiedType === "ONLINE" && (
+                            <label className="space-y-1">
+                              <span className="text-sm">Join URL</span>
+                              <input
+                                value={h.joinUrl ?? ""}
+                                onChange={(ev) =>
+                                  patchHost(idx, { joinUrl: ev.target.value })
+                                }
+                                className={clsx(
+                                  "w-full rounded-md border px-3 py-2",
+                                  he.joinUrl && "border-red-500"
+                                )}
+                                placeholder="https://…"
+                              />
+                              {he.joinUrl && (
+                                <div className="text-xs text-red-600">
+                                  {he.joinUrl}
+                                </div>
+                              )}
+                            </label>
+                          )}
+
+                          {hostUnifiedType === "IN_PERSON" && (
+                            <>
+                              <label className="space-y-1">
+                                <span className="text-sm">Venue name</span>
+                                <input
+                                  value={h.venueName ?? ""}
+                                  onChange={(ev) =>
+                                    patchHost(idx, {
+                                      venueName: ev.target.value,
+                                    })
+                                  }
+                                  className={clsx(
+                                    "w-full rounded-md border px-3 py-2",
+                                    he.venueName && "border-red-500"
+                                  )}
+                                  placeholder="Studio A"
+                                />
+                                {he.venueName && (
+                                  <div className="text-xs text-red-600">
+                                    {he.venueName}
+                                  </div>
+                                )}
+                              </label>
+
+                              <label className="space-y-1">
+                                <span className="text-sm">Venue address</span>
+                                <input
+                                  value={h.venueAddress ?? ""}
+                                  onChange={(ev) =>
+                                    patchHost(idx, {
+                                      venueAddress: ev.target.value,
+                                    })
+                                  }
+                                  className={clsx(
+                                    "w-full rounded-md border px-3 py-2",
+                                    he.venueAddress && "border-red-500"
+                                  )}
+                                  placeholder="123 Example St…"
+                                />
+                                {he.venueAddress && (
+                                  <div className="text-xs text-red-600">
+                                    {he.venueAddress}
+                                  </div>
+                                )}
+                              </label>
+                            </>
+                          )}
+
+                          {hostUnifiedType === "PHONE" && PHONE_ENABLED && (
+                            <label className="space-y-1">
+                              <span className="text-sm">Dial info</span>
+                              <input
+                                value={h.dialInfo ?? ""}
+                                onChange={(ev) =>
+                                  patchHost(idx, { dialInfo: ev.target.value })
+                                }
+                                className={clsx(
+                                  "w-full rounded-md border px-3 py-2",
+                                  he.dialInfo && "border-red-500"
+                                )}
+                                placeholder="e.g., +1 555 123 4567 PIN 0000"
+                              />
+                              {he.dialInfo && (
+                                <div className="text-xs text-red-600">
+                                  {he.dialInfo}
+                                </div>
+                              )}
+                            </label>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      <label className="space-y-1">
+                        <span className="text-sm">Appearance</span>
+                        <select
+                          value={h.appearanceType}
+                          onChange={(ev) =>
+                            patchHost(idx, {
+                              appearanceType: ev.target.value as TAppearance,
+                              joinUrl: null,
+                              venueName: null,
+                              venueAddress: null,
+                              dialInfo: null,
+                            })
+                          }
+                          className="w-full rounded-md border px-3 py-2"
+                        >
+                          <option value="ONLINE">ONLINE</option>
+                          <option value="IN_PERSON">IN_PERSON</option>
+                          {PHONE_ENABLED && (
+                            <option value="PHONE">PHONE</option>
+                          )}
+                        </select>
+                      </label>
+
+                      {h.appearanceType === "ONLINE" && (
+                        <label className="space-y-1">
+                          <span className="text-sm">Join URL</span>
+                          <input
+                            value={h.joinUrl ?? ""}
+                            onChange={(ev) =>
+                              patchHost(idx, { joinUrl: ev.target.value })
+                            }
+                            className={clsx(
+                              "w-full rounded-md border px-3 py-2",
+                              he.joinUrl && "border-red-500"
+                            )}
+                            placeholder="https://…"
+                          />
+                          {he.joinUrl && (
+                            <div className="text-xs text-red-600">
+                              {he.joinUrl}
+                            </div>
+                          )}
+                        </label>
+                      )}
+
+                      {h.appearanceType === "IN_PERSON" && (
+                        <>
+                          <label className="space-y-1">
+                            <span className="text-sm">Venue name</span>
+                            <input
+                              value={h.venueName ?? ""}
+                              onChange={(ev) =>
+                                patchHost(idx, { venueName: ev.target.value })
+                              }
+                              className={clsx(
+                                "w-full rounded-md border px-3 py-2",
+                                he.venueName && "border-red-500"
+                              )}
+                              placeholder="Studio A"
+                            />
+                            {he.venueName && (
+                              <div className="text-xs text-red-600">
+                                {he.venueName}
+                              </div>
+                            )}
+                          </label>
+
+                          <label className="space-y-1">
+                            <span className="text-sm">Venue address</span>
+                            <input
+                              value={h.venueAddress ?? ""}
+                              onChange={(ev) =>
+                                patchHost(idx, {
+                                  venueAddress: ev.target.value,
+                                })
+                              }
+                              className={clsx(
+                                "w-full rounded-md border px-3 py-2",
+                                he.venueAddress && "border-red-500"
+                              )}
+                              placeholder="123 Example St…"
+                            />
+                            {he.venueAddress && (
+                              <div className="text-xs text-red-600">
+                                {he.venueAddress}
+                              </div>
+                            )}
+                          </label>
+                        </>
+                      )}
+
+                      {h.appearanceType === "PHONE" && PHONE_ENABLED && (
+                        <label className="space-y-1">
+                          <span className="text-sm">Dial info</span>
+                          <input
+                            value={h.dialInfo ?? ""}
+                            onChange={(ev) =>
+                              patchHost(idx, { dialInfo: ev.target.value })
+                            }
+                            className={clsx(
+                              "w-full rounded-md border px-3 py-2",
+                              he.dialInfo && "border-red-500"
+                            )}
+                            placeholder="e.g., +1 555 123 4567 PIN 0000"
+                          />
+                          {h.dialInfo && (
+                            <div className="text-xs text-red-600">
+                              {h.dialInfo}
+                            </div>
+                          )}
+                        </label>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <AddHostPicker
+              onPick={(row) => addHost(row)}
+              existingIds={(form.hosts || [])
+                .filter((h) => h.userId)
+                .map((h) => h.userId as string)}
+              startAtISO={form.startAt}
+              durationMins={form.durationMins}
+            />
+          </div>
+        </>
+      )}
 
       {/* Optionals */}
-      <div className="grid gap-2 rounded-md border p-3">
-        <label className="grid gap-1 text-sm">
-          <span>Program name</span>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-sm">Program name</span>
           <input
             value={form.programName ?? ""}
             onChange={(e) => patch({ programName: e.target.value })}
@@ -1400,8 +2396,8 @@ export default function EditBookingPage() {
           />
         </label>
 
-        <label className="grid gap-1 text-sm">
-          <span>Talking points</span>
+        <label className="space-y-1 md:col-span-2">
+          <span className="text-sm">Talking points</span>
           <textarea
             value={form.talkingPoints ?? ""}
             onChange={(e) => patch({ talkingPoints: e.target.value })}
