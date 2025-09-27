@@ -1,407 +1,445 @@
 // prisma/seed.js
+// Rich seed: 2 orgs; staff (Owner/Producers/Hosts/Reporters), Exclusive & Public Experts, sample bookings.
+// Passwords: ALWAYS "123".
+// Safe to run after `prisma migrate reset` (fresh DB).
+// Uses CommonJS per package.json ("type": not module).
+
 const { PrismaClient } = require("@prisma/client");
+const bcrypt = require("bcryptjs");
+
 const prisma = new PrismaClient();
 
-// bcrypt is optional; fall back to a known hash for "password" if not installed.
-let bcrypt;
-try {
-  bcrypt = require("bcryptjs");
-} catch {
-  bcrypt = null;
-}
-async function hashPassword(pw = "password") {
-  const fallback =
-    "$2b$10$WqBq0XxkC3N1g7vQx6XbMeHh1a5mF1CPn8m8eZJvC6f1y6Q5nB5Nq"; // "password"
-  try {
-    if (!bcrypt) return fallback;
-    return await bcrypt.hash(pw, 10);
-  } catch {
-    return fallback;
-  }
+const PASSWORD = "123";
+
+// Simple helper to stagger future times
+function addMinutes(date, mins) {
+  return new Date(date.getTime() + mins * 60 * 1000);
 }
 
-async function createOrg(name) {
-  const org = await prisma.organization.create({ data: { name } });
-  await prisma.orgSettings.create({
-    data: {
-      orgId: org.id,
-      showProgramName: true,
-      showHostName: true,
-      showTalkingPoints: true,
-      allowInPerson: true,
-      allowOnline: true,
-    },
-  });
-  return org;
+function atNext(hourLocal, minuteLocal = 0) {
+  const d = new Date();
+  d.setHours(hourLocal, minuteLocal, 0, 0);
+  if (d < new Date()) d.setDate(d.getDate() + 1);
+  return d;
 }
 
 async function main() {
-  console.log("🌱 Resetting DB…");
+  console.log("Seeding database…");
 
-  // Clear tables in dependency order
-  await prisma.favoriteListItem.deleteMany();
-  await prisma.favoriteList.deleteMany();
-  await prisma.bookingNote.deleteMany();
-  await prisma.bookingGuest.deleteMany();
-  await prisma.booking.deleteMany();
-  await prisma.organizationMembership.deleteMany();
-  await prisma.orgSettings.deleteMany();
-  await prisma.user.deleteMany();
-  await prisma.organization.deleteMany();
+  const hashed = await bcrypt.hash(PASSWORD, 10);
 
-  // Orgs
-  const orgA = await createOrg("Org: Newsroom A");
-  const orgB = await createOrg("Org: Newsroom B");
-
-  const pw = await hashPassword("password");
-
-  // Staff (Org A)
-  const producerA = await prisma.user.create({
+  // ---------- Create Orgs + Settings ----------
+  const orgA = await prisma.organization.create({
     data: {
-      email: "producer.a@nre.test",
-      hashedPassword: pw,
-      name: "Producer A",
-      displayName: "Producer A",
-      activeOrgId: orgA.id,
-      expertVisStatus: null,
-      languages: ["en"],
-      timeZone: "Europe/Berlin",
-      memberships: { create: [{ orgId: orgA.id, role: "PRODUCER" }] },
+      name: "Org A",
+      settings: {
+        create: {
+          showProgramName: true,
+          showHostName: true,
+          showTalkingPoints: true,
+          allowInPerson: true,
+          allowOnline: true,
+        },
+      },
     },
   });
 
-  const hostA = await prisma.user.create({
+  const orgB = await prisma.organization.create({
     data: {
-      email: "host.a@nre.test",
-      hashedPassword: pw,
-      name: "Host A",
-      displayName: "Host A",
-      activeOrgId: orgA.id,
-      expertVisStatus: null, // host is not a public expert
-      languages: ["en"],
-      timeZone: "Europe/London",
-      memberships: { create: [{ orgId: orgA.id, role: "HOST" }] },
+      name: "Org B",
+      settings: {
+        create: {
+          showProgramName: true,
+          showHostName: true,
+          showTalkingPoints: true,
+          allowInPerson: true,
+          allowOnline: true,
+        },
+      },
     },
   });
 
-  // Staff (Org B) — to avoid "unused variable" and to exercise cross-org data
-  const producerB = await prisma.user.create({
-    data: {
-      email: "producer.b@nre.test",
-      hashedPassword: pw,
-      name: "Producer B",
-      displayName: "Producer B",
-      activeOrgId: orgB.id,
-      expertVisStatus: null,
-      languages: ["en"],
-      timeZone: "Europe/Paris",
-      memberships: { create: [{ orgId: orgB.id, role: "PRODUCER" }] },
-    },
-  });
-
-  // Exclusive experts per org
-  const expertExclusiveA = await prisma.user.create({
-    data: {
-      email: "expert.exclusive.a@nre.test",
-      hashedPassword: pw,
-      name: "Expert A (Exclusive)",
-      displayName: "Expert A (Exclusive)",
-      bio: "Exclusive to Org A; climate policy researcher.",
-      languages: ["en"],
-      tags: ["climate", "policy"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "New York",
-      countryCode: "US",
-      timeZone: "America/New_York",
-      expertVisStatus: "EXCLUSIVE",
-      exclusiveOrgId: orgA.id,
-      memberships: { create: [{ orgId: orgA.id, role: "EXPERT" }] },
-    },
-  });
-
-  const expertExclusiveB = await prisma.user.create({
-    data: {
-      email: "expert.exclusive.b@nre.test",
-      hashedPassword: pw,
-      name: "Expert B (Exclusive)",
-      displayName: "Expert B (Exclusive)",
-      bio: "Exclusive to Org B; EU tech regulation analyst.",
-      languages: ["en", "de"],
-      tags: ["technology", "policy", "eu"],
-      supportsOnline: true,
-      supportsInPerson: false,
-      city: "Berlin",
-      countryCode: "DE",
-      timeZone: "Europe/Berlin",
-      expertVisStatus: "EXCLUSIVE",
-      exclusiveOrgId: orgB.id,
-      memberships: { create: [{ orgId: orgB.id, role: "EXPERT" }] },
-    },
-  });
-
-  // Public experts (diverse)
-  const publicExperts = [
-    {
-      name: "Expert Public One",
-      email: "expert.public.one@nre.test",
-      bio: "Technology analyst and TV commentator.",
-      languages: ["en", "ar"],
-      tags: ["technology", "ai", "policy"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "Beirut",
-      countryCode: "LB",
-      timeZone: "Asia/Beirut",
-    },
-    {
-      name: "Expert Public Two",
-      email: "expert.public.two@nre.test",
-      bio: "Cybersecurity researcher.",
-      languages: ["en"],
-      tags: ["security", "technology"],
-      supportsOnline: true,
-      supportsInPerson: false,
-      city: "San Francisco",
-      countryCode: "US",
-      timeZone: "America/Los_Angeles",
-    },
-    {
-      name: "Expert Three",
-      email: "expert.public.three@nre.test",
-      bio: "Sports analyst covering football & basketball.",
-      languages: ["en"],
-      tags: ["sports"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "Berlin",
-      countryCode: "DE",
-      timeZone: "Europe/Berlin",
-    },
-    {
-      name: "Expert Four",
-      email: "expert.public.four@nre.test",
-      bio: "Climate scientist and panel speaker.",
-      languages: ["en"],
-      tags: ["climate", "science"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "New York",
-      countryCode: "US",
-      timeZone: "America/New_York",
-    },
-    {
-      name: "Expert Five",
-      email: "expert.public.five@nre.test",
-      bio: "Media law expert and lecturer.",
-      languages: ["en"],
-      tags: ["law", "media"],
-      supportsOnline: true,
-      supportsInPerson: false,
-      city: "Dublin",
-      countryCode: "IE",
-      timeZone: "Europe/Dublin",
-    },
-    {
-      name: "Expert Six",
-      email: "expert.public.six@nre.test",
-      bio: "Middle East politics commentator.",
-      languages: ["ar", "en"],
-      tags: ["politics", "middle-east"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "Amman",
-      countryCode: "JO",
-      timeZone: "Asia/Amman",
-    },
-    {
-      name: "Expert Seven",
-      email: "expert.public.seven@nre.test",
-      bio: "Financial markets reporter.",
-      languages: ["en"],
-      tags: ["finance", "markets"],
-      supportsOnline: false,
-      supportsInPerson: true,
-      city: "London",
-      countryCode: "GB",
-      timeZone: "Europe/London",
-    },
-    {
-      name: "Expert Eight",
-      email: "expert.public.eight@nre.test",
-      bio: "AI ethics researcher.",
-      languages: ["en", "fr"],
-      tags: ["ai", "ethics"],
-      supportsOnline: true,
-      supportsInPerson: false,
-      city: "Paris",
-      countryCode: "FR",
-      timeZone: "Europe/Paris",
-    },
-    {
-      name: "Expert Nine",
-      email: "expert.public.nine@nre.test",
-      bio: "Public health specialist.",
-      languages: ["en", "pt"],
-      tags: ["health", "policy"],
-      supportsOnline: false,
-      supportsInPerson: true,
-      city: "São Paulo",
-      countryCode: "BR",
-      timeZone: "America/Sao_Paulo",
-    },
-    {
-      name: "Expert Ten",
-      email: "expert.public.ten@nre.test",
-      bio: "Data journalist.",
-      languages: ["en"],
-      tags: ["data", "journalism"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "Bengaluru",
-      countryCode: "IN",
-      timeZone: "Asia/Kolkata",
-    },
-    {
-      name: "Expert Eleven",
-      email: "expert.public.eleven@nre.test",
-      bio: "Energy policy analyst.",
-      languages: ["en"],
-      tags: ["energy", "policy"],
-      supportsOnline: true,
-      supportsInPerson: true,
-      city: "Houston",
-      countryCode: "US",
-      timeZone: "America/Chicago",
-    },
-    {
-      name: "Expert Twelve",
-      email: "expert.public.twelve@nre.test",
-      bio: "Technology evangelist.",
-      languages: ["en", "ja"],
-      tags: ["technology", "innovation"],
-      supportsOnline: true,
-      supportsInPerson: false,
-      city: "Tokyo",
-      countryCode: "JP",
-      timeZone: "Asia/Tokyo",
-    },
-  ];
-
-  console.log("👤 Creating public experts…");
-  const publicCreated = [];
-  for (const e of publicExperts) {
-    const row = await prisma.user.create({
+  // Utility to create a user (optionally with membership role in an org)
+  async function createStaff({
+    displayName,
+    email,
+    avatarUrl,
+    org,
+    role,
+    city = "Cairo",
+    countryCode = "EG",
+    timeZone = "Africa/Cairo",
+  }) {
+    const user = await prisma.user.create({
       data: {
-        email: e.email,
-        hashedPassword: pw,
-        name: e.name,
-        displayName: e.name,
-        bio: e.bio,
-        languages: e.languages,
-        tags: e.tags,
-        supportsOnline: e.supportsOnline,
-        supportsInPerson: e.supportsInPerson,
-        city: e.city,
-        countryCode: e.countryCode,
-        timeZone: e.timeZone,
-        expertVisStatus: "PUBLIC",
+        email,
+        name: displayName,
+        displayName,
+        avatarUrl,
+        hashedPassword: hashed,
+        city,
+        countryCode,
+        timeZone,
+        memberships: {
+          create: [
+            {
+              role,
+              organization: { connect: { id: org.id } },
+            },
+          ],
+        },
       },
     });
-    publicCreated.push(row);
+    return user;
   }
 
-  // Favorites (Org A)
-  await prisma.favoriteList.create({
-    data: {
-      orgId: orgA.id,
-      name: "Tech Bench",
-      createdById: producerA.id,
-      items: {
-        create: [
-          { targetUserId: publicCreated[0].id },
-          { targetUserId: publicCreated[1].id },
-          { targetUserId: publicCreated[7].id },
-        ],
+  // Utility to create an expert (PUBLIC or EXCLUSIVE)
+  async function createExpert({
+    displayName,
+    email,
+    avatarUrl,
+    visibility, // "PUBLIC" | "EXCLUSIVE"
+    exclusiveOrgId = null,
+    languages = ["en", "ar"],
+    tags = ["news", "policy"],
+    supportsOnline = true,
+    supportsInPerson = false,
+    city = "Cairo",
+    countryCode = "EG",
+    timeZone = "Africa/Cairo",
+  }) {
+    return prisma.user.create({
+      data: {
+        email,
+        name: displayName,
+        displayName,
+        avatarUrl,
+        hashedPassword: hashed, // allows signing in as an expert for POV tests
+        languages,
+        tags,
+        supportsOnline,
+        supportsInPerson,
+        city,
+        countryCode,
+        timeZone,
+        expertVisStatus: visibility, // PUBLIC | EXCLUSIVE
+        exclusiveOrgId,
       },
-    },
-  });
-  await prisma.favoriteList.create({
-    data: {
-      orgId: orgA.id,
-      name: "Climate Voices",
-      createdById: producerA.id,
-      items: {
-        create: [
-          { targetUserId: publicCreated[3].id },
-          { targetUserId: expertExclusiveA.id },
-        ],
+    });
+  }
+
+  // Image source (stable dev avatars)
+  const img = (n) => `https://i.pravatar.cc/300?img=${n}`;
+
+  // ---------- STAFF PER ORG ----------
+  const staffIndex = { A: 1, B: 1 }; // just to vary avatar ids
+
+  async function seedOrgStaff(label, org) {
+    const idx = staffIndex[label];
+
+    // 1 Owner
+    const owner = await createStaff({
+      displayName: `Owner ${label}`,
+      email: `owner.${label.toLowerCase()}@nre.test`,
+      avatarUrl: img(10 + idx),
+      org,
+      role: "OWNER",
+    });
+
+    // 2 Producers
+    const producers = await Promise.all(
+      [1, 2].map((i) =>
+        createStaff({
+          displayName: `Producer ${label}-${i}`,
+          email: `producer.${label.toLowerCase()}${i}@nre.test`,
+          avatarUrl: img(20 + idx + i),
+          org,
+          role: "PRODUCER",
+        })
+      )
+    );
+
+    // 3 Hosts
+    const hosts = await Promise.all(
+      [1, 2, 3].map((i) =>
+        createStaff({
+          displayName: `Host ${label}-${i}`,
+          email: `host.${label.toLowerCase()}${i}@nre.test`,
+          avatarUrl: img(30 + idx + i),
+          org,
+          role: "HOST",
+        })
+      )
+    );
+
+    // 5 Reporters (requires Role.REPORTER in schema)
+    const reporters = await Promise.all(
+      [1, 2, 3, 4, 5].map((i) =>
+        createStaff({
+          displayName: `Reporter ${label}-${i}`,
+          email: `reporter.${label.toLowerCase()}${i}@nre.test`,
+          avatarUrl: img(40 + idx + i),
+          org,
+          role: "REPORTER",
+        })
+      )
+    );
+
+    staffIndex[label] += 1;
+
+    return { owner, producers, hosts, reporters };
+  }
+
+  const staffA = await seedOrgStaff("A", orgA);
+  const staffB = await seedOrgStaff("B", orgB);
+
+  // ---------- EXCLUSIVE EXPERTS PER ORG ----------
+  async function seedExclusiveExperts(label, org) {
+    return Promise.all(
+      [1, 2, 3, 4].map((i) =>
+        createExpert({
+          displayName: `Exclusive Expert ${label}-${i}`,
+          email: `expert.exclusive.${label.toLowerCase()}${i}@nre.test`,
+          avatarUrl: img(60 + i),
+          visibility: "EXCLUSIVE",
+          exclusiveOrgId: org.id,
+          languages: i % 2 === 0 ? ["en"] : ["en", "ar"],
+          tags: i % 2 === 0 ? ["economy", "markets"] : ["technology", "ai"],
+          supportsOnline: true,
+          supportsInPerson: i % 2 === 0,
+          city: i % 2 === 0 ? "Riyadh" : "Cairo",
+          countryCode: i % 2 === 0 ? "SA" : "EG",
+        })
+      )
+    );
+  }
+
+  const exclusiveA = await seedExclusiveExperts("A", orgA);
+  const exclusiveB = await seedExclusiveExperts("B", orgB);
+
+  // ---------- PUBLIC EXPERTS (10 total, no org) ----------
+  await Promise.all(
+    Array.from({ length: 10 }).map((_, i) =>
+      createExpert({
+        displayName: `Public Expert ${i + 1}`,
+        email: `expert.public${i + 1}@nre.test`,
+        avatarUrl: img(80 + i),
+        visibility: "PUBLIC",
+        exclusiveOrgId: null,
+        languages: i % 3 === 0 ? ["en", "fr"] : ["en", "ar"],
+        tags: i % 2 === 0 ? ["politics", "governance"] : ["science", "health"],
+        supportsOnline: true,
+        supportsInPerson: i % 3 === 0,
+        city: i % 2 === 0 ? "Dubai" : "Amman",
+        countryCode: i % 2 === 0 ? "AE" : "JO",
+        timeZone: i % 2 === 0 ? "Asia/Dubai" : "Asia/Amman",
+      })
+    )
+  );
+
+  // ---------- SAMPLE BOOKINGS to power availability badges ----------
+  // We’ll create a few bookings in the next 7 days for Hosts + Experts + a Reporter.
+  async function makeBooking({
+    org,
+    subject,
+    startAt,
+    durationMins = 45,
+    appearanceType = "ONLINE",
+    hostUserId,
+    expertUserId,
+    expertName,
+    newsroomName,
+    guests = [], // array of { userId, name, kind, appearanceType, joinUrl|venueName|dialInfo }
+  }) {
+    return prisma.booking.create({
+      data: {
+        orgId: org.id,
+        subject,
+        startAt,
+        durationMins,
+        appearanceScope: "UNIFIED",
+        appearanceType,
+        locationUrl:
+          appearanceType === "ONLINE" ? "https://meet.example/test" : null,
+        expertUserId: expertUserId || null,
+        hostUserId: hostUserId || null,
+        expertName,
+        newsroomName,
+        guests: {
+          create: guests.map((g, order) => ({
+            userId: g.userId ?? null,
+            name: g.name,
+            kind: g.kind,
+            order,
+            appearanceType: g.appearanceType,
+            joinUrl: g.joinUrl ?? null,
+            venueName: g.venueName ?? null,
+            venueAddress: g.venueAddress ?? null,
+            dialInfo: g.dialInfo ?? null,
+          })),
+        },
       },
-    },
-  });
+    });
+  }
 
-  // Favorites (Org B) — uses expertExclusiveB so it’s not unused
-  await prisma.favoriteList.create({
-    data: {
-      orgId: orgB.id,
-      name: "EU Tech Panel",
-      createdById: producerB.id,
-      items: {
-        create: [
-          { targetUserId: expertExclusiveB.id },
-          { targetUserId: publicCreated[7].id }, // Expert Eight (Paris)
-        ],
+  const t1 = atNext(11, 0); // next 11:00 local
+  const t2 = addMinutes(t1, 120); // +2h
+  const t3 = addMinutes(t1, 240); // +4h
+
+  // Org A: create 3 bookings
+  await makeBooking({
+    org: orgA,
+    subject: "A: Morning Live Hit",
+    startAt: t1,
+    durationMins: 40,
+    appearanceType: "ONLINE",
+    hostUserId: staffA.hosts[0].id,
+    expertUserId: exclusiveA[0].id,
+    expertName: exclusiveA[0].displayName ?? "Exclusive Expert A-1",
+    newsroomName: "Org A Newsroom",
+    guests: [
+      {
+        userId: exclusiveA[0].id,
+        name: exclusiveA[0].displayName ?? "Exclusive Expert A-1",
+        kind: "EXPERT",
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/a1",
       },
-    },
+    ],
   });
 
-  // Bookings to create availability overlaps
-  const now = Date.now();
-  const toMs = (mins) => mins * 60 * 1000;
-
-  await prisma.booking.create({
-    data: {
-      subject: "Tech panel: AI in 2025",
-      newsroomName: "Org: Newsroom A",
-      expertName: "Expert Public Two",
-      appearanceScope: "UNIFIED",
-      appearanceType: "ONLINE",
-      accessProvisioning: "SHARED",
-      status: "CONFIRMED",
-      startAt: new Date(now + toMs(60)), // +1h
-      durationMins: 60,
-      locationUrl: "https://meet.example.com/ai2025",
-      orgId: orgA.id,
-      expertUserId: publicCreated[1].id,
-      hostUserId: hostA.id,
-    },
+  await makeBooking({
+    org: orgA,
+    subject: "A: Phone Briefing",
+    startAt: t2,
+    durationMins: 30,
+    appearanceType: "PHONE",
+    hostUserId: staffA.hosts[1].id,
+    expertUserId: exclusiveA[1].id,
+    expertName: exclusiveA[1].displayName ?? "Exclusive Expert A-2",
+    newsroomName: "Org A Newsroom",
+    guests: [
+      {
+        userId: exclusiveA[1].id,
+        name: exclusiveA[1].displayName ?? "Exclusive Expert A-2",
+        kind: "EXPERT",
+        appearanceType: "PHONE",
+        dialInfo: "+20 2 1234 5678",
+      },
+      {
+        userId: staffA.reporters[0].id,
+        name: staffA.reporters[0].displayName ?? "Reporter A-1",
+        kind: "REPORTER",
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/ra1",
+      },
+    ],
   });
 
-  await prisma.booking.create({
-    data: {
-      subject: "Energy policy briefing",
-      newsroomName: "Org: Newsroom A",
-      expertName: "Expert Eleven",
-      appearanceScope: "UNIFIED",
-      appearanceType: "IN_PERSON",
-      accessProvisioning: "SHARED",
-      status: "PENDING",
-      startAt: new Date(now + toMs(180)), // +3h
-      durationMins: 45,
-      locationName: "NRE HQ",
-      locationAddress: "123 Main St",
-      orgId: orgA.id,
-      expertUserId: publicCreated[10].id,
-      hostUserId: hostA.id,
-    },
+  await makeBooking({
+    org: orgA,
+    subject: "A: In-Person Panel",
+    startAt: t3,
+    durationMins: 60,
+    appearanceType: "IN_PERSON",
+    hostUserId: staffA.hosts[2].id,
+    expertUserId: exclusiveA[2].id,
+    expertName: exclusiveA[2].displayName ?? "Exclusive Expert A-3",
+    newsroomName: "Org A Newsroom",
+    guests: [
+      {
+        userId: exclusiveA[2].id,
+        name: exclusiveA[2].displayName ?? "Exclusive Expert A-3",
+        kind: "EXPERT",
+        appearanceType: "IN_PERSON",
+        venueName: "Studio A",
+        venueAddress: "1 Nile St, Cairo",
+      },
+    ],
   });
 
-  console.log("✅ Seed complete.");
+  // Org B: create 2 bookings
+  await makeBooking({
+    org: orgB,
+    subject: "B: Midday Update",
+    startAt: addMinutes(t1, 60),
+    durationMins: 30,
+    appearanceType: "ONLINE",
+    hostUserId: staffB.hosts[0].id,
+    expertUserId: exclusiveB[0].id,
+    expertName: exclusiveB[0].displayName ?? "Exclusive Expert B-1",
+    newsroomName: "Org B Newsroom",
+    guests: [
+      {
+        userId: exclusiveB[0].id,
+        name: exclusiveB[0].displayName ?? "Exclusive Expert B-1",
+        kind: "EXPERT",
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/b1",
+      },
+    ],
+  });
+
+  await makeBooking({
+    org: orgB,
+    subject: "B: Reporter De-Brief",
+    startAt: addMinutes(t2, 90),
+    durationMins: 30,
+    appearanceType: "ONLINE",
+    hostUserId: staffB.hosts[1].id,
+    expertUserId: exclusiveB[1].id,
+    expertName: exclusiveB[1].displayName ?? "Exclusive Expert B-2",
+    newsroomName: "Org B Newsroom",
+    guests: [
+      {
+        userId: staffB.reporters[1].id,
+        name: staffB.reporters[1].displayName ?? "Reporter B-2",
+        kind: "REPORTER",
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/rb2",
+      },
+      {
+        userId: exclusiveB[1].id,
+        name: exclusiveB[1].displayName ?? "Exclusive Expert B-2",
+        kind: "EXPERT",
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/b2",
+      },
+    ],
+  });
+
+  // ---------- Output handy table ----------
+  const allUsers = await prisma.user.findMany({
+    include: { memberships: { include: { organization: true } } },
+    orderBy: [{ email: "asc" }],
+  });
+
+  const rows = allUsers.map((u) => {
+    const membership = u.memberships[0];
+    const role =
+      membership?.role ??
+      (u.expertVisStatus ? `EXPERT (${u.expertVisStatus})` : "—");
+    const orgName =
+      membership?.organization?.name || (u.exclusiveOrgId ? "Exclusive" : "—");
+    return {
+      Name: u.displayName || u.name || u.email,
+      Email: u.email,
+      Role: role,
+      Org: orgName,
+      Password: PASSWORD,
+    };
+  });
+
+  console.log("\nSeeded users (first 50 shown):");
+  console.table(rows.slice(0, 50));
+  console.log("\nAll passwords are '123'.");
+
+  console.log("\nDone.");
 }
 
 main()
   .catch((e) => {
-    console.error("❌ Seed failed", e);
+    console.error(e);
     process.exit(1);
   })
   .finally(async () => {

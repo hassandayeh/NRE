@@ -7,7 +7,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // Reads from DATABASE_URL in .env
+  provider = "postgresql"
+  // Reads from DATABASE_URL in .env
   url      = env("DATABASE_URL")
 }
 
@@ -36,6 +37,7 @@ enum Role {
   PRODUCER
   EXPERT
   HOST
+  REPORTER // ← ADDED
 }
 
 /// Expert public visibility & exclusivity
@@ -135,32 +137,31 @@ model OrganizationMembership {
 
 /// Application user model
 model User {
-  id    String @id @default(cuid())
-  email String @unique @db.VarChar(320)
-  name  String? @db.VarChar(200) // legacy display; some UI still reads this
-
+  id             String   @id @default(cuid())
+  email          String   @unique @db.VarChar(320)
+  name           String?  @db.VarChar(200) // legacy display; some UI still reads this
   // Store a secure hash (bcrypt/argon2) — NOT plaintext
-  hashedPassword String @db.VarChar(255)
+  hashedPassword String   @db.VarChar(255)
 
   // ---- Profile fields (optional) ----
-  displayName String? @db.VarChar(200)
-  avatarUrl   String? @db.Text
-  bio         String? @db.Text
+  displayName    String?  @db.VarChar(200)
+  avatarUrl      String?  @db.Text
+  bio            String?  @db.Text
 
   // Searchable expert metadata
-  languages     String[] @default([]) // e.g. ["en","ar"]; default avoids null checks
-  tags          String[] @default([]) // e.g. ["technology","ai"]
-  supportsOnline   Boolean @default(false)
+  languages      String[] @default([]) // e.g. ["en","ar"]; default avoids null checks
+  tags           String[] @default([]) // e.g. ["technology","ai"]
+  supportsOnline Boolean  @default(false)
   supportsInPerson Boolean @default(false)
-  city            String? @db.VarChar(200)
-  countryCode     String? @db.VarChar(2) // ISO-3166-1 alpha-2
-  timeZone        String? @db.VarChar(64) // e.g. "Africa/Cairo"
+  city           String?  @db.VarChar(200)
+  countryCode    String?  @db.VarChar(2)   // ISO-3166-1 alpha-2
+  timeZone       String?  @db.VarChar(64)  // e.g. "Africa/Cairo"
 
   // ---- Legacy UI scoping (kept to avoid breaking code) ----
   activeOrgId String?
   activeOrg   Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id], onDelete: SetNull)
 
-  // Tenancy memberships (kept for Owner/Producer/Host etc.)
+  // Tenancy memberships (kept for Owner/Producer/Host/Reporter/etc.)
   memberships OrganizationMembership[]
 
   // ---- Expert visibility/exclusivity ----
@@ -174,8 +175,8 @@ model User {
   bookingsAsHost   Booking[] @relation("HostBookings")
   notes            BookingNote[]
   favoriteListsCreated FavoriteList[] @relation("FavoriteListCreatedBy")
-  bookingGuests    BookingGuest[]
-  favoritedIn      FavoriteListItem[]
+  bookingGuests     BookingGuest[]
+  favoritedIn       FavoriteListItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -188,12 +189,12 @@ model User {
 
 /// Bookings table (current UI fields; org-scoped)
 model Booking {
-  id      String @id @default(cuid())
-  subject String @db.VarChar(300)
+  id        String   @id @default(cuid())
+  subject   String   @db.VarChar(300)
 
   // ---- Legacy editorial fields (kept) ----
-  expertName   String @db.VarChar(200)
-  newsroomName String @db.VarChar(200)
+  expertName   String   @db.VarChar(200)
+  newsroomName String   @db.VarChar(200)
   talkingPoints String? @db.Text // optional
 
   // ---- Appearance & Access (revised) ----
@@ -207,12 +208,12 @@ model Booking {
 
   // Booking defaults (used when UNIFIED and/or SHARED, and as fallbacks)
   // ONLINE
-  locationUrl String? @db.Text
+  locationUrl   String?  @db.Text
   // IN_PERSON
   locationName    String? @db.VarChar(300)
   locationAddress String?
   // PHONE
-  dialInfo String?
+  dialInfo      String?
 
   // Optional editorial extras (visibility controlled by OrgSettings)
   programName String? @db.VarChar(200)
@@ -250,8 +251,8 @@ model BookingGuest {
   booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   // Internal or external
-  userId String? // nullable for external guest snapshots
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?   // nullable for external guest snapshots
+  user   User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   // External snapshot
   name String // snapshot for external guests; for internal, duplicate of user.name at time of add
@@ -284,9 +285,12 @@ model BookingNote {
   id        String   @id @default(cuid())
   bookingId String
   booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  authorId  String
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  body      String   @db.Text
+
+  authorId String
+  author   User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  body String @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -298,14 +302,16 @@ model BookingNote {
  */
 
 model FavoriteList {
-  id        String   @id @default(cuid())
-  orgId     String
+  id      String   @id @default(cuid())
+  orgId   String
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  name        String @db.VarChar(200)
+  name   String @db.VarChar(200)
+
   createdById String
-  createdBy   User   @relation("FavoriteListCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
-  items       FavoriteListItem[]
+  createdBy   User @relation("FavoriteListCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+
+  items FavoriteListItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -314,9 +320,9 @@ model FavoriteList {
 }
 
 model FavoriteListItem {
-  id        String @id @default(cuid())
-  listId    String
-  list      FavoriteList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  id      String   @id @default(cuid())
+  listId  String
+  list    FavoriteList @relation(fields: [listId], references: [id], onDelete: Cascade)
 
   // the favorited expert/reporter user
   targetUserId String

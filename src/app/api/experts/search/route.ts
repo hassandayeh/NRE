@@ -15,6 +15,7 @@ function parseCsv(v: string | null): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
 function parseBoolLoose(v: string | null): boolean | undefined {
   if (!v) return undefined;
   const s = v.toString().trim().toLowerCase();
@@ -23,6 +24,7 @@ function parseBoolLoose(v: string | null): boolean | undefined {
   if (s === "any") return undefined;
   return undefined;
 }
+
 function parseVisibility(url: URL): Visibility {
   const v = (
     url.searchParams.get("visibility") ||
@@ -36,12 +38,14 @@ function parseVisibility(url: URL): Visibility {
   if (v === "both") return "both";
   return "public";
 }
+
 function parseTake(url: URL): number {
   const raw =
     url.searchParams.get("take") || url.searchParams.get("limit") || "20";
   const n = Number(raw);
   return Math.max(1, Math.min(50, Number.isFinite(n) ? n : 20));
 }
+
 function buildQor(q: string): any | null {
   const t = (q || "").trim();
   if (!t) return null;
@@ -63,47 +67,48 @@ export async function GET(req: Request) {
     // ------- inputs -------
     const q = (url.searchParams.get("q") || "").trim();
     const visibility = parseVisibility(url);
-
     const languages = parseCsv(url.searchParams.get("languages"));
     const tags = parseCsv(url.searchParams.get("tags"));
-
     const supportsOnline = parseBoolLoose(
       url.searchParams.get("supportsOnline")
     );
     const supportsInPerson = parseBoolLoose(
       url.searchParams.get("supportsInPerson")
     );
-
     const city = (url.searchParams.get("city") || "").trim();
     const countryCode = (url.searchParams.get("countryCode") || "").trim();
-
     const take = parseTake(url);
     const cursor = url.searchParams.get("cursor") || undefined;
 
-    // Slot-aware availability flags
-    const startAtParam = url.searchParams.get("startAt");
+    // Slot-aware availability flags (support legacy and new param styles)
+    const startCombined =
+      url.searchParams.get("start") || url.searchParams.get("startAt");
+    const endCombined = url.searchParams.get("end");
     const durationMinsParam = url.searchParams.get("durationMins");
     const onlyAvailable =
       parseBoolLoose(url.searchParams.get("onlyAvailable")) === true;
 
     const startAt =
-      startAtParam && !Number.isNaN(Date.parse(startAtParam))
-        ? new Date(startAtParam)
+      startCombined && !Number.isNaN(Date.parse(startCombined))
+        ? new Date(startCombined)
         : null;
-    const durationMins =
-      durationMinsParam && !Number.isNaN(Number(durationMinsParam))
-        ? Number(durationMinsParam)
-        : null;
+
     const windowEnd =
-      startAt && durationMins != null
-        ? new Date(startAt.getTime() + durationMins * 60_000)
+      endCombined && !Number.isNaN(Date.parse(endCombined))
+        ? new Date(endCombined)
+        : startAt &&
+          durationMinsParam &&
+          !Number.isNaN(Number(durationMinsParam))
+        ? new Date(startAt.getTime() + Number(durationMinsParam) * 60_000)
         : null;
+
+    const haveWindow = !!(startAt && windowEnd);
 
     // ------- session (optional) -------
     const session = await getServerSession(authOptions).catch(() => null);
     const email = (session?.user as any)?.email as string | undefined;
 
-    // Prefer activeOrgId; else any staff org; else undefined
+    // prefer activeOrgId; else any staff org; else undefined
     let staffOrgId: string | undefined;
     if (email) {
       const me = await prisma.user.findUnique({
@@ -111,11 +116,14 @@ export async function GET(req: Request) {
         select: { id: true, activeOrgId: true },
       });
       staffOrgId = me?.activeOrgId ?? undefined;
+
       if (!staffOrgId && me?.id) {
         const membership = await prisma.organizationMembership.findFirst({
           where: {
             userId: me.id,
-            role: { in: ["OWNER", "ADMIN", "PRODUCER", "HOST"] as any },
+            role: {
+              in: ["OWNER", "ADMIN", "PRODUCER", "HOST", "REPORTER"] as any,
+            },
           },
           select: { orgId: true },
         });
@@ -126,19 +134,9 @@ export async function GET(req: Request) {
     // ------- where filters -------
     const AND: any[] = [];
 
-    // Exclude HOST-only users
-    AND.push({
-      NOT: {
-        AND: [
-          { memberships: { some: { role: "HOST" } } },
-          { memberships: { none: { role: "EXPERT" } } },
-        ],
-      },
-    } as any);
-
+    // Text filters
     const qOr = buildQor(q);
     if (qOr) AND.push(qOr);
-
     if (languages.length > 0)
       AND.push({ languages: { hasSome: languages } } as any);
     if (tags.length > 0) AND.push({ tags: { hasSome: tags } } as any);
@@ -150,26 +148,42 @@ export async function GET(req: Request) {
     if (countryCode)
       AND.push({ countryCode: countryCode.toUpperCase() } as any);
 
-    // Visibility using expertVisStatus + memberships
+    // ✅ HARD RULE: Only show EXPERTS.
+    // Exclude staff-only users (OWNER/ADMIN/PRODUCER/HOST/REPORTER) who do not also have EXPERT membership.
+    const staffRoles = [
+      "OWNER",
+      "ADMIN",
+      "PRODUCER",
+      "HOST",
+      "REPORTER",
+    ] as const;
+    AND.push({
+      NOT: {
+        AND: [
+          { memberships: { some: { role: { in: staffRoles as any } } } },
+          { memberships: { none: { role: "EXPERT" } } },
+        ],
+      },
+    } as any);
+
+    // Visibility rules (PUBLIC vs ORG-exclusive)
     const publicClause = { expertVisStatus: "PUBLIC" } as any;
     const orgClause = staffOrgId
       ? ({
           OR: [
-            {
-              memberships: { some: { role: "EXPERT", orgId: staffOrgId } },
-            } as any,
-            { expertVisStatus: "EXCLUSIVE", exclusiveOrgId: staffOrgId } as any,
+            // experts tied to my org
+            { memberships: { some: { role: "EXPERT", orgId: staffOrgId } } },
+            { expertVisStatus: "EXCLUSIVE", exclusiveOrgId: staffOrgId },
           ],
         } as any)
-      : ({ id: "__no_org__" } as any); // ensures empty set if no org context
+      : ({ id: "__no_org__" } as any); // empty set if no org and mode=org
 
     if (visibility === "public") {
       AND.push(publicClause);
     } else if (visibility === "org") {
       AND.push(orgClause);
     } else {
-      // both
-      AND.push({ OR: [orgClause, publicClause] } as any);
+      AND.push({ OR: [publicClause, orgClause] } as any);
     }
 
     // ------- query -------
@@ -193,17 +207,30 @@ export async function GET(req: Request) {
 
     // ------- availability (optional) -------
     let busySet = new Set<string>();
-    if (startAt && windowEnd && users.length > 0) {
+    if (haveWindow && users.length > 0) {
       const ids = users.map((u: any) => u.id);
       const overlapping = await prisma.booking.findMany({
-        where: { expertUserId: { in: ids }, startAt: { lt: windowEnd } },
-        select: { expertUserId: true, startAt: true, durationMins: true },
+        where: {
+          startAt: { lt: windowEnd! },
+          OR: [
+            { expertUserId: { in: ids } },
+            { guests: { some: { userId: { in: ids } } } },
+          ],
+        },
+        select: {
+          expertUserId: true,
+          startAt: true,
+          durationMins: true,
+          guests: { select: { userId: true } },
+        },
       });
+
       for (const b of overlapping) {
         const s = new Date(b.startAt);
         const e = new Date(s.getTime() + (b.durationMins ?? 0) * 60_000);
-        if (e > startAt && s < windowEnd && b.expertUserId)
-          busySet.add(b.expertUserId);
+        if (!(e > startAt! && s < windowEnd!)) continue;
+        if (b.expertUserId) busySet.add(b.expertUserId);
+        for (const g of b.guests) if (g.userId) busySet.add(g.userId);
       }
     }
 
@@ -218,14 +245,13 @@ export async function GET(req: Request) {
       supportsInPerson: u.supportsInPerson ?? null,
       city: u.city ?? null,
       countryCode: u.countryCode ?? null,
-      availability:
-        startAt && windowEnd
-          ? { status: busySet.has(u.id) ? "BUSY" : "AVAILABLE" }
-          : { status: "UNKNOWN" },
+      availability: haveWindow
+        ? { status: busySet.has(u.id) ? "BUSY" : "AVAILABLE" }
+        : null,
     }));
 
-    if (onlyAvailable && startAt && windowEnd) {
-      items = items.filter((i) => i.availability.status === "AVAILABLE");
+    if (parseBoolLoose(url.searchParams.get("onlyAvailable")) && haveWindow) {
+      items = items.filter((i) => i.availability?.status === "AVAILABLE");
     }
 
     const nextCursor =
