@@ -145,12 +145,12 @@ function buildLinks({
   ];
 
   if (!isExpert) {
-    items.push({ href: "/modules/directory", label: "Directory" });
+    items.push({ href: "/modules/experts", label: "Directory" });
     // If/when we wire exact Owner detection, add:
     // items.push({ href: "/modules/org/settings", label: "Org Settings" });
   }
 
   items.push({ href: "/modules/settings", label: "Settings" });
-  items.push({ href: "/profile", label: "Profile" });
+  items.push({ href: "/modules/profile", label: "Profile" });
   return items;
 }

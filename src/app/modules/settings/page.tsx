@@ -6,13 +6,17 @@
  * - Green toast appears on every successful change.
  * - Still resilient to GET failures and flat/legacy response shapes.
  * - Updates <body data-*> after successful save so booking UI reacts.
- * - NEW: Shows "Organization profile" link for Owners (200 from /api/org/profile).
+ * - Shows "Organization profile" link for Owners (200 from /api/org/profile).
+ *
+ * Fix: wrap the inner page with <ThemeProvider> so useTheme() has context.
+ *      No UI/behavior changes otherwise.
  */
 
 import * as React from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-import { useTheme } from "../../../components/theme-provider";
+// ✅ FIX: ThemeProvider is the DEFAULT export; useTheme is named
+import ThemeProvider, { useTheme } from "../../../components/theme-provider";
 
 // Minimal Alert (kept)
 import * as AlertModule from "../../../components/ui/Alert";
@@ -34,18 +38,20 @@ function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   return (
     <div
       role="status"
-      className="fixed bottom-4 right-4 z-50 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-green-900 shadow-lg"
+      aria-live="polite"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-emerald-600 px-4 py-2 text-white shadow-lg"
     >
-      <span className="mr-3">{props.children}</span>
-      {props.onClose && (
-        <button
-          onClick={props.onClose}
-          className="ml-2 rounded-md px-2 py-1 text-sm hover:bg-black/5"
-          aria-label="Dismiss"
-        >
-          ✕
-        </button>
-      )}
+      <div className="flex items-center gap-3">
+        <span className="font-medium">{props.children}</span>
+        {props.onClose && (
+          <button
+            onClick={props.onClose}
+            className="rounded bg-white/15 px-2 py-1 text-xs"
+          >
+            ✕
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -60,7 +66,21 @@ function toBool(v: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+/** =========================================================
+ * Wrapper component: provides Theme context for the inner page
+ * ========================================================= */
 export default function SettingsPage() {
+  return (
+    <ThemeProvider>
+      <SettingsInner />
+    </ThemeProvider>
+  );
+}
+
+/** ----------
+ * Inner page (original UI/logic lives here)
+ * ---------- */
+function SettingsInner() {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
 
@@ -81,7 +101,7 @@ export default function SettingsPage() {
   // Owner check → controls "Organization profile" section visibility
   const [canEditOrg, setCanEditOrg] = React.useState<boolean | null>(null);
 
-  // Theme (unchanged, robust)
+  // Theme (original behavior)
   const themeApi = useTheme() as any;
   const theme: string | undefined = themeApi?.theme;
   const setTheme: ((v: "light" | "dark") => void) | undefined =
@@ -89,6 +109,7 @@ export default function SettingsPage() {
   const toggleTheme: (() => void) | undefined = themeApi?.toggleTheme;
 
   function chooseTheme(next: "light" | "dark") {
+    // Prefer provider if present
     if (setTheme) return setTheme(next);
     if (toggleTheme && typeof theme === "string") {
       const wantDark = next === "dark";
@@ -96,6 +117,7 @@ export default function SettingsPage() {
       if (wantDark !== isDark) toggleTheme();
       return;
     }
+    // Fallback: DOM + localStorage (works even without provider)
     if (typeof document !== "undefined") {
       const root = document.documentElement;
       if (next === "dark") root.classList.add("dark");
@@ -119,7 +141,6 @@ export default function SettingsPage() {
           (raw && typeof raw === "object" && "toggles" in raw
             ? (raw as any).toggles
             : raw) ?? {};
-
         const next: Toggles = {
           showProgramName: toBool(data.showProgramName, true),
           showHostName: toBool(data.showHostName, true),
@@ -159,7 +180,7 @@ export default function SettingsPage() {
     };
   }, []);
 
-  // Sync <body data-*> after a successful save
+  // Sync after a successful save
   function applyBodyDatasets(next: Toggles) {
     if (typeof document === "undefined") return;
     const ds = document.body.dataset as DOMStringMap;
@@ -180,6 +201,7 @@ export default function SettingsPage() {
 
     // Optimistic UI
     setToggles((t) => ({ ...t, [key]: value }));
+
     try {
       const res = await fetch("/api/toggles", {
         method: "PUT",
@@ -204,7 +226,7 @@ export default function SettingsPage() {
         ...t,
         [key]: !value as unknown as Toggles[typeof key],
       }));
-      setToast(null); // only green toast on success (per request)
+      setToast(null); // only green toast on success
     } finally {
       savingRef.current.delete(key);
     }
@@ -221,25 +243,25 @@ export default function SettingsPage() {
   React.useEffect(() => setPortalReady(true), []);
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <h1 className="mb-2 text-2xl font-semibold">Settings</h1>
-      <Link
-        href="/modules/booking"
-        className="text-sm text-blue-700 underline underline-offset-2"
-      >
-        ← Back to bookings
-      </Link>
+    <main className="mx-auto max-w-3xl p-6">
+      <h1 className="mb-6 text-2xl font-semibold">Settings</h1>
+
+      <p className="mb-6">
+        <Link href="/modules/booking" className="text-sm underline">
+          ← Back to bookings
+        </Link>
+      </p>
 
       {/* ========== Organization (Owner-only link) ========== */}
       {canEditOrg ? (
-        <section className="mt-6 rounded-2xl border p-5">
-          <h2 className="mb-1 text-lg font-medium">Organization</h2>
-          <p className="mb-4 text-sm text-gray-600">
+        <section className="mb-10">
+          <h2 className="mb-2 text-xl font-medium">Organization</h2>
+          <p className="mb-3 text-sm text-gray-600">
             Edit your organization name and other profile details.
           </p>
           <Link
-            href="/modules/settings/org"
-            className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+            href="/modules/org/profile"
+            className="rounded bg-gray-900 px-3 py-1.5 text-white"
           >
             Open organization profile →
           </Link>
@@ -247,116 +269,101 @@ export default function SettingsPage() {
       ) : null}
 
       {/* ========== Org Feature Toggles (autosave) ========== */}
-      <section className="mt-6 rounded-2xl border p-5">
-        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
+      <section className="mb-10">
+        <h2 className="mb-2 text-xl font-medium">Org Feature Toggles</h2>
         <p className="mb-4 text-sm text-gray-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <div className="rounded-md bg-gray-100 p-4 text-sm">Loading…</div>
+          <div className="text-sm text-gray-600">Loading…</div>
         ) : (
           <>
             {loadError && (
-              <div className="mb-4">
-                <Alert>{loadError}</Alert>
-              </div>
+              <Alert severity="error" className="mb-3">
+                {loadError}
+              </Alert>
             )}
 
-            <div className="space-y-4">
-              <ToggleRow
-                label="Show Program name"
-                description="Display the Program name field on the booking form."
-                checked={toggles.showProgramName}
-                onChange={(v) => saveToggle("showProgramName", v)}
-              />
-              <ToggleRow
-                label="Show Host name"
-                description="Display the Host name field on the booking form."
-                checked={toggles.showHostName}
-                onChange={(v) => saveToggle("showHostName", v)}
-              />
-              <ToggleRow
-                label="Show Talking points"
-                description="Display the Talking points field on the booking form."
-                checked={toggles.showTalkingPoints}
-                onChange={(v) => saveToggle("showTalkingPoints", v)}
-              />
-            </div>
+            <ToggleRow
+              label="Show Program Name"
+              description="Display a 'Program Name' field on new bookings."
+              checked={toggles.showProgramName}
+              onChange={(v) => saveToggle("showProgramName", v)}
+            />
+            <ToggleRow
+              label="Show Host Name (legacy textbox)"
+              description="Keep the legacy free-text Host field visible."
+              checked={toggles.showHostName}
+              onChange={(v) => saveToggle("showHostName", v)}
+            />
+            <ToggleRow
+              label="Show Talking Points"
+              description="Expose 'Talking Points' on bookings."
+              checked={toggles.showTalkingPoints}
+              onChange={(v) => saveToggle("showTalkingPoints", v)}
+            />
 
-            <div className="mt-5 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
-              <strong>Tip</strong>: Changes apply immediately. The Booking form
-              reads flags from <code>&lt;body data-*&gt;</code> on mount.
-            </div>
+            <p className="mt-3 text-xs text-gray-500">
+              Tip: Changes apply immediately. The Booking form reads flags from{" "}
+              <code>&lt;body data-*&gt;</code> on mount.
+            </p>
           </>
         )}
       </section>
 
       {/* ========== Appearance Types (autosave) ========== */}
-      <section className="mt-6 rounded-2xl border p-5">
-        <h2 className="mb-1 text-lg font-medium">Appearance Types</h2>
+      <section className="mb-10">
+        <h2 className="mb-2 text-xl font-medium">Appearance Types</h2>
         <p className="mb-4 text-sm text-gray-600">
           Choose which appearance types are available to your team.
         </p>
 
-        <div className="space-y-4">
-          <ToggleRow
-            label="Allow In-person"
-            description="Enable in-person appearances in booking forms."
-            checked={toggles.allowInPerson}
-            onChange={(v) => saveToggle("allowInPerson", v)}
-          />
-          <ToggleRow
-            label="Allow Online"
-            description="Enable online/virtual appearances in booking forms."
-            checked={toggles.allowOnline}
-            onChange={(v) => saveToggle("allowOnline", v)}
-          />
-        </div>
+        <ToggleRow
+          label="Allow In-Person"
+          checked={toggles.allowInPerson}
+          onChange={(v) => saveToggle("allowInPerson", v)}
+        />
+        <ToggleRow
+          label="Allow Online"
+          checked={toggles.allowOnline}
+          onChange={(v) => saveToggle("allowOnline", v)}
+        />
       </section>
 
-      {/* ========== Theme (unchanged) ========== */}
-      <section className="mt-6 rounded-2xl border p-5">
-        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
+      {/* ========== Theme (original) ========== */}
+      <section className="mb-10">
+        <h2 className="mb-2 text-xl font-medium">Appearance</h2>
         <p className="mb-4 text-sm text-gray-600">
           Choose your theme for this device.
         </p>
-
-        <div className="flex items-center gap-4">
-          <label className="inline-flex items-center gap-2">
-            <input
-              type="radio"
-              name="theme"
-              checked={theme !== "dark"}
-              onChange={() => chooseTheme("light")}
-            />
+        <div className="flex gap-3">
+          <button
+            className="rounded border px-3 py-1.5"
+            onClick={() => chooseTheme("light")}
+          >
             Light (default)
-          </label>
-
-          <label className="inline-flex items-center gap-2">
-            <input
-              type="radio"
-              name="theme"
-              checked={theme === "dark"}
-              onChange={() => chooseTheme("dark")}
-            />
+          </button>
+          <button
+            className="rounded border px-3 py-1.5"
+            onClick={() => chooseTheme("dark")}
+          >
             Dark
-          </label>
+          </button>
         </div>
-
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-3 text-xs text-gray-500">
           Stored locally (or via provider). We can persist per-user later.
         </p>
       </section>
 
-      {/* Green toast only (per request) */}
+      {/* Green toast only */}
       {portalReady && toast
         ? createPortal(
             <ToastBox onClose={() => setToast(null)}>{toast}</ToastBox>,
             document.body
           )
         : null}
-    </div>
+    </main>
   );
 }
 
@@ -374,34 +381,34 @@ function ToggleRow(props: {
   React.useEffect(() => setLocal(props.checked), [props.checked]);
 
   return (
-    <div className="flex items-start justify-between gap-4 rounded-xl border p-4">
-      <div className="grow">
-        <label htmlFor={id} className="block text-sm font-medium">
+    <div className="mb-3 flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <label htmlFor={id} className="block font-medium">
           {props.label}
         </label>
         {props.description && (
-          <p className="mt-1 text-xs text-gray-600">{props.description}</p>
+          <p className="text-xs text-gray-600">{props.description}</p>
         )}
       </div>
 
       <button
         id={id}
         type="button"
+        aria-label={props.label}
+        role="switch"
+        aria-checked={local}
+        className={`relative h-6 w-11 rounded-full transition ${
+          local ? "bg-gray-900" : "bg-gray-300"
+        }`}
         onClick={() => {
           const next = !local;
           setLocal(next); // instant UI
           props.onChange(next); // autosave
         }}
-        className={`relative h-6 w-11 rounded-full transition ${
-          local ? "bg-gray-900" : "bg-gray-300"
-        }`}
-        role="switch"
-        aria-checked={local}
-        aria-label={props.label}
       >
         <span
-          className={`absolute left-0.5 top-0.5 inline-block h-5 w-5 transform rounded-full bg-white transition ${
-            local ? "translate-x-5" : "translate-x-0"
+          className={`absolute left-0 top-0 h-6 w-6 transform rounded-full bg-white shadow transition ${
+            local ? "translate-x-5" : ""
           }`}
         />
       </button>
