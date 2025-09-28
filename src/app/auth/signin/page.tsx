@@ -24,7 +24,7 @@ export default function SignInPage() {
       callbackUrl: "/modules/booking",
     });
 
-    // If redirect is true, NextAuth will navigate away; no need to handle res here
+    /// If redirect is true, NextAuth will navigate away; no need to handle res here
     setLoading(false);
   }
 
