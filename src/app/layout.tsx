@@ -1,138 +1,135 @@
-// src/lib/auth.ts
-import type { NextAuthOptions } from "next-auth";
-import Credentials from "next-auth/providers/credentials";
-import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+// src/app/layout.tsx
+import "./globals.css";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { getServerSession } from "next-auth";
+// ✅ Use the central auth config + prisma from src/lib/auth
+import { authOptions, prisma } from "../lib/auth";
 
-/**
- * Central NextAuth config for both:
- * - API route handler (src/app/api/auth/[...nextauth]/route.ts)
- * - Server components (e.g., getServerSession(authOptions) in layouts/pages)
- *
- * IMPORTANT: Keep this file Node runtime–friendly (no Edge-only APIs).
- */
+/** ---------- Metadata ---------- */
+export const metadata: Metadata = {
+  title: "NRE",
+  description: "Newsroom booking & expert management",
+};
 
-/* ---------- Prisma singleton (dev-safe) ---------- */
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+/** ---------- Root Layout (Server) ---------- */
+export default async function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const session = await getServerSession(authOptions);
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
+  // Signed-out: show page content (e.g., /auth/signin) with NO app shell
+  if (!session) {
+    return (
+      <html lang="en">
+        <body>{children}</body>
+      </html>
+    );
+  }
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
+  // Signed-in: fetch minimal identity (no "role" field on User model)
+  let name: string | null = null;
+  let displayName: string | null = null;
+  let email: string | null = null;
+  let exclusiveOrgId: string | null = null;
+
+  try {
+    const me = await prisma.user.findUnique({
+      where: { id: (session as any).userId as string },
+      select: {
+        name: true,
+        displayName: true,
+        email: true,
+        exclusiveOrgId: true,
+      },
+    });
+
+    name = me?.name ?? null;
+    displayName = me?.displayName ?? null;
+    email = me?.email ?? null;
+    exclusiveOrgId = (me?.exclusiveOrgId as string | null) ?? null;
+  } catch {
+    // Graceful fallback handled below
+  }
+
+  // Heuristic for role label: Experts have exclusiveOrgId; staff don't.
+  const isExpert = Boolean(exclusiveOrgId);
+  const roleLabel = isExpert ? "EXPERT" : "STAFF";
+
+  // Always show *something* for the user: displayName → name → email → session.user.email
+  const sessionEmail = (session as any)?.user?.email as string | undefined;
+  const display = displayName ?? name ?? email ?? sessionEmail ?? "Account";
+
+  const links = buildLinks({ isExpert });
+
+  return (
+    <html lang="en">
+      <body>
+        {/* Fixed navbar */}
+        <header className="fixed inset-x-0 top-0 z-50 bg-white/70 backdrop-blur border-b">
+          <nav className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-6">
+              <Link href="/modules/booking" className="font-semibold">
+                NRE
+              </Link>
+              <ul className="hidden md:flex items-center gap-4">
+                {links.map((l) => (
+                  <li key={l.href}>
+                    <Link className="hover:underline" href={l.href}>
+                      {l.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="flex items-center gap-4 text-sm">
+              <span className="text-gray-700">{display}</span>
+              <span className="rounded bg-gray-100 px-2 py-0.5">
+                {roleLabel}
+              </span>
+              {/* Link-based sign out keeps this server-only (no client hook required) */}
+              <Link
+                href="/api/auth/signout?from=signout"
+                prefetch={false}
+                className="text-red-600 hover:underline"
+              >
+                Sign out
+              </Link>
+            </div>
+          </nav>
+        </header>
+
+        {/* Spacer to offset the fixed header height */}
+        <div className="h-14" />
+        {children}
+      </body>
+    </html>
+  );
 }
 
-/* ---------- NextAuth options (exported) ---------- */
-export const authOptions: NextAuthOptions = {
-  session: { strategy: "jwt" },
-  pages: {
-    signIn: "/auth/signin",
-    error: "/auth/signin",
-  },
-  providers: [
-    Credentials({
-      name: "Credentials",
-      credentials: {
-        email: {
-          label: "Email",
-          type: "email",
-          placeholder: "dev@example.com",
-        },
-        password: { label: "Password", type: "password" },
-      },
-      authorize: async (creds) => {
-        const email = String((creds as any)?.email || "")
-          .toLowerCase()
-          .trim();
-        const password = String((creds as any)?.password || "");
+/** ---------- Helpers (Server) ---------- */
+function buildLinks({
+  isExpert,
+}: {
+  isExpert: boolean;
+}): Array<{ href: string; label: string }> {
+  const items: Array<{ href: string; label: string }> = [
+    { href: "/modules/booking", label: "Bookings" },
+  ];
 
-        if (!email || !password) return null;
+  if (!isExpert) {
+    items.push({ href: "/modules/experts", label: "Directory" });
+    // If/when we wire exact Owner detection, add:
+    // items.push({ href: "/modules/org/settings", label: "Org Settings" });
+  }
 
-        const user = await prisma.user.findUnique({
-          where: { email },
-          select: {
-            id: true,
-            email: true,
-            name: true,
-            hashedPassword: true,
-            activeOrgId: true,
-          },
-        });
+  items.push({ href: "/modules/settings", label: "Settings" });
+  items.push({ href: "/modules/profile", label: "Profile" });
+  return items;
+}
 
-        if (!user || !user.hashedPassword) return null;
-
-        const ok = await bcrypt.compare(password, user.hashedPassword);
-        if (!ok) return null;
-
-        // Returned object becomes `user` in jwt() after sign-in
-        return {
-          id: user.id,
-          email: user.email,
-          name: user.name ?? user.email,
-          activeOrgId: user.activeOrgId ?? null,
-        } as any;
-      },
-    }),
-  ],
-  callbacks: {
-    async jwt({ token, user }) {
-      if (user) {
-        const u = user as any;
-        (token as any).userId = u.id;
-        (token as any).email = u.email;
-        (token as any).activeOrgId = u.activeOrgId ?? null;
-      }
-      return token;
-    },
-    async session({ session, token }) {
-      (session as any).userId = (token as any).userId;
-
-      if (session.user) {
-        session.user.email = (token as any).email as string;
-      } else {
-        session.user = { email: (token as any).email as string } as any;
-      }
-
-      (session as any).activeOrgId = (token as any).activeOrgId ?? null;
-      return session;
-    },
-    async redirect({ url, baseUrl }) {
-      let u: URL;
-      try {
-        u = new URL(url, baseUrl);
-      } catch {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      const isCallback = u.pathname.startsWith("/api/auth/callback");
-      const isSignInRoute =
-        u.pathname === "/auth/signin" ||
-        u.pathname.startsWith("/api/auth/signin");
-      const isSignOutApi = u.pathname.startsWith("/api/auth/signout");
-
-      // After successful sign-in or callback → Bookings
-      if (isSignInRoute || isCallback) {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      // After sign-out (or root fallback) → Sign-in
-      const isBaseRoot =
-        u.origin === baseUrl && (u.pathname === "/" || u.pathname === "");
-      if (
-        isSignOutApi ||
-        isBaseRoot ||
-        u.searchParams.get("from") === "signout"
-      ) {
-        return `${baseUrl}/auth/signin`;
-      }
-
-      if (u.origin === baseUrl) return u.toString(); // allow same-origin
-      return baseUrl; // block external redirects
-    },
-  },
-  secret: process.env.NEXTAUTH_SECRET,
-  debug: process.env.NODE_ENV === "development",
-};
+/** Keep Node.js runtime here (Prisma not compatible with Edge) */
+export const runtime = "nodejs";
