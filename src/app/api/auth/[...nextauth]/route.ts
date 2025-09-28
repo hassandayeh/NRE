@@ -1,19 +1,33 @@
-// src/app/api/auth/[...nextauth]/route.ts
-import NextAuth, { NextAuthOptions } from "next-auth";
+/**
+ * NextAuth route handler (App Router).
+ * Requirements for Next.js route files:
+ * - Only export HTTP handlers (GET/POST) and allowed config fields (e.g., runtime).
+ * - Do NOT export arbitrary values (e.g., `prisma`, `authOptions`) or Next.js will error.
+ * - Keep Node.js runtime because Prisma needs Node APIs (not Edge).
+ */
+
+import NextAuth, { type NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
-// ---- Prisma singleton (dev-safe; avoids multiple clients)
+/* ------------------------ Prisma singleton (dev-safe) ----------------------- */
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-export const prisma =
+
+const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-export const authOptions: NextAuthOptions = {
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+/* ----------------------------- NextAuth options ----------------------------- */
+/** NOTE: This is intentionally NOT exported. Next route files must not export
+ * arbitrary symbols other than GET/POST and a few config fields. */
+const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: {
     signIn: "/auth/signin",
@@ -35,6 +49,7 @@ export const authOptions: NextAuthOptions = {
           .toLowerCase()
           .trim();
         const password = String((creds as any)?.password || "");
+
         if (!email || !password) return null;
 
         const user = await prisma.user.findUnique({
@@ -47,11 +62,13 @@ export const authOptions: NextAuthOptions = {
             activeOrgId: true,
           },
         });
+
         if (!user || !user.hashedPassword) return null;
 
         const ok = await bcrypt.compare(password, user.hashedPassword);
         if (!ok) return null;
 
+        // This object becomes `user` in jwt() once sign-in succeeds
         return {
           id: user.id,
           email: user.email,
@@ -65,19 +82,21 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, user }) {
       if (user) {
         const u = user as any;
-        token.userId = u.id;
-        token.email = u.email;
-        token.activeOrgId = u.activeOrgId ?? null;
+        (token as any).userId = u.id;
+        (token as any).email = u.email;
+        (token as any).activeOrgId = u.activeOrgId ?? null;
       }
       return token;
     },
     async session({ session, token }) {
       (session as any).userId = (token as any).userId;
+
       if (session.user) {
         session.user.email = (token as any).email as string;
       } else {
         session.user = { email: (token as any).email as string } as any;
       }
+
       (session as any).activeOrgId = (token as any).activeOrgId ?? null;
       return session;
     },
@@ -95,13 +114,12 @@ export const authOptions: NextAuthOptions = {
         u.pathname.startsWith("/api/auth/signin");
       const isSignOutApi = u.pathname.startsWith("/api/auth/signout");
 
-      // ✅ After successful sign-in or callback → Bookings
+      // After successful sign-in or callback → Bookings
       if (isSignInRoute || isCallback) {
         return `${baseUrl}/modules/booking`;
       }
 
-      // ✅ After sign-out, NextAuth often redirects to baseUrl ("/") by default.
-      // Treat base-url root as a sign-out fallback and send to /auth/signin.
+      // After sign-out (or root fallback) → Sign-in
       const isBaseRoot =
         u.origin === baseUrl && (u.pathname === "/" || u.pathname === "");
       if (
@@ -121,5 +139,7 @@ export const authOptions: NextAuthOptions = {
   debug: process.env.NODE_ENV === "development",
 };
 
+/* ------------------------------ Route handlers ------------------------------ */
 const handler = NextAuth(authOptions);
 export { handler as GET, handler as POST };
+export const runtime = "nodejs";
