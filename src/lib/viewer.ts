@@ -4,7 +4,7 @@
 import { getServerSession } from "next-auth";
 import { getToken } from "next-auth/jwt";
 import prisma from "./prisma";
-import { authOptions } from "../app/api/auth/[...nextauth]/route";
+import { authOptions } from "./auth";
 
 export type ViewerRole = "OWNER" | "ADMIN" | "PRODUCER" | "EXPERT";
 export type Membership = { orgId: string; role: ViewerRole };

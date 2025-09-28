@@ -1,7 +1,7 @@
 // src/app/api/hosts/search/route.ts
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "../../auth/[...nextauth]/route";
+import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
 import type { Prisma, Role } from "@prisma/client";
 
