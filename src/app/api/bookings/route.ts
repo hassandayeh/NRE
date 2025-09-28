@@ -3,16 +3,20 @@ import { revalidateTag } from "next/cache";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]/route";
 import prisma from "../../../lib/prisma";
-import type { Booking, Role } from "@prisma/client";
+import type { Booking } from "@prisma/client";
 
 /**
- * Features
+ * Features (unchanged)
  * - Legacy create path kept as-is (UNIFIED, ONLINE/IN_PERSON, single expert).
  * - New path (behind BOOKING_GUESTS_V2=true):
  *   • Supports PHONE appearance and full per-guest payload (UNIFIED | PER_GUEST).
  *   • Persists guests into BookingGuest with sane fallbacks.
  *   • Mirrors first EXPERT guest to booking.expertUserId/expertName (back-compat).
  *   • Enforces expert exclusivity for any internal EXPERT guests.
+ *
+ * New in this patch:
+ * - FEATURE_MULTI_HOSTS_WRITE=true → optionally persists BookingHost rows from body.hosts[].
+ *   When false (default), hosts[] is ignored (legacy mirror still supported via host/hostUserId).
  */
 
 type Appearance = "ONLINE" | "IN_PERSON" | "PHONE";
@@ -22,6 +26,7 @@ type ParticipantKind = "EXPERT" | "REPORTER";
 
 const TENANCY_ON = process.env.TENANCY_ENFORCED !== "false";
 const GUESTS_V2_ON = process.env.BOOKING_GUESTS_V2 === "true";
+const MULTI_HOSTS_WRITE_ON = process.env.FEATURE_MULTI_HOSTS_WRITE === "true";
 
 /** ---------- Auth/tenancy helpers ---------- */
 async function getAuthContext() {
@@ -46,14 +51,14 @@ async function getAuthContext() {
       })
     : [];
 
-  const rolesByOrg = new Map<string, Role>();
-  for (const m of memberships) rolesByOrg.set(m.orgId, m.role as Role);
+  const rolesByOrg = new Map<string, string>();
+  for (const m of memberships) rolesByOrg.set(m.orgId, m.role as string);
 
   return { userId, userName, activeOrgId, rolesByOrg, isSignedIn: !!userId };
 }
 
-// Treat OWNER | ADMIN | PRODUCER | HOST as “staff” (HOST is read-only but should see org list)
-function firstStaffOrg(rolesByOrg: Map<string, Role>): string | null {
+// Treat OWNER | ADMIN | PRODUCER | HOST as staff (HOST read-only but sees org list)
+function firstStaffOrg(rolesByOrg: Map<string, string>): string | null {
   for (const [orgId, role] of rolesByOrg) {
     if (
       role === "OWNER" ||
@@ -105,7 +110,7 @@ function coerceInt(val: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** ---------- GET ---------- */
+/** ---------- GET (list) ---------- */
 export async function GET() {
   try {
     const { isSignedIn, userName, userId, activeOrgId, rolesByOrg } =
@@ -126,7 +131,7 @@ export async function GET() {
       return NextResponse.json({ ok: true, bookings }, { status: 200 });
     }
 
-    // Staff view → list by their org (HOST included as read-only staff)
+    // Staff view → list by their org (HOST included)
     const staffOrgId = activeOrgId ?? firstStaffOrg(rolesByOrg);
     if (staffOrgId) {
       bookings = await prisma.booking.findMany({
@@ -134,14 +139,13 @@ export async function GET() {
         orderBy: [{ startAt: "asc" }],
       });
     } else {
-      // Expert view → bookings where the user is the expert OR added as a guest
+      // Expert view → bookings where user is expert or added as guest, or matches legacy name
       bookings = await prisma.booking.findMany({
         where: {
           OR: [
             { expertUserId: userId ?? undefined },
             { guests: { some: { userId: userId ?? undefined } } },
-            // Legacy fallback by name (kept for older rows)
-            { expertName: userName ?? "" },
+            { expertName: userName ?? "" }, // legacy fallback
           ],
         },
         orderBy: [{ startAt: "asc" }],
@@ -158,7 +162,7 @@ export async function GET() {
   }
 }
 
-/** ---------- POST ---------- */
+/** ---------- POST (create) ---------- */
 export async function POST(req: Request) {
   try {
     const { isSignedIn, activeOrgId, rolesByOrg } = await getAuthContext();
@@ -169,8 +173,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Staff-only create (OWNER/PRODUCER only).
-    // HOST is view-only by product rules.
+    // Staff-only create (OWNER/PRODUCER; HOST is view-only)
     const producerOrgId =
       activeOrgId ??
       (() => {
@@ -189,14 +192,15 @@ export async function POST(req: Request) {
 
     const body = await req.json().catch(() => ({} as any));
 
+    // Core fields
     const subject = asTrimmed(body.subject);
     const newsroomName = asTrimmed(body.newsroomName);
     const startAt = coerceISODate(body.startAt);
     const durationMins = coerceInt(body.durationMins);
     const programName = asTrimmed(body.programName);
-    const hostName = asTrimmed(body.hostName); // legacy text field (kept for now)
-    const hostUserIdInput = asTrimmed(body.hostUserId);
-    const talkingPoints = asTrimmed(body.talkingPoints); // <-- added: parsed top-level for both paths
+    const hostName = asTrimmed(body.hostName); // legacy text (kept)
+    const hostUserIdInput = asTrimmed(body.hostUserId); // legacy FK/mirror
+    const talkingPoints = asTrimmed(body.talkingPoints);
 
     if (!subject)
       return NextResponse.json(
@@ -231,7 +235,6 @@ export async function POST(req: Request) {
         appearanceScope === "UNIFIED"
           ? coerceAppearance(body.appearanceType)
           : null;
-
       const locationUrl = asTrimmed(body.locationUrl);
       const locationName = asTrimmed(body.locationName);
       const locationAddress = asTrimmed(body.locationAddress);
@@ -298,6 +301,7 @@ export async function POST(req: Request) {
         dialInfo?: string;
         order?: number;
       };
+
       const rawGuests: GuestInput[] = Array.isArray(body.guests)
         ? body.guests
         : [];
@@ -322,10 +326,9 @@ export async function POST(req: Request) {
         return gi;
       });
 
-      // Determine the primary EXPERT (for back-compat mirroring to booking.expert*)
+      // Determine primary EXPERT (for back-compat mirror to booking.expert*)
       const primaryExpert =
-        guests.find((g) => g.kind === "EXPERT") ?? // As a last resort, any guest
-        guests[0];
+        guests.find((g) => g.kind === "EXPERT") ?? guests[0];
       if (!primaryExpert) {
         return NextResponse.json(
           { ok: false, error: "At least one guest is required." },
@@ -337,7 +340,6 @@ export async function POST(req: Request) {
       const expertUserIds = guests
         .filter((g) => g.kind === "EXPERT" && g.userId)
         .map((g) => g.userId!) as string[];
-
       if (expertUserIds.length > 0) {
         const expertUsers = await prisma.user.findMany({
           where: { id: { in: expertUserIds } },
@@ -348,7 +350,6 @@ export async function POST(req: Request) {
             exclusiveOrgId: true,
           },
         });
-
         for (const ex of expertUsers) {
           const vis = (ex as any).expertVisStatus ?? "PUBLIC";
           if (
@@ -368,38 +369,34 @@ export async function POST(req: Request) {
         }
       }
 
-      // Build booking create data
+      // Build booking create data (unchanged fields)
       const bookingData = {
         subject,
         newsroomName,
         programName: programName ?? "",
         hostName: hostName ?? "",
-        talkingPoints: talkingPoints ?? "", // <-- added: persist talkingPoints on V2 create
+        talkingPoints: talkingPoints ?? "",
         appearanceScope,
         accessProvisioning,
         appearanceType:
-          appearanceScope === "UNIFIED" ? unifiedAppearanceType : null, // defaults/fallbacks
+          appearanceScope === "UNIFIED" ? unifiedAppearanceType : null,
         locationUrl: locationUrl ?? "",
         locationName: locationName ?? "",
         locationAddress: locationAddress ?? "",
         dialInfo: dialInfo ?? "",
-        // required fields
-        startAt: startAt!, // validated above
-        durationMins: durationMins!, // validated above
-        // tenancy
+        startAt: startAt!,
+        durationMins: durationMins!,
         organization: { connect: { id: producerOrgId } },
-        // back-compat mirror
         expertName: (primaryExpert.name as string) ?? "Expert",
         ...(primaryExpert.userId
           ? { expert: { connect: { id: primaryExpert.userId } } }
           : {}),
-        // host FK (optional)
         ...(hostUserIdInput
           ? { host: { connect: { id: hostUserIdInput } } }
           : {}),
-      } as const;
+      };
 
-      // Transaction: create booking, then guests
+      // Transaction: create booking, then guests (and hosts[] if flag ON)
       const created = await prisma.$transaction(async (tx) => {
         const b = await tx.booking.create({ data: bookingData });
 
@@ -412,7 +409,6 @@ export async function POST(req: Request) {
             venueAddress: bookingData.locationAddress || null,
             dialInfo: bookingData.dialInfo || null,
           };
-
           await tx.bookingGuest.createMany({
             data: guests.map((g, idx) => {
               const type = g.appearanceType ?? defaults.type ?? "ONLINE";
@@ -424,8 +420,7 @@ export async function POST(req: Request) {
                 order: Number.isFinite(g.order as any)
                   ? (g.order as number)
                   : idx,
-                appearanceType: type as any, // enum satisfied by string literal
-                // apply fallbacks per type
+                appearanceType: type as any,
                 joinUrl:
                   type === "ONLINE" ? g.joinUrl || defaults.onlineUrl : null,
                 venueName:
@@ -443,6 +438,27 @@ export async function POST(req: Request) {
           });
         }
 
+        // ✅ NEW: persist hosts[] only when the feature flag is ON
+        if (
+          MULTI_HOSTS_WRITE_ON &&
+          Array.isArray(body.hosts) &&
+          body.hosts.length > 0
+        ) {
+          await tx.bookingHost.createMany({
+            data: body.hosts.map((h: any, i: number) => ({
+              bookingId: b.id,
+              userId: h?.userId ? String(h.userId) : null,
+              name: h?.name ? String(h.name) : "Host",
+              order: Number.isFinite(h?.order) ? Number(h.order) : i,
+              appearanceType: coerceAppearance(h?.appearanceType) ?? "ONLINE",
+              joinUrl: asTrimmed(h?.joinUrl) ?? null,
+              venueName: asTrimmed(h?.venueName) ?? null,
+              venueAddress: asTrimmed(h?.venueAddress) ?? null,
+              dialInfo: asTrimmed(h?.dialInfo) ?? null,
+            })),
+          });
+        }
+
         return b;
       });
 
@@ -450,13 +466,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, booking: created }, { status: 201 });
     }
 
-    // ---------- Path B: Legacy payload (no flag) ----------
+    // ---------- Path B: Legacy payload (unchanged) ----------
     const expertUserIdInput = asTrimmed(body.expertUserId);
     const expertNameInput = asTrimmed(body.expertName ?? body.guestName);
     const appearanceType = coerceAppearance(body.appearanceType);
     const locationName = asTrimmed(body.locationName);
     const locationUrl = asTrimmed(body.locationUrl ?? body.meetingLink);
-    // talkingPoints is already parsed above
 
     if (!expertUserIdInput && !expertNameInput)
       return NextResponse.json(
@@ -505,7 +520,7 @@ export async function POST(req: Request) {
       data: {
         subject,
         newsroomName,
-        expertName: (expert as any).name ?? expertNameInput ?? "Expert", // legacy list cards
+        expertName: (expert as any).name ?? expertNameInput ?? "Expert",
         appearanceScope: "UNIFIED",
         appearanceType,
         startAt,

@@ -201,24 +201,50 @@ function AddGuestPicker(props: {
   async function fetchPublicRows(): Promise<ParticipantRow[]> {
     const sp = new URLSearchParams({ visibility: "public", take: "20" });
     if (debouncedQ) sp.set("q", debouncedQ);
+
+    // ⬇️ add booking window so the API can compute availability
+    if (haveWindow) {
+      const start = new Date(startAtISO);
+      const end = new Date(start.getTime() + durationMins * 60_000);
+      sp.set("start", start.toISOString());
+      sp.set("end", end.toISOString());
+      // also include the alternate shape for maximum compatibility
+      sp.set("startAt", start.toISOString());
+      sp.set("durationMins", String(durationMins));
+    }
+
+    // ⬇️ let the server pre-filter if supported
+    if (onlyAvailable) sp.set("onlyAvailable", "true");
+
     const res = await fetch(`/api/experts/search?${sp.toString()}`, {
       credentials: "include",
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok)
       throw new Error(j?.error || `Public search failed (${res.status})`);
+
     const items: any[] = Array.isArray(j.items) ? j.items : [];
-    return items.map((e: any) => ({
-      id: String(e.id),
-      name: (e.name as string) ?? null,
-      kind: "EXPERT" as const,
-      city: e.city ?? null,
-      countryCode: e.countryCode ?? null,
-      tags: e.tags ?? [],
-      availability: e.availability?.status
-        ? { status: e.availability.status }
-        : { status: "UNKNOWN" as const },
-    }));
+
+    return items.map((e: any) => {
+      // accept both string and {status} shapes without regressions
+      const avail = (e as any).availability;
+      const status =
+        typeof avail === "string"
+          ? avail
+          : avail?.status
+          ? avail.status
+          : "UNKNOWN";
+
+      return {
+        id: String(e.id),
+        name: (e.name as string) ?? null,
+        kind: "EXPERT" as const,
+        city: e.city ?? null,
+        countryCode: e.countryCode ?? null,
+        tags: e.tags ?? [],
+        availability: { status } as ParticipantRow["availability"],
+      };
+    });
   }
 
   async function run() {

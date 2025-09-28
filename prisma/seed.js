@@ -1,21 +1,18 @@
 // prisma/seed.js
-// Rich seed: 2 orgs; staff (Owner/Producers/Hosts/Reporters), Exclusive & Public Experts, sample bookings.
-// Passwords: ALWAYS "123".
-// Safe to run after `prisma migrate reset` (fresh DB).
-// Uses CommonJS per package.json ("type": not module).
+// Rich seed: 2 orgs; staff (Owner/Producers/Hosts/Reporters), Exclusive & Public Experts,
+// sample bookings including multi-host demos. Passwords: ALWAYS "123".
+// Safe to run after `prisma migrate reset` (fresh DB). CommonJS per package.json.
 
 const { PrismaClient } = require("@prisma/client");
 const bcrypt = require("bcryptjs");
-
 const prisma = new PrismaClient();
 
 const PASSWORD = "123";
 
-// Simple helper to stagger future times
+/** Simple helpers for time windows */
 function addMinutes(date, mins) {
   return new Date(date.getTime() + mins * 60 * 1000);
 }
-
 function atNext(hourLocal, minuteLocal = 0) {
   const d = new Date();
   d.setHours(hourLocal, minuteLocal, 0, 0);
@@ -28,7 +25,7 @@ async function main() {
 
   const hashed = await bcrypt.hash(PASSWORD, 10);
 
-  // ---------- Create Orgs + Settings ----------
+  /* ---------- Create Orgs + Settings ---------- */
   const orgA = await prisma.organization.create({
     data: {
       name: "Org A",
@@ -59,7 +56,7 @@ async function main() {
     },
   });
 
-  // Utility to create a user (optionally with membership role in an org)
+  /* ---------- User factories ---------- */
   async function createStaff({
     displayName,
     email,
@@ -81,19 +78,14 @@ async function main() {
         countryCode,
         timeZone,
         memberships: {
-          create: [
-            {
-              role,
-              organization: { connect: { id: org.id } },
-            },
-          ],
+          create: [{ role, organization: { connect: { id: org.id } } }],
         },
       },
     });
     return user;
   }
 
-  // Utility to create an expert (PUBLIC or EXCLUSIVE)
+  // PUBLIC / EXCLUSIVE experts (standalone users, optionally tied to an org)
   async function createExpert({
     displayName,
     email,
@@ -122,22 +114,21 @@ async function main() {
         city,
         countryCode,
         timeZone,
-        expertVisStatus: visibility, // PUBLIC | EXCLUSIVE
+        expertVisStatus: visibility, // Prisma field (column mapped to expertStatus)
         exclusiveOrgId,
       },
     });
   }
 
-  // Image source (stable dev avatars)
+  // Dev avatars
   const img = (n) => `https://i.pravatar.cc/300?img=${n}`;
 
-  // ---------- STAFF PER ORG ----------
-  const staffIndex = { A: 1, B: 1 }; // just to vary avatar ids
+  /* ---------- STAFF PER ORG ---------- */
+  const staffIndex = { A: 1, B: 1 }; // vary avatar ids a bit
 
   async function seedOrgStaff(label, org) {
     const idx = staffIndex[label];
 
-    // 1 Owner
     const owner = await createStaff({
       displayName: `Owner ${label}`,
       email: `owner.${label.toLowerCase()}@nre.test`,
@@ -146,7 +137,6 @@ async function main() {
       role: "OWNER",
     });
 
-    // 2 Producers
     const producers = await Promise.all(
       [1, 2].map((i) =>
         createStaff({
@@ -159,7 +149,6 @@ async function main() {
       )
     );
 
-    // 3 Hosts
     const hosts = await Promise.all(
       [1, 2, 3].map((i) =>
         createStaff({
@@ -172,7 +161,6 @@ async function main() {
       )
     );
 
-    // 5 Reporters (requires Role.REPORTER in schema)
     const reporters = await Promise.all(
       [1, 2, 3, 4, 5].map((i) =>
         createStaff({
@@ -186,14 +174,13 @@ async function main() {
     );
 
     staffIndex[label] += 1;
-
     return { owner, producers, hosts, reporters };
   }
 
   const staffA = await seedOrgStaff("A", orgA);
   const staffB = await seedOrgStaff("B", orgB);
 
-  // ---------- EXCLUSIVE EXPERTS PER ORG ----------
+  /* ---------- EXCLUSIVE EXPERTS PER ORG ---------- */
   async function seedExclusiveExperts(label, org) {
     return Promise.all(
       [1, 2, 3, 4].map((i) =>
@@ -217,7 +204,7 @@ async function main() {
   const exclusiveA = await seedExclusiveExperts("A", orgA);
   const exclusiveB = await seedExclusiveExperts("B", orgB);
 
-  // ---------- PUBLIC EXPERTS (10 total, no org) ----------
+  /* ---------- PUBLIC EXPERTS (10 total, no org) ---------- */
   await Promise.all(
     Array.from({ length: 10 }).map((_, i) =>
       createExpert({
@@ -237,66 +224,172 @@ async function main() {
     )
   );
 
-  // ---------- SAMPLE BOOKINGS to power availability badges ----------
-  // We’ll create a few bookings in the next 7 days for Hosts + Experts + a Reporter.
+  /* ---------- Booking factory (supports guests[] & hosts[] + host model) ---------- */
+  /**
+   * @param {Object} params
+   * @param {any} params.org
+   * @param {string} params.subject
+   * @param {Date} params.startAt
+   * @param {number} [params.durationMins=45]
+   * @param {"ONLINE"|"IN_PERSON"|"PHONE"} [params.appearanceType="ONLINE"]  // guest UNIFIED default
+   * @param {string} [params.newsroomName]
+   * @param {string} [params.expertUserId]
+   * @param {string} [params.expertName]
+   * @param {string} [params.hostUserId]  // legacy mirror (optional)
+   * @param {Array} [params.guests=[]]    // array of guest rows
+   * @param {Array} [params.hosts=[]]     // array of host rows
+   * @param {Object} [params.hostModel]   // host model defaults & switches
+   */
   async function makeBooking({
     org,
     subject,
     startAt,
     durationMins = 45,
-    appearanceType = "ONLINE",
-    hostUserId,
+    appearanceType = "ONLINE", // guests UNIFIED default
+    newsroomName = "Newsroom",
     expertUserId,
     expertName,
-    newsroomName,
-    guests = [], // array of { userId, name, kind, appearanceType, joinUrl|venueName|dialInfo }
+    hostUserId,
+    guests = [],
+    hosts = [],
+    hostModel = {},
   }) {
+    // Resolve host model defaults
+    const {
+      hostAppearanceScope = "UNIFIED",
+      hostAccessProvisioning = "SHARED",
+      hostAppearanceType = "ONLINE",
+      hostLocationUrl = null,
+      hostLocationName = null,
+      hostLocationAddress = null,
+      hostDialInfo = null,
+    } = hostModel;
+
+    // Back-compat mirror: if hosts[] exists and hostUserId not set, mirror hosts[0]
+    const h0 = hosts[0] || null;
+    const mirrorHostUserId = hostUserId || (h0 ? h0.userId : null);
+    const mirrorHostName = h0 ? h0.name : null;
+
     return prisma.booking.create({
       data: {
         orgId: org.id,
         subject,
+        newsroomName,
         startAt,
         durationMins,
+
+        // Guests model (UNIFIED defaults)
         appearanceScope: "UNIFIED",
         appearanceType,
+        accessProvisioning: "SHARED",
         locationUrl:
-          appearanceType === "ONLINE" ? "https://meet.example/test" : null,
+          appearanceType === "ONLINE" ? "https://meet.example/default" : null,
+
+        // Legacy mirrors
         expertUserId: expertUserId || null,
-        hostUserId: hostUserId || null,
-        expertName,
-        newsroomName,
+        expertName: expertName || null,
+        hostUserId: mirrorHostUserId,
+        hostName: mirrorHostName,
+
+        // Hosts dual model fields (for View/Edit parity)
+        hostAppearanceScope,
+        hostAccessProvisioning,
+        hostAppearanceType:
+          hostAppearanceScope === "UNIFIED" ? hostAppearanceType : null,
+        hostLocationUrl:
+          hostAppearanceScope === "UNIFIED" &&
+          hostAccessProvisioning === "SHARED"
+            ? hostLocationUrl
+            : null,
+        hostLocationName:
+          hostAppearanceScope === "UNIFIED" &&
+          hostAccessProvisioning === "SHARED"
+            ? hostLocationName
+            : null,
+        hostLocationAddress:
+          hostAppearanceScope === "UNIFIED" &&
+          hostAccessProvisioning === "SHARED"
+            ? hostLocationAddress
+            : null,
+        hostDialInfo:
+          hostAppearanceScope === "UNIFIED" &&
+          hostAccessProvisioning === "SHARED"
+            ? hostDialInfo
+            : null,
+
+        // Guests
         guests: {
           create: guests.map((g, order) => ({
             userId: g.userId ?? null,
             name: g.name,
-            kind: g.kind,
+            kind: g.kind, // "EXPERT" | "REPORTER"
             order,
-            appearanceType: g.appearanceType,
+            appearanceType: g.appearanceType, // ONLINE | IN_PERSON | PHONE
             joinUrl: g.joinUrl ?? null,
             venueName: g.venueName ?? null,
             venueAddress: g.venueAddress ?? null,
             dialInfo: g.dialInfo ?? null,
           })),
         },
+
+        // Hosts (multi-hosts)
+        ...(hosts.length
+          ? {
+              hosts: {
+                create: hosts.map((h, order) => ({
+                  userId: h.userId ?? null,
+                  name: h.name || "Host",
+                  order,
+                  appearanceType:
+                    hostAppearanceScope === "UNIFIED"
+                      ? hostAppearanceType
+                      : h.appearanceType || "ONLINE",
+                  joinUrl:
+                    hostAppearanceScope === "UNIFIED" &&
+                    hostAccessProvisioning === "SHARED"
+                      ? null
+                      : h.joinUrl ?? null,
+                  venueName:
+                    hostAppearanceScope === "UNIFIED" &&
+                    hostAccessProvisioning === "SHARED"
+                      ? null
+                      : h.venueName ?? null,
+                  venueAddress:
+                    hostAppearanceScope === "UNIFIED" &&
+                    hostAccessProvisioning === "SHARED"
+                      ? null
+                      : h.venueAddress ?? null,
+                  dialInfo:
+                    hostAppearanceScope === "UNIFIED" &&
+                    hostAccessProvisioning === "SHARED"
+                      ? null
+                      : h.dialInfo ?? null,
+                })),
+              },
+            }
+          : {}),
       },
     });
   }
 
+  /* ---------- SAMPLE BOOKINGS ---------- */
+  // Windows to power availability badges
   const t1 = atNext(11, 0); // next 11:00 local
   const t2 = addMinutes(t1, 120); // +2h
   const t3 = addMinutes(t1, 240); // +4h
+  const t4 = addMinutes(t1, 180); // +3h
 
-  // Org A: create 3 bookings
+  // Org A: a few legacy-style bookings (single host mirror) to feed availability
   await makeBooking({
     org: orgA,
     subject: "A: Morning Live Hit",
     startAt: t1,
     durationMins: 40,
     appearanceType: "ONLINE",
+    newsroomName: "Org A Newsroom",
     hostUserId: staffA.hosts[0].id,
     expertUserId: exclusiveA[0].id,
     expertName: exclusiveA[0].displayName ?? "Exclusive Expert A-1",
-    newsroomName: "Org A Newsroom",
     guests: [
       {
         userId: exclusiveA[0].id,
@@ -314,10 +407,10 @@ async function main() {
     startAt: t2,
     durationMins: 30,
     appearanceType: "PHONE",
+    newsroomName: "Org A Newsroom",
     hostUserId: staffA.hosts[1].id,
     expertUserId: exclusiveA[1].id,
     expertName: exclusiveA[1].displayName ?? "Exclusive Expert A-2",
-    newsroomName: "Org A Newsroom",
     guests: [
       {
         userId: exclusiveA[1].id,
@@ -336,16 +429,35 @@ async function main() {
     ],
   });
 
+  // Org A: **DEMO** multi-host booking (UNIFIED + SHARED + IN_PERSON) with 2 hosts
   await makeBooking({
     org: orgA,
-    subject: "A: In-Person Panel",
+    subject: "A: In-Person Panel (Two Hosts)",
     startAt: t3,
     durationMins: 60,
-    appearanceType: "IN_PERSON",
-    hostUserId: staffA.hosts[2].id,
+    appearanceType: "IN_PERSON", // guest default to show variety
+    newsroomName: "Org A Newsroom",
+    // host model (unified + shared = defaults used; per-host values empty)
+    hostModel: {
+      hostAppearanceScope: "UNIFIED",
+      hostAccessProvisioning: "SHARED",
+      hostAppearanceType: "IN_PERSON",
+      hostLocationName: "Studio A",
+      hostLocationAddress: "1 Nile St, Cairo",
+    },
+    hosts: [
+      {
+        userId: staffA.hosts[0].id,
+        name: staffA.hosts[0].displayName,
+        // per-host fields empty → View shows "(using booking defaults)"
+      },
+      {
+        userId: staffA.hosts[2].id,
+        name: staffA.hosts[2].displayName,
+      },
+    ],
     expertUserId: exclusiveA[2].id,
     expertName: exclusiveA[2].displayName ?? "Exclusive Expert A-3",
-    newsroomName: "Org A Newsroom",
     guests: [
       {
         userId: exclusiveA[2].id,
@@ -358,17 +470,17 @@ async function main() {
     ],
   });
 
-  // Org B: create 2 bookings
+  // Org B: a regular single-host booking
   await makeBooking({
     org: orgB,
     subject: "B: Midday Update",
     startAt: addMinutes(t1, 60),
     durationMins: 30,
     appearanceType: "ONLINE",
+    newsroomName: "Org B Newsroom",
     hostUserId: staffB.hosts[0].id,
     expertUserId: exclusiveB[0].id,
     expertName: exclusiveB[0].displayName ?? "Exclusive Expert B-1",
-    newsroomName: "Org B Newsroom",
     guests: [
       {
         userId: exclusiveB[0].id,
@@ -380,16 +492,35 @@ async function main() {
     ],
   });
 
+  // Org B: **DEMO** mixed-mode multi-host (PER_HOST) to cover link/venue paths
   await makeBooking({
     org: orgB,
-    subject: "B: Reporter De-Brief",
-    startAt: addMinutes(t2, 90),
-    durationMins: 30,
+    subject: "B: Mixed-Mode Roundtable (Two Hosts)",
+    startAt: t4,
+    durationMins: 45,
     appearanceType: "ONLINE",
-    hostUserId: staffB.hosts[1].id,
+    newsroomName: "Org B Newsroom",
+    hostModel: {
+      hostAppearanceScope: "PER_HOST",
+      hostAccessProvisioning: "PER_HOST",
+    },
+    hosts: [
+      {
+        userId: staffB.hosts[0].id,
+        name: staffB.hosts[0].displayName,
+        appearanceType: "ONLINE",
+        joinUrl: "https://meet.example/host.b0",
+      },
+      {
+        userId: staffB.hosts[1].id,
+        name: staffB.hosts[1].displayName,
+        appearanceType: "IN_PERSON",
+        venueName: "Studio B",
+        venueAddress: "200 Corniche, Doha",
+      },
+    ],
     expertUserId: exclusiveB[1].id,
     expertName: exclusiveB[1].displayName ?? "Exclusive Expert B-2",
-    newsroomName: "Org B Newsroom",
     guests: [
       {
         userId: staffB.reporters[1].id,
@@ -408,7 +539,7 @@ async function main() {
     ],
   });
 
-  // ---------- Output handy table ----------
+  /* ---------- Output handy table ---------- */
   const allUsers = await prisma.user.findMany({
     include: { memberships: { include: { organization: true } } },
     orderBy: [{ email: "asc" }],
@@ -433,7 +564,6 @@ async function main() {
   console.log("\nSeeded users (first 50 shown):");
   console.table(rows.slice(0, 50));
   console.log("\nAll passwords are '123'.");
-
   console.log("\nDone.");
 }
 
