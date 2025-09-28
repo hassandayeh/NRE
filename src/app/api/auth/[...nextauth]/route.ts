@@ -1,145 +1,15 @@
 /**
  * NextAuth route handler (App Router).
- * Requirements for Next.js route files:
- * - Only export HTTP handlers (GET/POST) and allowed config fields (e.g., runtime).
- * - Do NOT export arbitrary values (e.g., `prisma`, `authOptions`) or Next.js will error.
- * - Keep Node.js runtime because Prisma needs Node APIs (not Edge).
+ * Keep this file minimal: only export GET/POST and (optionally) runtime.
+ * All configuration (providers, Prisma client, callbacks, etc.) lives in src/lib/auth.ts.
  */
 
-import NextAuth, { type NextAuthOptions } from "next-auth";
-import Credentials from "next-auth/providers/credentials";
-import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import NextAuth from "next-auth";
+// From: src/app/api/auth/[...nextauth]/route.ts  ->  src/lib/auth.ts
+import { authOptions } from "../../../../lib/auth";
 
-/* ------------------------ Prisma singleton (dev-safe) ----------------------- */
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-
-const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
-
-/* ----------------------------- NextAuth options ----------------------------- */
-/** NOTE: This is intentionally NOT exported. Next route files must not export
- * arbitrary symbols other than GET/POST and a few config fields. */
-const authOptions: NextAuthOptions = {
-  session: { strategy: "jwt" },
-  pages: {
-    signIn: "/auth/signin",
-    error: "/auth/signin",
-  },
-  providers: [
-    Credentials({
-      name: "Credentials",
-      credentials: {
-        email: {
-          label: "Email",
-          type: "email",
-          placeholder: "dev@example.com",
-        },
-        password: { label: "Password", type: "password" },
-      },
-      authorize: async (creds) => {
-        const email = String((creds as any)?.email || "")
-          .toLowerCase()
-          .trim();
-        const password = String((creds as any)?.password || "");
-
-        if (!email || !password) return null;
-
-        const user = await prisma.user.findUnique({
-          where: { email },
-          select: {
-            id: true,
-            email: true,
-            name: true,
-            hashedPassword: true,
-            activeOrgId: true,
-          },
-        });
-
-        if (!user || !user.hashedPassword) return null;
-
-        const ok = await bcrypt.compare(password, user.hashedPassword);
-        if (!ok) return null;
-
-        // This object becomes `user` in jwt() once sign-in succeeds
-        return {
-          id: user.id,
-          email: user.email,
-          name: user.name ?? user.email,
-          activeOrgId: user.activeOrgId ?? null,
-        } as any;
-      },
-    }),
-  ],
-  callbacks: {
-    async jwt({ token, user }) {
-      if (user) {
-        const u = user as any;
-        (token as any).userId = u.id;
-        (token as any).email = u.email;
-        (token as any).activeOrgId = u.activeOrgId ?? null;
-      }
-      return token;
-    },
-    async session({ session, token }) {
-      (session as any).userId = (token as any).userId;
-
-      if (session.user) {
-        session.user.email = (token as any).email as string;
-      } else {
-        session.user = { email: (token as any).email as string } as any;
-      }
-
-      (session as any).activeOrgId = (token as any).activeOrgId ?? null;
-      return session;
-    },
-    async redirect({ url, baseUrl }) {
-      let u: URL;
-      try {
-        u = new URL(url, baseUrl);
-      } catch {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      const isCallback = u.pathname.startsWith("/api/auth/callback");
-      const isSignInRoute =
-        u.pathname === "/auth/signin" ||
-        u.pathname.startsWith("/api/auth/signin");
-      const isSignOutApi = u.pathname.startsWith("/api/auth/signout");
-
-      // After successful sign-in or callback → Bookings
-      if (isSignInRoute || isCallback) {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      // After sign-out (or root fallback) → Sign-in
-      const isBaseRoot =
-        u.origin === baseUrl && (u.pathname === "/" || u.pathname === "");
-      if (
-        isSignOutApi ||
-        isBaseRoot ||
-        u.searchParams.get("from") === "signout"
-      ) {
-        return `${baseUrl}/auth/signin`;
-      }
-
-      // Same-origin URLs are allowed; block external redirects
-      if (u.origin === baseUrl) return u.toString();
-      return baseUrl;
-    },
-  },
-  secret: process.env.NEXTAUTH_SECRET,
-  debug: process.env.NODE_ENV === "development",
-};
-
-/* ------------------------------ Route handlers ------------------------------ */
 const handler = NextAuth(authOptions);
 export { handler as GET, handler as POST };
+
+// Prisma requires Node runtime (not Edge).
 export const runtime = "nodejs";
