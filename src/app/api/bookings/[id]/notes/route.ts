@@ -8,13 +8,12 @@ import {
 } from "../../../../../lib/viewer";
 
 /**
- * Auth model:
- * - Staff can READ + POST notes (OWNER/ADMIN/PRODUCER/HOST).
- * - Experts/Guests: cannot read staff notes (403) and cannot post (403).
- *   (Your page already treats 403 on GET as "no visible notes".)
+ * Notes privacy model
+ * - Staff (OWNER/PRODUCER/HOST): READ staff notes, POST notes.
+ * - Guests/Experts: READ only their own notes, POST notes.
  */
 
-// ---------- utils ----------
+// ---------------- utils ----------------
 async function isHostOfOrg(
   userId: string | null,
   orgId: string | null
@@ -27,15 +26,33 @@ async function isHostOfOrg(
   return !!row;
 }
 
-function staffCanReadOrPost(
+function isStaffEditor(
   viewer: Awaited<ReturnType<typeof resolveViewerFromRequest>>,
   orgId: string | null
 ) {
-  // canEditBooking = OWNER/ADMIN/PRODUCER
+  // canEditBooking typically covers OWNER/PRODUCER/etc.
   return orgId ? canEditBooking(viewer, orgId) : false;
 }
 
-// ---------- GET /api/bookings/[id]/notes ----------
+// Compute which authors are staff for this org
+async function resolveStaffAuthorIdsForOrg(
+  orgId: string | null,
+  authorIds: string[]
+): Promise<Set<string>> {
+  if (!TENANCY_ON || !orgId || authorIds.length === 0) return new Set();
+  const STAFF_ROLES = ["OWNER", "ADMIN", "PRODUCER", "HOST"] as const;
+  const rows = await prisma.organizationMembership.findMany({
+    where: {
+      orgId,
+      userId: { in: authorIds },
+      role: { in: STAFF_ROLES as any },
+    },
+    select: { userId: true },
+  });
+  return new Set(rows.map((r) => r.userId));
+}
+
+// ---------------- GET /api/bookings/[id]/notes ----------------
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -60,19 +77,54 @@ export async function GET(
       );
     }
 
-    const isStaff = staffCanReadOrPost(viewer, booking.orgId);
-    const isHost = await isHostOfOrg(viewer.userId, booking.orgId);
+    const staffEditor = isStaffEditor(viewer, booking.orgId);
+    const hostMember = await isHostOfOrg(viewer.userId, booking.orgId);
+    const isStaffOrHost = staffEditor || hostMember;
 
-    if (!isStaff && !isHost) {
-      // Experts/Guests are not allowed to read newsroom notes
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
+    if (isStaffOrHost) {
+      // Staff can read staff-authored notes only
+      const notes = await prisma.bookingNote.findMany({
+        where: { bookingId: booking.id },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          bookingId: true,
+          authorId: true,
+          body: true,
+          createdAt: true,
+          updatedAt: true,
+          author: { select: { id: true, name: true } },
+        },
+      });
+
+      const authorIds = Array.from(
+        new Set(notes.map((n) => n.authorId).filter(Boolean) as string[])
       );
+      const staffAuthorIds = await resolveStaffAuthorIdsForOrg(
+        booking.orgId,
+        authorIds
+      );
+      const staffNotes = notes.filter((n) => staffAuthorIds.has(n.authorId));
+
+      const shaped = staffNotes.map((n) => ({
+        id: n.id,
+        bookingId: n.bookingId,
+        authorId: n.authorId,
+        authorName: n.author?.name ?? "Someone",
+        body: n.body,
+        createdAt: n.createdAt.toISOString(),
+        updatedAt: n.updatedAt.toISOString(),
+      }));
+
+      return NextResponse.json({ ok: true, notes: shaped }, { status: 200 });
     }
 
-    const notes = await prisma.bookingNote.findMany({
-      where: { bookingId: booking.id },
+    // Guest/Expert viewer → return ONLY their own notes for this booking
+    const ownNotes = await prisma.bookingNote.findMany({
+      where: {
+        bookingId: booking.id,
+        authorId: viewer.userId ?? "__none__", // ensures empty when missing id
+      },
       orderBy: { createdAt: "asc" },
       select: {
         id: true,
@@ -85,17 +137,17 @@ export async function GET(
       },
     });
 
-    const shaped = notes.map((n) => ({
+    const shapedOwn = ownNotes.map((n) => ({
       id: n.id,
       bookingId: n.bookingId,
       authorId: n.authorId,
-      authorName: n.author?.name ?? "Someone",
+      authorName: n.author?.name ?? "You",
       body: n.body,
       createdAt: n.createdAt.toISOString(),
       updatedAt: n.updatedAt.toISOString(),
     }));
 
-    return NextResponse.json({ ok: true, notes: shaped }, { status: 200 });
+    return NextResponse.json({ ok: true, notes: shapedOwn }, { status: 200 });
   } catch (err) {
     console.error("GET /api/bookings/[id]/notes error:", err);
     return NextResponse.json(
@@ -105,7 +157,7 @@ export async function GET(
   }
 }
 
-// ---------- POST /api/bookings/[id]/notes ----------
+// ---------------- POST /api/bookings/[id]/notes ----------------
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -130,17 +182,9 @@ export async function POST(
       );
     }
 
-    const isStaff = staffCanReadOrPost(viewer, booking.orgId);
-    const isHost = await isHostOfOrg(viewer.userId, booking.orgId);
-
-    if (!isStaff && !isHost) {
-      return NextResponse.json(
-        { ok: false, error: "You don’t have permission to add notes." },
-        { status: 403 }
-      );
-    }
-
-    const json = await req.json().catch(() => ({} as any));
+    const json = (await req.json().catch(() => ({} as any))) as {
+      body?: string;
+    };
     const body = (typeof json?.body === "string" ? json.body.trim() : "") || "";
     if (!body) {
       return NextResponse.json(

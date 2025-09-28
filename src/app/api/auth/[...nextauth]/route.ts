@@ -14,15 +14,11 @@ export const prisma =
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export const authOptions: NextAuthOptions = {
-  // Use JWT sessions (no DB adapter needed for auth)
   session: { strategy: "jwt" },
-
-  // IMPORTANT: point NextAuth to our custom sign-in page
   pages: {
     signIn: "/auth/signin",
-    error: "/auth/signin", // surface ?error=... on the same page
+    error: "/auth/signin",
   },
-
   providers: [
     Credentials({
       name: "Credentials",
@@ -34,11 +30,11 @@ export const authOptions: NextAuthOptions = {
         },
         password: { label: "Password", type: "password" },
       },
-      authorize: async (creds: Record<string, unknown> | undefined) => {
-        const email = String(creds?.email || "")
+      authorize: async (creds) => {
+        const email = String((creds as any)?.email || "")
           .toLowerCase()
           .trim();
-        const password = String(creds?.password || "");
+        const password = String((creds as any)?.password || "");
         if (!email || !password) return null;
 
         const user = await prisma.user.findUnique({
@@ -61,15 +57,13 @@ export const authOptions: NextAuthOptions = {
           email: user.email,
           name: user.name ?? user.email,
           activeOrgId: user.activeOrgId ?? null,
-        };
+        } as any;
       },
     }),
   ],
-
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        // Persist minimal user data in the JWT
         const u = user as any;
         token.userId = u.id;
         token.email = u.email;
@@ -82,17 +76,48 @@ export const authOptions: NextAuthOptions = {
       if (session.user) {
         session.user.email = (token as any).email as string;
       } else {
-        session.user = { email: (token as any).email as string };
+        session.user = { email: (token as any).email as string } as any;
       }
       (session as any).activeOrgId = (token as any).activeOrgId ?? null;
       return session;
     },
+    async redirect({ url, baseUrl }) {
+      let u: URL;
+      try {
+        u = new URL(url, baseUrl);
+      } catch {
+        return `${baseUrl}/modules/booking`;
+      }
+
+      const isCallback = u.pathname.startsWith("/api/auth/callback");
+      const isSignInRoute =
+        u.pathname === "/auth/signin" ||
+        u.pathname.startsWith("/api/auth/signin");
+      const isSignOutApi = u.pathname.startsWith("/api/auth/signout");
+
+      // ✅ After successful sign-in or callback → Bookings
+      if (isSignInRoute || isCallback) {
+        return `${baseUrl}/modules/booking`;
+      }
+
+      // ✅ After sign-out, NextAuth often redirects to baseUrl ("/") by default.
+      // Treat base-url root as a sign-out fallback and send to /auth/signin.
+      const isBaseRoot =
+        u.origin === baseUrl && (u.pathname === "/" || u.pathname === "");
+      if (
+        isSignOutApi ||
+        isBaseRoot ||
+        u.searchParams.get("from") === "signout"
+      ) {
+        return `${baseUrl}/auth/signin`;
+      }
+
+      // Same-origin URLs are allowed; block external redirects
+      if (u.origin === baseUrl) return u.toString();
+      return baseUrl;
+    },
   },
-
-  // Required for JWT signing (set in .env)
   secret: process.env.NEXTAUTH_SECRET,
-
-  // Helpful logs during dev
   debug: process.env.NODE_ENV === "development",
 };
 
