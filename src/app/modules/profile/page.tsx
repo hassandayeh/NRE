@@ -245,7 +245,6 @@ export default function MyProfilePage() {
               </div>
               <div className="flex items-center justify-center">
                 <div className="size-16 overflow-hidden rounded-full ring-1 ring-gray-200">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     alt="Avatar preview"
                     src={
