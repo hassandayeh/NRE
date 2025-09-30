@@ -4,16 +4,25 @@ import { PrismaClient, BookingParticipantRole as Role } from "@prisma/client";
 
 // Safe Prisma singleton (avoids depending on a local lib path)
 const globalForPrisma = globalThis as unknown as { __prisma?: PrismaClient };
-export const prisma =
-  globalForPrisma.__prisma ?? new PrismaClient({ log: ["warn", "error"] });
-if (process.env.NODE_ENV !== "production") globalForPrisma.__prisma = prisma;
+
+// ⬇️ FIX: no export here (exporting anything other than handlers/config breaks Next routes)
+const prisma =
+  globalForPrisma.__prisma ??
+  new PrismaClient({
+    log: ["warn", "error"],
+  });
+
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.__prisma = prisma;
+}
 
 // Server-side feature flag (default ON). Flip to "false" in .env.local to disable POST/DELETE/GET here.
 const MULTI_PARTICIPANTS_ENABLED =
   (process.env.MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
 
-// ----- utilities -----
-const ALLOWED_ROLES = new Set<Role>([
+/* ------------------------------ utilities ------------------------------ */
+
+const ALLOWED_ROLES = new Set<"HOST" | "EXPERT" | "REPORTER" | "INTERPRETER">([
   "HOST",
   "EXPERT",
   "REPORTER",
@@ -29,7 +38,7 @@ type NewItem = {
 
 function toRole(v: string): Role {
   const r = (v || "").toUpperCase() as Role;
-  if (!ALLOWED_ROLES.has(r)) throw new Error(`Invalid role: ${v}`);
+  if (!ALLOWED_ROLES.has(r as any)) throw new Error(`Invalid role: ${v}`);
   return r;
 }
 
@@ -85,6 +94,7 @@ async function ensureSinglePrimaryHost(
     orderBy: { createdAt: "asc" },
     select: { id: true, isPrimaryHost: true },
   });
+
   if (hosts.length === 0) return;
 
   let target: string | null =
@@ -99,17 +109,18 @@ async function ensureSinglePrimaryHost(
     where: { bookingId, role: "HOST" },
     data: { isPrimaryHost: false },
   });
+
   await prisma.bookingParticipant.update({
     where: { id: target },
     data: { isPrimaryHost: true },
   });
 }
 
-/** --------------------------------
+/* -------------------------------- GET -------------------------------- */
+/**
  * GET /api/bookings/:id/participants
- * Read-only. Returns participants grouped by role.
- * Legacy tables untouched.
- * -------------------------------- */
+ * Read-only. Returns participants grouped by role. Legacy tables untouched.
+ */
 export async function GET(
   _req: Request,
   { params }: { params: { id?: string } }
@@ -131,6 +142,7 @@ export async function GET(
     }
 
     const { total, grouped } = await snapshotGrouped(bookingId);
+
     return NextResponse.json(
       { enabled: true, bookingId, total, grouped },
       { status: 200 }
@@ -144,17 +156,19 @@ export async function GET(
   }
 }
 
-/** --------------------------------
+/* -------------------------------- POST -------------------------------- */
+/**
  * POST /api/bookings/:id/participants
  * Body can be:
- *  - { items: NewItem[] }
- *  - NewItem[]
- *  - NewItem
+ * - { items: NewItem[] }
+ * - NewItem[]
+ * - NewItem
+ *
  * Notes:
- *  - Only HOST rows may set isPrimaryHost; others are forced to false.
- *  - Internals (with userId) are de-duped by the DB (unique index) if present.
- *  - After insert, we enforce exactly one primary host (if any hosts exist).
- * -------------------------------- */
+ * - Only HOST rows may set isPrimaryHost; others are forced to false.
+ * - Internals (with userId) are de-duped by the DB (unique index) if present.
+ * - After insert, we enforce exactly one primary host (if any hosts exist).
+ */
 export async function POST(req: Request, ctx: { params: { id?: string } }) {
   try {
     if (!MULTI_PARTICIPANTS_ENABLED) {
@@ -205,7 +219,7 @@ export async function POST(req: Request, ctx: { params: { id?: string } }) {
         userId: raw.userId ?? null,
         role,
         notes: raw.notes ?? null,
-        isPrimaryHost: role === "HOST" ? !!raw.isPrimaryHost : false,
+        isPrimaryHost: role === "HOST" ? !!(raw as any).isPrimaryHost : false,
       };
 
       try {
@@ -245,14 +259,15 @@ export async function POST(req: Request, ctx: { params: { id?: string } }) {
   }
 }
 
-/** --------------------------------
+/* ------------------------------- DELETE ------------------------------- */
+/**
  * DELETE /api/bookings/:id/participants
  * Delete by:
- *  - Query: ?id=<participantId>
- *  - Body:  { id: "<participantId>" }
- *  - Body:  { userId: "<uid>", role: "HOST|EXPERT|REPORTER|INTERPRETER" }
+ * - Query: ?id=
+ * - Body: { id: "" }
+ * - Body: { userId: "", role: "HOST|EXPERT|REPORTER|INTERPRETER" }
  * After delete: if primary host removed and other hosts exist → promote earliest.
- * -------------------------------- */
+ */
 export async function DELETE(req: Request, ctx: { params: { id?: string } }) {
   try {
     if (!MULTI_PARTICIPANTS_ENABLED) {
@@ -272,6 +287,7 @@ export async function DELETE(req: Request, ctx: { params: { id?: string } }) {
 
     const url = new URL(req.url);
     const qpId = url.searchParams.get("id");
+
     let body: any = null;
     try {
       if (req.headers.get("content-length")) {
@@ -285,6 +301,7 @@ export async function DELETE(req: Request, ctx: { params: { id?: string } }) {
 
     if (qpId || body?.id) {
       const id = String(qpId || body.id);
+
       // Check if we're deleting the primary host
       const target = await prisma.bookingParticipant.findUnique({
         where: { id },
@@ -292,6 +309,7 @@ export async function DELETE(req: Request, ctx: { params: { id?: string } }) {
       });
 
       await prisma.bookingParticipant.delete({ where: { id } });
+
       deletedPrimary = !!(
         target &&
         target.role === "HOST" &&

@@ -1,17 +1,29 @@
 // scripts/backfill-participants.ts
 // Backfills normalized BookingParticipant from BookingHost + BookingGuest.
-// Run with:  npx tsx scripts/backfill-participants.ts
-// Optional:  DRY_RUN=true npx tsx scripts/backfill-participants.ts
+// Run:
+//   DRY_RUN=true npx tsx scripts/backfill-participants.ts
+//   npx tsx scripts/backfill-participants.ts
 
 import * as dotenv from "dotenv";
 dotenv.config({ path: ".env" }); // base (Prisma uses this)
 dotenv.config({ path: ".env.local", override: true }); // local overrides
 
-import { PrismaClient, BookingParticipantRole as Role } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
+
+// Local role type (do NOT import non-existent Prisma enum)
+type Role = "HOST" | "EXPERT" | "REPORTER" | "INTERPRETER";
 
 const prisma = new PrismaClient({ log: ["warn", "error"] });
+
 const DRY_RUN = (process.env.DRY_RUN ?? "false") === "true";
 const BATCH = 100;
+
+type Row = {
+  bookingId: string;
+  userId: string | null;
+  role: Role;
+  isPrimaryHost: boolean;
+};
 
 async function backfillBatch(skip: number) {
   const bookings = await prisma.booking.findMany({
@@ -26,18 +38,14 @@ async function backfillBatch(skip: number) {
       },
     },
   });
+
   if (bookings.length === 0) return 0;
 
   for (const b of bookings) {
     const legacyHosts = b.hosts ?? [];
     const legacyGuests = b.guests ?? [];
 
-    const rows: {
-      bookingId: string;
-      userId: string | null;
-      role: Role;
-      isPrimaryHost: boolean;
-    }[] = [];
+    const rows: Row[] = [];
 
     // HOSTS
     let primaryAssigned = false;
@@ -49,21 +57,22 @@ async function backfillBatch(skip: number) {
       rows.push({
         bookingId: b.id,
         userId: h.userId ?? null,
-        role: Role.HOST,
+        role: "HOST",
         isPrimaryHost: !!isPrimary,
       });
 
       if (isPrimary) primaryAssigned = true;
     }
+
     // If no explicit primary, make the first host primary (if any)
     if (!primaryAssigned && legacyHosts.length > 0) {
-      const idx = rows.findIndex((r) => r.role === Role.HOST);
+      const idx = rows.findIndex((r) => r.role === "HOST");
       if (idx >= 0) rows[idx].isPrimaryHost = true;
     }
 
     // GUESTS (EXPERT / REPORTER)
     for (const g of legacyGuests) {
-      const role = g.kind === "REPORTER" ? Role.REPORTER : Role.EXPERT;
+      const role: Role = g.kind === "REPORTER" ? "REPORTER" : "EXPERT";
       rows.push({
         bookingId: b.id,
         userId: g.userId ?? null,
@@ -89,7 +98,7 @@ async function backfillBatch(skip: number) {
       });
       const projected = currentNew + toInsert.length;
       console.log(
-        `[DRY] ${b.id}  legacy=${legacyCount}  new=${currentNew} -> ${projected}  (+${toInsert.length})`
+        `[DRY] ${b.id} legacy=${legacyCount} new=${currentNew} -> ${projected} (+${toInsert.length})`
       );
     } else {
       await prisma.bookingParticipant.createMany({
@@ -105,7 +114,7 @@ async function backfillBatch(skip: number) {
       const newCount = await prisma.bookingParticipant.count({
         where: { bookingId: b.id },
       });
-      console.log(`${b.id}  legacy=${legacyCount}  new=${newCount}`);
+      console.log(`${b.id} legacy=${legacyCount} new=${newCount}`);
     }
   }
 
@@ -114,7 +123,7 @@ async function backfillBatch(skip: number) {
 
 async function main() {
   console.log(
-    `Backfill BookingParticipant (batch=${BATCH})  DRY_RUN=${DRY_RUN}`
+    `Backfill BookingParticipant (batch=${BATCH}) DRY_RUN=${DRY_RUN}`
   );
 
   let skip = 0;
@@ -123,7 +132,6 @@ async function main() {
     if (n === 0) break;
     skip += n;
   }
-
   console.log("Done.");
 }
 

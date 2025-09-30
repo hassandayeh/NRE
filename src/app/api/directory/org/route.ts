@@ -1,56 +1,66 @@
+// src/app/api/directory/org/route.ts
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
+
 import { NextResponse } from "next/server";
-import { PrismaClient, Role, ExpertStatus } from "@prisma/client";
+import prisma from "../../../../lib/prisma";
 import { resolveViewerFromRequest } from "../../../../lib/viewer";
 
-const prisma = new PrismaClient();
-
-/** Parse ISO datetime safely; return Date or null */
-function parseISO(v?: string | null): Date | null {
-  if (!v) return null;
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-/** Check time overlap between [aStart, aEnd) and [bStart, bEnd) */
-function overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
-  return aStart < bEnd && bStart < aEnd;
-}
-
-/** Compute end = start + minutes */
-function addMinutes(d: Date, mins: number): Date {
-  return new Date(d.getTime() + mins * 60_000);
-}
-
-/** Resolve caller orgId using your viewer helper (session + JWT) */
-async function getCallerOrgId(req: Request): Promise<string> {
-  const v = await resolveViewerFromRequest(req);
-  if (!v?.isSignedIn) throw new Response("Unauthorized", { status: 401 });
-
-  const orgId =
-    v.activeOrgId ??
-    (Array.isArray(v.staffOrgIds) && v.staffOrgIds[0]) ??
-    (Array.isArray(v.memberships) && v.memberships[0]?.orgId) ??
-    null;
-
-  if (!orgId) throw new Response("Unauthorized", { status: 401 });
-  return orgId;
-}
+/* ---------- Local types (avoid relying on missing Prisma enums) ---------- */
+type Kind = "HOST" | "REPORTER" | "EXPERT";
+type Availability = "AVAILABLE" | "BUSY" | null;
 
 type DirectoryItem = {
   id: string;
-  kind: "HOST" | "REPORTER" | "EXPERT";
+  kind: Kind;
   displayName: string | null;
   avatarUrl: string | null;
   city: string | null;
   countryCode: string | null;
   languages: string[];
   tags: string[];
-  availability: "AVAILABLE" | "BUSY" | null;
+  availability: Availability;
 };
+
+/* ---------- Helpers ---------- */
+
+function parseISO(v?: string | null): Date | null {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function addMinutes(d: Date, mins: number): Date {
+  return new Date(d.getTime() + mins * 60_000);
+}
+
+async function getCallerOrgId(req: Request): Promise<string> {
+  const v = await resolveViewerFromRequest(req);
+  if (!v?.isSignedIn) throw new Response("Unauthorized", { status: 401 });
+
+  // ✅ Avoid boolean (`false`) leaking from && expressions
+  const fromStaff = Array.isArray(v.staffOrgIds) ? v.staffOrgIds[0] : undefined;
+  const fromMemberships = Array.isArray(v.memberships)
+    ? v.memberships[0]?.orgId
+    : undefined;
+
+  const orgId = v.activeOrgId ?? fromStaff ?? fromMemberships ?? null;
+
+  if (!orgId) throw new Response("Unauthorized", { status: 401 });
+  return orgId;
+}
+
+/* ---------- Route ---------- */
 
 export async function GET(req: Request) {
   try {
-    const orgId = await getCallerOrgId(req); // ✅ correct org scope
+    const orgId = await getCallerOrgId(req); // ✅ scoped to caller org
 
     const url = new URL(req.url);
     const q = (url.searchParams.get("q") || "").trim();
@@ -75,7 +85,7 @@ export async function GET(req: Request) {
     // Hosts in org
     const hosts = await prisma.user.findMany({
       where: {
-        memberships: { some: { orgId, role: Role.HOST } },
+        memberships: { some: { orgId, role: "HOST" } },
         ...nameWhere,
       },
       select: {
@@ -90,11 +100,10 @@ export async function GET(req: Request) {
       orderBy: [{ displayName: "asc" }],
     });
 
-    // Reporters in org — robust to local enum drift
-    const ReporterRole = (Role as any)?.REPORTER ?? ("REPORTER" as any);
+    // Reporters in org
     const reporters = await prisma.user.findMany({
       where: {
-        memberships: { some: { orgId, role: ReporterRole } },
+        memberships: { some: { orgId, role: "REPORTER" } },
         ...nameWhere,
       },
       select: {
@@ -112,7 +121,7 @@ export async function GET(req: Request) {
     // Exclusive experts of org
     const exclusiveExperts = await prisma.user.findMany({
       where: {
-        expertVisStatus: ExpertStatus.EXCLUSIVE,
+        expertVisStatus: "EXCLUSIVE", // was ExpertStatus.EXCLUSIVE
         exclusiveOrgId: orgId,
         ...nameWhere,
       },
@@ -130,29 +139,36 @@ export async function GET(req: Request) {
 
     // Merge with kind tag
     const baseItems: DirectoryItem[] = [
-      ...hosts.map((u) => ({
-        ...u,
-        kind: "HOST" as const,
-        availability: null,
-      })),
-      ...reporters.map((u) => ({
-        ...u,
-        kind: "REPORTER" as const,
-        availability: null,
-      })),
-      ...exclusiveExperts.map((u) => ({
-        ...u,
-        kind: "EXPERT" as const,
-        availability: null,
-      })),
+      ...hosts.map(
+        (u: any): DirectoryItem => ({
+          ...u,
+          kind: "HOST",
+          availability: null,
+        })
+      ),
+      ...reporters.map(
+        (u: any): DirectoryItem => ({
+          ...u,
+          kind: "REPORTER",
+          availability: null,
+        })
+      ),
+      ...exclusiveExperts.map(
+        (u: any): DirectoryItem => ({
+          ...u,
+          kind: "EXPERT",
+          availability: null,
+        })
+      ),
     ];
 
-    // Availability: only when both start & end are provided; otherwise null (hide badge)
+    // Availability only when both start & end are provided
     if (wantAvailability) {
       const ids = baseItems.map((i) => i.id);
       if (ids.length) {
         const from = new Date(start!.getTime() - 8 * 60 * 60 * 1000);
         const to = end!;
+
         const bookings = await prisma.booking.findMany({
           where: {
             startAt: { gte: from, lt: to },
@@ -176,12 +192,15 @@ export async function GET(req: Request) {
           const bStart = b.startAt;
           const bEnd = addMinutes(b.startAt, b.durationMins);
           if (!overlaps(start!, end!, bStart, bEnd)) continue;
+
           const parts = new Set<string>();
           if (b.hostUserId) parts.add(b.hostUserId);
           if (b.expertUserId) parts.add(b.expertUserId);
           for (const g of b.guests) if (g.userId) parts.add(g.userId);
+
           for (const id of parts) busy.add(id);
         }
+
         for (const item of baseItems) {
           item.availability = busy.has(item.id) ? "BUSY" : "AVAILABLE";
         }
@@ -190,12 +209,15 @@ export async function GET(req: Request) {
       for (const item of baseItems) item.availability = null;
     }
 
-    return NextResponse.json({
-      ok: true,
-      window: wantAvailability ? { start, end } : null,
-      count: baseItems.length,
-      items: baseItems,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        window: wantAvailability ? { start, end } : null,
+        count: baseItems.length,
+        items: baseItems,
+      },
+      { status: 200 }
+    );
   } catch (err: any) {
     if (err instanceof Response) return err;
     console.error("[/api/directory/org] error", err);

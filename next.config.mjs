@@ -1,11 +1,6 @@
-/**
- * Base Next.js configuration for the App Router stack.
- * Keep minimal; we’ll remove the eslint bypass after fixing the config.
- */
-
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
+  // Lint and type-check are both enabled during `next build`.
 };
 
 export default nextConfig;

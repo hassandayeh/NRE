@@ -1,9 +1,15 @@
 // src/app/api/hosts/search/route.ts
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
+
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
-import type { Prisma, Role } from "@prisma/client";
+
+/** Minimal where-input type (avoid Prisma namespace types that vary by version) */
+type UserWhereInput = Record<string, unknown>;
 
 /**
  * GET /api/hosts/search
@@ -11,25 +17,26 @@ import type { Prisma, Role } from "@prisma/client";
  * - q?: string
  * - take?: number (1..50, default 20)
  * - cursor?: string (id cursor)
- * - start?: ISO string            \
- * - end?: ISO string              |=> either this pair
+ * - start?: ISO string \
+ * - end?: ISO string     |=> either this pair
  *   OR
- * - startAt?: ISO string          \
- * - durationMins?: number         |=> or this pair
+ * - startAt?: ISO string \
+ * - durationMins?: number |=> or this pair
  *
  * Returns: { items: Array<{ id, name, availability? }>, count, nextCursor }
  * Only lists users who are HOSTs in the caller's org.
  */
 
-function firstStaffOrg(rolesByOrg: Map<string, Role>): string | null {
+function firstStaffOrg(rolesByOrg: Map<string, string>): string | null {
   for (const [orgId, role] of rolesByOrg) {
     if (
       role === "OWNER" ||
       role === "ADMIN" ||
       role === "PRODUCER" ||
       role === "HOST"
-    )
+    ) {
       return orgId;
+    }
   }
   return null;
 }
@@ -40,7 +47,7 @@ function parseWindow(url: URL) {
   const endQS = url.searchParams.get("end");
   const durQS = url.searchParams.get("durationMins");
 
-  let start: Date | null = startQS ? new Date(startQS) : null;
+  const start = startQS ? new Date(startQS) : null;
   let end: Date | null = null;
 
   if (endQS) {
@@ -84,6 +91,7 @@ export async function GET(req: Request) {
       where: { email },
       select: { id: true, activeOrgId: true },
     });
+
     const userId = me?.id ?? null;
 
     const memberships = userId
@@ -93,11 +101,11 @@ export async function GET(req: Request) {
         })
       : [];
 
-    const rolesByOrg = new Map<string, Role>();
-    for (const m of memberships) rolesByOrg.set(m.orgId, m.role as Role);
+    const rolesByOrg = new Map<string, string>();
+    for (const m of memberships) rolesByOrg.set(m.orgId, m.role as string);
+
     const staffOrgId =
       me?.activeOrgId ?? firstStaffOrg(rolesByOrg) ?? undefined;
-
     if (!staffOrgId) {
       // No org context → nothing to list
       return NextResponse.json(
@@ -106,16 +114,16 @@ export async function GET(req: Request) {
       );
     }
 
-    // Build WHERE for host users
-    const AND: Prisma.UserWhereInput[] = [
-      { memberships: { some: { role: "HOST" as Role, orgId: staffOrgId } } },
+    // Build WHERE for host users (typed locally)
+    const AND: UserWhereInput[] = [
+      { memberships: { some: { role: "HOST", orgId: staffOrgId } } },
     ];
     if (q) AND.push({ name: { contains: q, mode: "insensitive" } });
 
-    const where: Prisma.UserWhereInput = { AND };
+    const where: UserWhereInput = { AND };
 
     const users = await prisma.user.findMany({
-      where,
+      where: where as any, // safe: structure matches Prisma where input
       orderBy: [{ name: "asc" }, { id: "asc" }],
       take,
       ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
@@ -126,7 +134,10 @@ export async function GET(req: Request) {
       id: string;
       name: string;
       availability?: { status: "AVAILABLE" | "BUSY" };
-    }> = users.map((u) => ({ id: u.id, name: u.name || "Unnamed" }));
+    }> = users.map((u: { id: string; name: string | null }) => ({
+      id: u.id,
+      name: u.name || "Unnamed",
+    }));
 
     const { start, end } = parseWindow(url);
 
