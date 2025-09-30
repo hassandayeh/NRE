@@ -286,6 +286,150 @@ function effectiveForHost(
   return { kind: "PHONE", value: own ?? def, usedFallback: !own && !!def };
 }
 
+/** ======================================================================
+ * ParticipantsByRolePanel (read-only, flag-gated)
+ * - Fetches /api/bookings/[id]/participants
+ * - Renders sections from response.roles (NO hard-coded role names)
+ * - Read-only: no add/remove/toggles; no “primary” anywhere
+ * ====================================================================== */
+function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
+  const MULTI_PARTICIPANTS_ENABLED =
+    (process.env.NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
+  if (!MULTI_PARTICIPANTS_ENABLED) return null;
+
+  type ParticipantDTO = {
+    id: string;
+    userId: string | null;
+    roleInBooking: string; // enum today; future: string/catalog
+    inviteStatus?: string | null;
+    user?: {
+      id: string;
+      name: string | null;
+      email: string | null;
+      image: string | null;
+    } | null;
+  };
+
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [roles, setRoles] = React.useState<string[]>([]);
+  const [grouped, setGrouped] = React.useState<
+    Record<string, ParticipantDTO[]>
+  >({});
+
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const res = await fetch(`/api/bookings/${bookingId}/participants`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j?.error || `Failed (${res.status})`);
+        if (!alive) return;
+        setRoles(Array.isArray(j.roles) ? j.roles : []);
+        setGrouped(
+          j.grouped && typeof j.grouped === "object"
+            ? (j.grouped as Record<string, ParticipantDTO[]>)
+            : {}
+        );
+      } catch (e: any) {
+        if (alive) setError(e?.message || "Failed to load participants.");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [bookingId]);
+
+  return (
+    <section className="rounded-xl border p-4">
+      <h2 className="mb-2 text-lg font-semibold">Participants (by role)</h2>
+      <p className="mb-4 text-sm text-gray-600">
+        Rendered dynamically from the API’s roles. No role names are hard-coded.
+      </p>
+
+      {loading && <div className="text-sm text-gray-600">Loading…</div>}
+
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-800">
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && roles.length === 0 && (
+        <div className="rounded-md border bg-gray-50 p-3 text-sm text-gray-700">
+          No participants yet.
+        </div>
+      )}
+
+      {!loading &&
+        !error &&
+        roles.map((role) => {
+          const list = grouped?.[role] ?? [];
+          return (
+            <div key={role} className="mb-4">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold tracking-wide">
+                  {role} ({list.length})
+                </h3>
+              </div>
+
+              {list.length === 0 ? (
+                <div className="rounded-md border bg-white p-2 text-sm text-gray-600">
+                  No entries for this role.
+                </div>
+              ) : (
+                <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                  {list.map((p) => {
+                    const name =
+                      p?.user?.name ||
+                      (p as any).name ||
+                      p?.userId ||
+                      "Unknown user";
+                    const invite = (p?.inviteStatus || "").toString();
+                    const pill =
+                      invite === "CONFIRMED"
+                        ? "bg-green-100 text-green-800"
+                        : invite === "DECLINED" || invite === "CANCELLED"
+                        ? "bg-red-100 text-red-800"
+                        : invite
+                        ? "bg-gray-100 text-gray-700"
+                        : "";
+                    return (
+                      <li
+                        key={p.id}
+                        className="flex items-center justify-between rounded-md border bg-white px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">
+                            {name}
+                          </div>
+                          {!!invite && (
+                            <div
+                              className={`mt-0.5 inline-block rounded px-2 py-0.5 text-2xs uppercase ${pill}`}
+                            >
+                              {invite}
+                            </div>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+    </section>
+  );
+}
+
 /* --- Page --- */
 export default function BookingViewPage() {
   const { id } = useParams<{ id: string }>();
@@ -535,6 +679,10 @@ export default function BookingViewPage() {
           </div>
         )}
       </div>
+
+      {MULTI_PARTICIPANTS_ENABLED && (
+        <ParticipantsByRolePanel bookingId={String(id)} />
+      )}
 
       {/* Hosts */}
       <section className="mb-6 rounded-lg border p-4">
