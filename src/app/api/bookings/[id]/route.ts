@@ -7,6 +7,10 @@ import {
   TENANCY_ON,
 } from "../../../../lib/viewer";
 
+/** ===== Feature flags ===== */
+const MULTI_PARTICIPANTS_ENABLED =
+  (process.env.MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
+
 /** ===== Types ===== */
 type AppearanceType = "ONLINE" | "IN_PERSON" | "PHONE";
 type AppearanceScope = "UNIFIED" | "PER_GUEST";
@@ -66,7 +70,6 @@ type UpdatePayload = Partial<{
   hostAppearanceScope: HostAppearanceScope;
   hostAppearanceType?: AppearanceType | null; // when UNIFIED
   hostAccessProvisioning: HostAccessProvisioning;
-
   hostLocationUrl?: string | null;
   hostLocationName?: string | null;
   hostLocationAddress?: string | null;
@@ -84,7 +87,7 @@ function requireField(val: any, name: string) {
   }
 }
 
-// ⬇️ CHANGED: only enforce booking-level defaults when provisioning === SHARED
+// ⬇️ only enforce booking-level defaults when provisioning === SHARED
 function validateUnified(
   scope: AppearanceScope,
   type: AppearanceType | null | undefined,
@@ -104,7 +107,6 @@ function validateUnified(
   if (provisioning !== "SHARED") return;
 
   if (type === "ONLINE") requireField(effective.locationUrl, "locationUrl");
-
   if (type === "IN_PERSON") {
     const hasVenue =
       (effective.locationName && effective.locationName.trim()) ||
@@ -115,7 +117,6 @@ function validateUnified(
       );
     }
   }
-
   if (type === "PHONE") requireField(effective.dialInfo, "dialInfo");
 }
 
@@ -210,9 +211,11 @@ function validateHostModel(
       throw new Error(
         "hostAppearanceType is required when hostAppearanceScope=UNIFIED"
       );
+
     if (hostProvisioning === "SHARED") {
       if (hostType === "ONLINE")
         requireField(hostDefaults.hostLocationUrl, "hostLocationUrl");
+
       if (hostType === "IN_PERSON") {
         const ok =
           (hostDefaults.hostLocationName &&
@@ -224,6 +227,7 @@ function validateHostModel(
             "hostLocationName or hostLocationAddress is required when hosts are UNIFIED+SHARED+IN_PERSON"
           );
       }
+
       if (hostType === "PHONE")
         requireField(hostDefaults.hostDialInfo, "hostDialInfo");
     } else {
@@ -321,6 +325,13 @@ export async function GET(
       );
     }
 
+    // Parse include switches
+    const url = new URL(req.url);
+    const includeParams = url.searchParams.getAll("include");
+    const askParticipants =
+      includeParams.includes("participants") ||
+      url.searchParams.get("includeParticipants") === "true";
+
     const booking = await prisma.booking.findUnique({
       where: { id: params.id },
       select: {
@@ -342,7 +353,7 @@ export async function GET(
         locationAddress: true,
         dialInfo: true,
 
-        // Host dual model (new)
+        // Hosts dual model (new)
         hostAppearanceScope: true,
         hostAppearanceType: true,
         hostAccessProvisioning: true,
@@ -412,11 +423,57 @@ export async function GET(
 
     const canEdit = canEditBooking(viewer, booking.orgId);
 
-    return NextResponse.json({
+    const payload: Record<string, any> = {
       ok: true,
       booking: { ...booking, guests, hosts },
       canEdit,
-    });
+    };
+
+    // Optional: attach normalized participants (grouped)
+    if (askParticipants && MULTI_PARTICIPANTS_ENABLED) {
+      const parts = await prisma.bookingParticipant.findMany({
+        where: { bookingId: booking.id },
+        orderBy: [
+          { role: "asc" },
+          { isPrimaryHost: "desc" },
+          { createdAt: "asc" },
+        ],
+        include: {
+          user: {
+            select: {
+              id: true,
+              displayName: true,
+              name: true,
+              email: true,
+              avatarUrl: true,
+            },
+          },
+        },
+      });
+
+      const grouped: Record<
+        "HOST" | "EXPERT" | "REPORTER" | "INTERPRETER",
+        any[]
+      > = { HOST: [], EXPERT: [], REPORTER: [], INTERPRETER: [] };
+
+      for (const p of parts) {
+        grouped[p.role].push({
+          id: p.id,
+          role: p.role,
+          inviteStatus: p.inviteStatus,
+          isPrimaryHost: p.isPrimaryHost,
+          notes: p.notes,
+          invitedAt: p.invitedAt,
+          respondedAt: p.respondedAt,
+          userId: p.userId,
+          user: p.user,
+        });
+      }
+
+      payload.participantsGrouped = grouped;
+    }
+
+    return NextResponse.json(payload);
   } catch (err) {
     console.error("GET /api/bookings/[id] error:", err);
     return NextResponse.json(
@@ -434,9 +491,11 @@ async function updateBooking(id: string, body: UpdatePayload) {
   // ---------- Guests (existing) ----------
   const scope: AppearanceScope =
     body.appearanceScope ?? (current.appearanceScope as AppearanceScope);
+
   const provisioning: AccessProvisioning =
     body.accessProvisioning ??
     (current.accessProvisioning as AccessProvisioning);
+
   const unifiedType: AppearanceType | null =
     scope === "UNIFIED"
       ? body.appearanceType ??
@@ -465,8 +524,9 @@ async function updateBooking(id: string, body: UpdatePayload) {
     ? sanitizeGuests(body.guests)
     : undefined;
 
-  // ⬇️ CHANGED: pass provisioning so UNIFIED+PER_GUEST doesn't require booking defaults
+  // ⬇️ pass provisioning so UNIFIED+PER_GUEST doesn't require booking defaults
   validateUnified(scope, unifiedType, effectiveDefaults, provisioning);
+
   if (scope === "PER_GUEST") {
     if (nextGuests !== undefined) {
       if (!Array.isArray(nextGuests) || nextGuests.length === 0) {
@@ -589,10 +649,8 @@ async function updateBooking(id: string, body: UpdatePayload) {
           body.programName !== undefined
             ? body.programName
             : current.programName,
-
         hostUserId: nextHostUserId,
         hostName: nextHostName,
-
         talkingPoints:
           body.talkingPoints !== undefined
             ? body.talkingPoints
@@ -601,7 +659,6 @@ async function updateBooking(id: string, body: UpdatePayload) {
         appearanceScope: scope,
         accessProvisioning: provisioning,
         appearanceType: scope === "UNIFIED" ? (unifiedType as any) : null,
-
         locationUrl: effectiveDefaults.locationUrl,
         locationName: effectiveDefaults.locationName,
         locationAddress: effectiveDefaults.locationAddress,
@@ -611,7 +668,6 @@ async function updateBooking(id: string, body: UpdatePayload) {
         hostAccessProvisioning: derivedHostProvisioning as any,
         hostAppearanceType:
           derivedHostScope === "UNIFIED" ? (derivedHostType as any) : null,
-
         hostLocationUrl: hostDefaults.hostLocationUrl,
         hostLocationName: hostDefaults.hostLocationName,
         hostLocationAddress: hostDefaults.hostLocationAddress,
@@ -639,10 +695,13 @@ async function updateBooking(id: string, body: UpdatePayload) {
         });
       }
 
+      // Mirror expert (legacy fields)
       let mirrorExpertUserId: string | null = null;
       let mirrorExpertName: string = "";
+
       const firstInternal = nextGuests.find((g) => !!g.userId) || null;
       const firstAny = nextGuests[0];
+
       if (firstInternal?.userId) {
         const u = await (tx as any).user.findUnique({
           where: { id: firstInternal.userId },
@@ -731,6 +790,7 @@ async function updateBooking(id: string, body: UpdatePayload) {
         });
       }
 
+      // Mirror host (legacy fields)
       let mirrorHostUserId: string | null = null;
       let mirrorHostName: string | null = null;
 
@@ -761,10 +821,7 @@ async function updateBooking(id: string, body: UpdatePayload) {
 
       await tx.booking.update({
         where: { id },
-        data: {
-          hostUserId: mirrorHostUserId,
-          hostName: mirrorHostName,
-        },
+        data: { hostUserId: mirrorHostUserId, hostName: mirrorHostName },
       });
     }
 
