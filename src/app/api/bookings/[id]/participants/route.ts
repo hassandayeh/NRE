@@ -1,312 +1,357 @@
 // src/app/api/bookings/[id]/participants/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "../../../../../lib/prisma";
+import {
+  resolveViewerFromRequest,
+  canEditBooking,
+} from "../../../../../lib/viewer";
+import { Prisma, BookingParticipantRole, InviteStatus } from "@prisma/client";
 
-import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
-
-/** Safe Prisma singleton (don’t export it) */
-const g = globalThis as unknown as { __prisma?: PrismaClient };
-const prisma =
-  g.__prisma ??
-  new PrismaClient({
-    log: ["warn", "error"],
-  });
-if (process.env.NODE_ENV !== "production") g.__prisma = prisma;
-
-/** Server-side flag (ON by default) */
 const MULTI_PARTICIPANTS_ENABLED =
   (process.env.MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
 
-/* ------------------------------ types & utils ------------------------------ */
-
-type Role = "HOST" | "EXPERT" | "REPORTER" | "INTERPRETER";
-const ALLOWED_ROLES: ReadonlySet<Role> = new Set([
-  "HOST",
-  "EXPERT",
-  "REPORTER",
-  "INTERPRETER",
-]);
-
-type NewItem =
-  | {
-      userId?: string | null;
-      /** Accept either roleInBooking or role, case-insensitive */
-      roleInBooking?: Role | string;
-      role?: Role | string;
-      notes?: string | null;
-      /** Ignored; primary concept removed */
-      isPrimaryHost?: boolean;
-    }
-  | null
-  | undefined;
-
-/** Explicit row typing so map() param isn't inferred as any */
-type BookingParticipantRow = {
-  id: string;
-  bookingId: string;
-  userId: string | null;
-  role: Role;
-  notes: string | null;
-  inviteStatus: string | null;
-  invitedAt: Date | null;
-  respondedAt: Date | null;
-  createdAt: Date;
-  user: {
-    id: string;
-    displayName: string | null;
-    name: string | null;
-    email: string | null;
-    avatarUrl: string | null;
-  } | null;
-};
-
-function normalizeRole(v: unknown): Role {
-  const r = String(v ?? "").toUpperCase() as Role;
-  if (!ALLOWED_ROLES.has(r)) throw new Error(`Invalid role: ${v}`);
-  return r;
+/* ----------------------------- helpers ------------------------------ */
+function upcaseString(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s) return null;
+  return s.toUpperCase();
 }
-
-function pickIncomingRole(x: any): Role {
-  if (x?.roleInBooking != null) return normalizeRole(x.roleInBooking);
-  if (x?.role != null) return normalizeRole(x.role);
-  throw new Error("Missing role/roleInBooking");
+function coerceRoleEnum(v: unknown): BookingParticipantRole | null {
+  const s = upcaseString(v);
+  if (!s) return null;
+  const vals = Object.values(BookingParticipantRole) as string[];
+  return vals.includes(s) ? (s as BookingParticipantRole) : null;
 }
-
-/* Build both shapes:
-   - participants: flat array (what your Edit page expects)
-   - grouped: role buckets (back-compat with older callers) */
-async function snapshot(bookingId: string) {
-  const rows = (await prisma.bookingParticipant.findMany({
-    where: { bookingId },
-    orderBy: [{ role: "asc" }, { createdAt: "asc" }], // no primary ordering
-    include: {
-      user: {
-        select: {
-          id: true,
-          displayName: true,
-          name: true,
-          email: true,
-          avatarUrl: true,
-        },
-      },
-    },
-  })) as unknown as BookingParticipantRow[];
-
-  type RoleKey = Role;
-  const grouped: Record<RoleKey, any[]> = {
-    HOST: [],
-    EXPERT: [],
-    REPORTER: [],
-    INTERPRETER: [],
+// STRICT string version (no union) to satisfy includes()
+function coerceStatusEnum(v: unknown): InviteStatus | null {
+  const raw = upcaseString(v);
+  if (!raw) return null;
+  const s = raw === "CANCELED" ? "CANCELLED" : raw; // prisma uses CANCELLED
+  const vals = Object.values(InviteStatus) as string[];
+  return vals.includes(s) ? (s as InviteStatus) : null;
+}
+function asTrimmedOrNull(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length ? t : null;
+}
+function ensureEnabled() {
+  if (!MULTI_PARTICIPANTS_ENABLED) {
+    throw Object.assign(new Error("Participants API is disabled"), {
+      status: 404,
+    });
+  }
+}
+async function canViewerRead(viewer: any, bookingId: string, orgId: string) {
+  if (canEditBooking(viewer, orgId)) return true;
+  if (viewer?.userId) {
+    const exists = await prisma.bookingParticipant.findFirst({
+      where: { bookingId, userId: viewer.userId },
+      select: { id: true },
+    });
+    if (exists) return true;
+  }
+  return false;
+}
+function mapParticipant(p: any) {
+  return {
+    id: p.id,
+    role: p.role as string,
+    inviteStatus: (p.inviteStatus as InviteStatus | null) ?? null,
+    isPrimaryHost: !!p.isPrimaryHost,
+    notes: p.notes ?? null,
+    invitedAt: p.invitedAt ?? null,
+    respondedAt: p.respondedAt ?? null,
+    createdAt: p.createdAt ?? null,
+    updatedAt: p.updatedAt ?? null,
+    userId: p.userId ?? null,
+    user: p.user
+      ? {
+          id: p.user.id,
+          displayName: p.user.displayName,
+          name: p.user.name,
+          email: p.user.email,
+          avatarUrl: p.user.avatarUrl,
+        }
+      : null,
   };
-
-  const participants = rows.map((p: BookingParticipantRow) => {
-    const item = {
-      id: p.id,
-      userId: p.userId,
-      // API uses roleInBooking; DB uses role → map it
-      roleInBooking: p.role as RoleKey,
-      // primary removed intentionally; client can treat missing as false
-      notes: p.notes,
-      inviteStatus: p.inviteStatus,
-      invitedAt: p.invitedAt,
-      respondedAt: p.respondedAt,
-      user: p.user
-        ? {
-            id: p.user.id,
-            name: p.user.displayName ?? p.user.name ?? null,
-            email: p.user.email ?? null,
-            image: p.user.avatarUrl ?? null,
-          }
-        : null,
-    };
-    const r = p.role as RoleKey;
-    grouped[r].push(item);
-    return item;
-  });
-
-  return { participants, grouped, total: participants.length };
+}
+function groupDynamically(rows: Array<{ role: string } & any>) {
+  const grouped: Record<string, any[]> = {};
+  for (const r of rows) {
+    const key = r.role || "UNKNOWN";
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(r);
+  }
+  return grouped;
 }
 
-/* ---------------------------------- GET ---------------------------------- */
-/** GET /api/bookings/:id/participants
- * Returns both:
- *  - participants: ParticipantDTO[]
- *  - grouped: { HOST|EXPERT|REPORTER|INTERPRETER: ParticipantDTO[] }
- */
+/* ------------------------------- GET -------------------------------- */
 export async function GET(
-  _req: Request,
-  { params }: { params: { id?: string } }
+  req: NextRequest,
+  { params }: { params: { id: string } }
 ) {
   try {
-    if (!MULTI_PARTICIPANTS_ENABLED) {
+    ensureEnabled();
+
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer?.isSignedIn) {
       return NextResponse.json(
-        { enabled: false, participants: [], grouped: null },
-        { status: 200 }
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
       );
     }
-    const bookingId = params?.id;
-    if (!bookingId) {
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
+      select: { id: true, orgId: true },
+    });
+    if (!booking) {
       return NextResponse.json(
-        { error: "Missing booking id." },
-        { status: 400 }
+        { ok: false, error: "Not found" },
+        { status: 404 }
       );
     }
-    const { participants, grouped, total } = await snapshot(bookingId);
-    return NextResponse.json(
-      { enabled: true, bookingId, total, participants, grouped },
-      { status: 200 }
+
+    // orgId is non-null in schema; assert to satisfy TS
+    const canRead = await canViewerRead(
+      viewer,
+      booking.id,
+      booking.orgId as string
     );
-  } catch (err) {
-    console.error("GET /bookings/:id/participants failed:", err);
-    return NextResponse.json(
-      { error: "Failed to load participants." },
-      { status: 500 }
-    );
-  }
-}
-
-/* ---------------------------------- POST --------------------------------- */
-/** POST /api/bookings/:id/participants
- * Body accepted:
- *   - { participants: NewItem[] }  ← preferred
- *   - { items: NewItem[] }
- *   - NewItem[]
- *   - NewItem
- * Notes:
- *   - Primary host is not used anymore; any isPrimaryHost sent is ignored.
- */
-export async function POST(req: Request, ctx: { params: { id?: string } }) {
-  try {
-    if (!MULTI_PARTICIPANTS_ENABLED) {
+    if (!canRead) {
       return NextResponse.json(
-        { error: "Participants writes are disabled by flag." },
-        { status: 501 }
+        { ok: false, error: "Not found" },
+        { status: 404 }
       );
     }
 
-    const bookingId = ctx.params?.id;
-    if (!bookingId) {
-      return NextResponse.json(
-        { error: "Missing booking id." },
-        { status: 400 }
-      );
-    }
-
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json(
-        { error: "Invalid JSON body." },
-        { status: 400 }
-      );
-    }
-
-    let items: NewItem[] = [];
-    if (Array.isArray(body)) items = body;
-    else if (Array.isArray(body?.participants)) items = body.participants;
-    else if (Array.isArray(body?.items)) items = body.items;
-    else if (body && typeof body === "object") items = [body];
-    else
-      return NextResponse.json(
-        { error: "No items to create." },
-        { status: 400 }
-      );
-
-    const toCreate = (items as NewItem[]).filter(Boolean).map((x) => ({
-      bookingId,
-      userId: x!.userId ?? null,
-      role: pickIncomingRole(x!),
-      notes: x!.notes ?? null,
-      // isPrimaryHost intentionally not persisted (removed)
-      isPrimaryHost: false,
-    }));
-
-    // Create individually to gracefully ignore duplicates
-    for (const data of toCreate) {
-      try {
-        await prisma.bookingParticipant.create({ data });
-      } catch (e: any) {
-        // P2002 = unique constraint (e.g., same userId+booking+role); ignore
-        if (String(e?.code) !== "P2002") throw e;
-      }
-    }
-
-    const { participants, grouped, total } = await snapshot(bookingId);
-    return NextResponse.json(
-      { ok: true, bookingId, total, participants, grouped },
-      { status: 200 }
-    );
-  } catch (err) {
-    console.error("POST /bookings/:id/participants failed:", err);
-    return NextResponse.json(
-      { error: "Failed to add participants." },
-      { status: 500 }
-    );
-  }
-}
-
-/* -------------------------------- DELETE --------------------------------- */
-/** DELETE /api/bookings/:id/participants
- * Delete by:
- *   - Query: ?id=…            (row id)
- *   - Body: { id: "…" }
- *   - Body: { userId: "…", role: "HOST|EXPERT|REPORTER|INTERPRETER" }
- * No auto-promotion or primary logic.
- */
-export async function DELETE(req: Request, ctx: { params: { id?: string } }) {
-  try {
-    if (!MULTI_PARTICIPANTS_ENABLED) {
-      return NextResponse.json(
-        { error: "Participants writes are disabled by flag." },
-        { status: 501 }
-      );
-    }
-
-    const bookingId = ctx.params?.id;
-    if (!bookingId) {
-      return NextResponse.json(
-        { error: "Missing booking id." },
-        { status: 400 }
-      );
-    }
-
-    const url = new URL(req.url);
-    const qpId = url.searchParams.get("id");
-
-    let body: any = null;
-    try {
-      if (req.headers.get("content-length")) body = await req.json();
-    } catch {
-      // ignore bad body
-    }
-
-    if (qpId || body?.id) {
-      const id = String(qpId || body.id);
-      await prisma.bookingParticipant.delete({ where: { id } });
-    } else if (body?.userId && body?.role) {
-      const role = normalizeRole(body.role);
-      await prisma.bookingParticipant.deleteMany({
-        where: { bookingId, userId: String(body.userId), role },
-      });
-    } else {
-      return NextResponse.json(
-        {
-          error: "Provide ?id=… or body { id } or { userId, role } to delete.",
+    const rows = await prisma.bookingParticipant.findMany({
+      where: { bookingId: booking.id },
+      orderBy: [
+        { role: "asc" },
+        { isPrimaryHost: "desc" },
+        { createdAt: "asc" },
+      ],
+      include: {
+        user: {
+          select: {
+            id: true,
+            displayName: true,
+            name: true,
+            email: true,
+            avatarUrl: true,
+          },
         },
+      },
+    });
+
+    const participants = rows.map(mapParticipant);
+    const grouped = groupDynamically(participants);
+    const roles = Object.keys(grouped);
+
+    return NextResponse.json({ ok: true, participants, grouped, roles });
+  } catch (e: any) {
+    const status = Number(e?.status) || 500;
+    console.error("GET /participants failed:", e);
+    return NextResponse.json(
+      { ok: false, error: status === 404 ? "Not found" : "Server error" },
+      { status }
+    );
+  }
+}
+
+/* ------------------------------- POST ------------------------------- */
+type AddInput = {
+  userId?: string | null;
+  name?: string | null;
+  role: BookingParticipantRole;
+  inviteStatus?: InviteStatus | null;
+  isPrimaryHost?: boolean;
+  notes?: string | null;
+};
+type UpdateInput = {
+  id: string;
+  inviteStatus?: InviteStatus | null;
+  isPrimaryHost?: boolean;
+  notes?: string | null;
+};
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    ensureEnabled();
+
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer?.isSignedIn) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.id },
+      select: { id: true, orgId: true },
+    });
+    if (!booking) {
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    if (!canEditBooking(viewer, booking.orgId as string)) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
+    const body = (await req.json().catch(() => ({}))) as {
+      add?: any[];
+      update?: any[];
+      removeIds?: string[];
+    };
+
+    const adds: AddInput[] = Array.isArray(body.add)
+      ? body.add
+          .map((r) => ({
+            role: coerceRoleEnum(r?.role) as BookingParticipantRole,
+            userId: asTrimmedOrNull(r?.userId),
+            name: asTrimmedOrNull(r?.name),
+            inviteStatus: coerceStatusEnum(r?.inviteStatus),
+            isPrimaryHost: !!r?.isPrimaryHost,
+            notes: asTrimmedOrNull(r?.notes),
+          }))
+          .filter((r) => !!r.role)
+      : [];
+
+    const updates: UpdateInput[] = Array.isArray(body.update)
+      ? body.update
+          .map((r) => ({
+            id: String(r?.id || ""),
+            inviteStatus: coerceStatusEnum(r?.inviteStatus) ?? undefined,
+            isPrimaryHost:
+              typeof r?.isPrimaryHost === "boolean"
+                ? r.isPrimaryHost
+                : undefined,
+            notes: asTrimmedOrNull(r?.notes),
+          }))
+          .filter((r) => r.id)
+      : [];
+
+    const removeIds: string[] = Array.isArray(body.removeIds)
+      ? body.removeIds.map((x) => String(x)).filter(Boolean)
+      : [];
+
+    const now = new Date();
+
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      if (removeIds.length > 0) {
+        await tx.bookingParticipant.deleteMany({
+          where: { bookingId: booking.id, id: { in: removeIds } },
+        });
+      }
+
+      if (adds.length > 0) {
+        await tx.bookingParticipant.createMany({
+          data: adds.map((a) => ({
+            bookingId: booking.id,
+            role: a.role,
+            userId: a.userId ?? null,
+            name: a.name ?? "",
+            inviteStatus: a.inviteStatus ?? InviteStatus.PENDING,
+            isPrimaryHost: !!a.isPrimaryHost,
+            notes: a.notes ?? undefined,
+            invitedAt: now,
+          })),
+        });
+      }
+
+      for (const u of updates) {
+        const before = await tx.bookingParticipant.findFirst({
+          where: { id: u.id, bookingId: booking.id },
+          select: { inviteStatus: true },
+        });
+        if (!before) continue;
+
+        await tx.bookingParticipant.update({
+          where: { id: u.id },
+          data: {
+            ...(u.inviteStatus
+              ? { inviteStatus: { set: u.inviteStatus } }
+              : {}),
+            isPrimaryHost:
+              typeof u.isPrimaryHost === "boolean"
+                ? u.isPrimaryHost
+                : undefined,
+            notes: u.notes ?? undefined,
+            ...(u.inviteStatus &&
+            (u.inviteStatus === InviteStatus.ACCEPTED ||
+              u.inviteStatus === InviteStatus.DECLINED ||
+              u.inviteStatus === InviteStatus.CANCELLED)
+              ? { respondedAt: now }
+              : {}),
+          },
+        });
+      }
+    });
+
+    const rows = await prisma.bookingParticipant.findMany({
+      where: { bookingId: booking.id },
+      orderBy: [
+        { role: "asc" },
+        { isPrimaryHost: "desc" },
+        { createdAt: "asc" },
+      ],
+      include: {
+        user: {
+          select: {
+            id: true,
+            displayName: true,
+            name: true,
+            email: true,
+            avatarUrl: true,
+          },
+        },
+      },
+    });
+
+    const participants = rows.map(mapParticipant);
+    const grouped = groupDynamically(participants);
+    const roles = Object.keys(grouped);
+
+    return NextResponse.json({ ok: true, participants, grouped, roles });
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    const code = e?.code || "";
+
+    if (e?.status === 404) {
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+    if (code === "P2003") {
+      return NextResponse.json(
+        { ok: false, error: "Invalid user reference." },
+        { status: 400 }
+      );
+    }
+    if (code === "P2002") {
+      return NextResponse.json(
+        { ok: false, error: "Duplicate participant for this role." },
         { status: 400 }
       );
     }
 
-    const { participants, grouped, total } = await snapshot(bookingId);
+    console.error("POST /participants failed:", e);
     return NextResponse.json(
-      { ok: true, bookingId, total, participants, grouped },
-      { status: 200 }
-    );
-  } catch (err) {
-    console.error("DELETE /bookings/:id/participants failed:", err);
-    return NextResponse.json(
-      { error: "Failed to delete participant(s)." },
+      { ok: false, error: msg || "Server error" },
       { status: 500 }
     );
   }

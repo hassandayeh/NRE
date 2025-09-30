@@ -5,18 +5,30 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
+/**
+ * NOTE: We added an optional `hostsCount?: number` so we can
+ * show a "multi-host" hint when the API provides it. If the field
+ * is absent (older payloads), nothing shows — zero regression.
+ */
 type BookingListItem = {
   id: string;
   subject: string | null;
   startAt: string; // ISO
   durationMins: number;
   appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE" | null;
+
   expertName?: string | null;
   newsroomName?: string | null;
   programName?: string | null;
+
+  // Legacy, still displayed if present
   hostName?: string | null;
+
   locationName?: string | null;
   locationAddress?: string | null;
+
+  // NEW (optional, safe): how many HOST participants exist
+  hostsCount?: number;
 };
 
 type ApiList =
@@ -38,16 +50,17 @@ function fmtDate(iso: string) {
   }
 }
 
-// --- role helpers (robust to many session shapes) ---
+/* ---------- role helpers (robust to many session shapes) ---------- */
 function normalizeRole(r: unknown): string | null {
   if (!r) return null;
   const s = String(r).trim();
   if (!s) return null;
   return s.toUpperCase().replace(/\s+/g, "_");
 }
+
+// Keep return type intentionally loose to match the original file’s tolerance
 function extractRoles(s: any): Set<string> {
   const roles = new Set<string>();
-
   const push = (val: unknown) => {
     const nr = normalizeRole(val);
     if (nr) roles.add(nr);
@@ -67,7 +80,7 @@ function extractRoles(s: any): Set<string> {
     s?.memberships ??
     [];
   if (Array.isArray(mems)) {
-    mems.forEach((m) => push(m?.role));
+    mems.forEach((m: any) => push(m?.role));
   }
 
   // last-resort heuristic (dev seeds often encode role in name)
@@ -78,7 +91,6 @@ function extractRoles(s: any): Set<string> {
     if (n.startsWith("host")) roles.add("HOST");
     if (n.includes("expert")) roles.add("EXPERT");
   }
-
   return roles;
 }
 
@@ -89,8 +101,8 @@ export default function BookingsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [items, setItems] = useState<BookingListItem[]>([]);
+  const [sessionObj, setSessionObj] = useState<any>(null);
 
-  const [sessionObj, setSessionObj] = useState<any | null>(null);
   const roles = useMemo(
     () => (sessionObj ? extractRoles(sessionObj) : new Set<string>()),
     [sessionObj]
@@ -111,7 +123,6 @@ export default function BookingsPage() {
         });
         const json = (await res.json()) as ApiList;
         if (cancelled) return;
-
         if (res.ok && (json as any).ok) {
           setItems((json as any).bookings as BookingListItem[]);
         } else {
@@ -143,23 +154,21 @@ export default function BookingsPage() {
 
     loadList();
     loadSession();
-
     return () => {
       cancelled = true;
     };
   }, []);
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-4 py-6">
+    <div className="mx-auto max-w-3xl p-4 space-y-4">
       {/* Header */}
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Bookings</h1>
-
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Bookings</h1>
         {/* Owners & Producers only */}
         {canCreate ? (
           <Link
             href="/modules/booking/new"
-            className="inline-flex items-center rounded-lg border px-3 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black"
+            className="rounded-lg border px-3 py-1 text-sm hover:bg-gray-50"
           >
             New booking
           </Link>
@@ -170,40 +179,42 @@ export default function BookingsPage() {
       {updated && (
         <div
           role="status"
-          className="mb-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800"
+          className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm"
         >
           Booking updated successfully.
         </div>
       )}
 
       {loading && (
-        <div className="text-sm text-gray-600" role="status">
+        <div className="text-sm text-gray-500" role="status">
           Loading…
         </div>
       )}
 
       {err && (
-        <div
-          className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
-          role="alert"
-        >
+        <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm">
           {err}
         </div>
       )}
 
       {!loading && !err && items.length === 0 && (
-        <div className="rounded-lg border p-6 text-sm text-gray-700">
-          <p className="mb-2">No bookings yet.</p>
+        <div className="rounded-lg border px-3 py-4">
+          <p className="text-sm">No bookings yet.</p>
           {canCreate ? (
-            <p>
+            <p className="mt-1 text-sm">
               Create your first booking{" "}
-              <Link href="/modules/booking/new" className="underline">
+              <Link
+                className="underline underline-offset-2"
+                href="/modules/booking/new"
+              >
                 here
               </Link>
               .
             </p>
           ) : (
-            <p>When a newsroom invites you, you’ll see it here.</p>
+            <p className="mt-1 text-sm">
+              When a newsroom invites you, you’ll see it here.
+            </p>
           )}
         </div>
       )}
@@ -211,19 +222,23 @@ export default function BookingsPage() {
       <ul className="space-y-3">
         {items.map((b) => {
           const ap = b.appearanceType;
+          const multiHost =
+            typeof b.hostsCount === "number" && b.hostsCount > 1;
+
           return (
-            <li key={b.id}>
+            <li key={b.id} className="rounded-lg border p-3 hover:bg-gray-50">
               {/* Whole card is a link → VIEW page */}
-              <Link
-                href={`/modules/booking/${b.id}`}
-                className="block rounded-xl border bg-white px-4 py-3 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black"
-              >
-                <div className="flex items-start justify-between">
+              <Link href={`/modules/booking/${b.id}`} className="block">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <h2 className="text-base font-medium">
                     {b.subject || "(no subject)"}
                   </h2>
+
                   {ap && (
-                    <span className="text-xs text-gray-500">
+                    <span
+                      className="rounded-md border px-2 py-0.5 text-xs"
+                      aria-label="appearance type"
+                    >
                       {ap === "IN_PERSON"
                         ? "IN PERSON"
                         : ap === "ONLINE"
@@ -233,49 +248,55 @@ export default function BookingsPage() {
                   )}
                 </div>
 
-                <div className="mt-1 text-sm text-gray-700">
-                  <div className="flex flex-wrap items-center gap-x-2">
-                    <span>{fmtDate(b.startAt)}</span>
-                    <span>•</span>
-                    <span>{b.durationMins}m</span>
-                  </div>
-
-                  {(b.expertName || b.newsroomName) && (
-                    <div className="mt-1">
-                      <span className="text-gray-500">Expert:</span>{" "}
-                      <span>{b.expertName ?? "—"}</span>
-                      <span className="mx-2 text-gray-400">•</span>
-                      <span className="text-gray-500">Newsroom:</span>{" "}
-                      <span>{b.newsroomName ?? "—"}</span>
-                    </div>
+                <div className="mt-1 text-sm text-gray-600">
+                  {fmtDate(b.startAt)} • {b.durationMins}m
+                  {/* NEW: Multi-host hint, only when hostsCount > 1 */}
+                  {multiHost && (
+                    <span
+                      className="ml-2 rounded-md border px-1.5 py-0.5 text-xs"
+                      title="Multiple hosts"
+                      aria-label="multiple hosts"
+                    >
+                      Hosts ×{b.hostsCount}
+                    </span>
                   )}
-
-                  {(b.programName || b.hostName) && (
-                    <div className="mt-1">
-                      <span className="text-gray-500">Program:</span>{" "}
-                      <span>{b.programName ?? "—"}</span>
-                      <span className="mx-2 text-gray-400">•</span>
-                      <span className="text-gray-500">Host:</span>{" "}
-                      <span>{b.hostName ?? "—"}</span>
-                    </div>
-                  )}
-
-                  {ap === "IN_PERSON" &&
-                    (b.locationName || b.locationAddress) && (
-                      <div className="mt-1">
-                        <span className="text-gray-500">Location:</span>{" "}
-                        <span>{b.locationName ?? ""}</span>
-                        {b.locationAddress ? (
-                          <span>{` — ${b.locationAddress}`}</span>
-                        ) : null}
-                      </div>
-                    )}
                 </div>
+
+                {(b.expertName || b.newsroomName) && (
+                  <div className="mt-1 text-sm">
+                    <span className="text-gray-500">Expert:</span>{" "}
+                    {b.expertName ?? "—"}{" "}
+                    <span className="text-gray-400">•</span>{" "}
+                    <span className="text-gray-500">Newsroom:</span>{" "}
+                    {b.newsroomName ?? "—"}
+                  </div>
+                )}
+
+                {(b.programName || b.hostName) && (
+                  <div className="mt-1 text-sm">
+                    <span className="text-gray-500">Program:</span>{" "}
+                    {b.programName ?? "—"}{" "}
+                    <span className="text-gray-400">•</span>{" "}
+                    <span className="text-gray-500">Host:</span>{" "}
+                    {b.hostName ?? "—"}
+                  </div>
+                )}
+
+                {ap === "IN_PERSON" &&
+                  (b.locationName || b.locationAddress) && (
+                    <div className="mt-1 text-sm text-gray-600">
+                      <span className="text-gray-500">Location:</span>{" "}
+                      {b.locationName ?? ""}
+                      {b.locationAddress ? (
+                        <span>{` — ${b.locationAddress}`}</span>
+                      ) : null}
+                    </div>
+                  )}
               </Link>
             </li>
           );
         })}
       </ul>
-    </main>
+    </div>
   );
 }

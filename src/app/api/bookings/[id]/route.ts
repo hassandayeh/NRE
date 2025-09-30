@@ -15,8 +15,10 @@ const MULTI_PARTICIPANTS_ENABLED =
 type AppearanceType = "ONLINE" | "IN_PERSON" | "PHONE";
 type AppearanceScope = "UNIFIED" | "PER_GUEST";
 type AccessProvisioning = "SHARED" | "PER_GUEST";
+
 type HostAppearanceScope = "UNIFIED" | "PER_HOST";
 type HostAccessProvisioning = "SHARED" | "PER_HOST";
+
 type ParticipantKind = "EXPERT" | "REPORTER";
 
 type GuestInput = {
@@ -107,6 +109,7 @@ function validateUnified(
   if (provisioning !== "SHARED") return;
 
   if (type === "ONLINE") requireField(effective.locationUrl, "locationUrl");
+
   if (type === "IN_PERSON") {
     const hasVenue =
       (effective.locationName && effective.locationName.trim()) ||
@@ -117,6 +120,7 @@ function validateUnified(
       );
     }
   }
+
   if (type === "PHONE") requireField(effective.dialInfo, "dialInfo");
 }
 
@@ -211,11 +215,9 @@ function validateHostModel(
       throw new Error(
         "hostAppearanceType is required when hostAppearanceScope=UNIFIED"
       );
-
     if (hostProvisioning === "SHARED") {
       if (hostType === "ONLINE")
         requireField(hostDefaults.hostLocationUrl, "hostLocationUrl");
-
       if (hostType === "IN_PERSON") {
         const ok =
           (hostDefaults.hostLocationName &&
@@ -227,7 +229,6 @@ function validateHostModel(
             "hostLocationName or hostLocationAddress is required when hosts are UNIFIED+SHARED+IN_PERSON"
           );
       }
-
       if (hostType === "PHONE")
         requireField(hostDefaults.hostDialInfo, "hostDialInfo");
     } else {
@@ -340,8 +341,10 @@ export async function GET(
         subject: true,
         newsroomName: true,
         programName: true,
+
         hostName: true,
         hostUserId: true,
+
         talkingPoints: true,
 
         // Guests model
@@ -423,7 +426,7 @@ export async function GET(
 
     const canEdit = canEditBooking(viewer, booking.orgId);
 
-    const payload: Record<string, any> = {
+    const payload: Record<any, any> = {
       ok: true,
       booking: { ...booking, guests, hosts },
       canEdit,
@@ -491,7 +494,6 @@ async function updateBooking(id: string, body: UpdatePayload) {
   // ---------- Guests (existing) ----------
   const scope: AppearanceScope =
     body.appearanceScope ?? (current.appearanceScope as AppearanceScope);
-
   const provisioning: AccessProvisioning =
     body.accessProvisioning ??
     (current.accessProvisioning as AccessProvisioning);
@@ -566,7 +568,6 @@ async function updateBooking(id: string, body: UpdatePayload) {
       : provisioning === "PER_GUEST"
       ? "PER_HOST"
       : "SHARED");
-
   if (derivedHostScope === "PER_HOST") {
     derivedHostProvisioning = "PER_HOST";
   }
@@ -612,10 +613,11 @@ async function updateBooking(id: string, body: UpdatePayload) {
   );
 
   return await prisma.$transaction(async (tx) => {
+    // Compute legacy host mirrors (we'll attach conditionally)
     const nextHostUserId =
       body.hostUserId !== undefined
         ? body.hostUserId || null
-        : current.hostUserId ?? null;
+        : (current.hostUserId as string | null) ?? null;
 
     let nextHostName: string | null;
     if (body.hostUserId !== undefined) {
@@ -634,47 +636,54 @@ async function updateBooking(id: string, body: UpdatePayload) {
       nextHostName =
         body.hostName !== undefined
           ? (body.hostName ?? "").trim() || null
-          : current.hostName ?? null;
+          : (current.hostName as string | null) ?? null;
     }
 
-    await tx.booking.update({
-      where: { id },
-      data: {
-        subject: body.subject ?? current.subject,
-        newsroomName:
-          body.newsroomName !== undefined
-            ? body.newsroomName
-            : current.newsroomName,
-        programName:
-          body.programName !== undefined
-            ? body.programName
-            : current.programName,
-        hostUserId: nextHostUserId,
-        hostName: nextHostName,
-        talkingPoints:
-          body.talkingPoints !== undefined
-            ? body.talkingPoints
-            : current.talkingPoints,
+    // Build main update payload
+    const mainUpdate: any = {
+      subject: body.subject ?? current.subject,
+      newsroomName:
+        body.newsroomName !== undefined
+          ? body.newsroomName
+          : current.newsroomName,
+      programName:
+        body.programName !== undefined ? body.programName : current.programName,
 
-        appearanceScope: scope,
-        accessProvisioning: provisioning,
-        appearanceType: scope === "UNIFIED" ? (unifiedType as any) : null,
-        locationUrl: effectiveDefaults.locationUrl,
-        locationName: effectiveDefaults.locationName,
-        locationAddress: effectiveDefaults.locationAddress,
-        dialInfo: effectiveDefaults.dialInfo,
+      // ⛔ When participants are enabled, we deliberately do NOT touch legacy host fields.
+      // This prevents accidental reintroduction of single-host mirrors.
+      ...(MULTI_PARTICIPANTS_ENABLED
+        ? {}
+        : {
+            hostUserId: nextHostUserId,
+            hostName: nextHostName,
+          }),
 
-        hostAppearanceScope: derivedHostScope as any,
-        hostAccessProvisioning: derivedHostProvisioning as any,
-        hostAppearanceType:
-          derivedHostScope === "UNIFIED" ? (derivedHostType as any) : null,
-        hostLocationUrl: hostDefaults.hostLocationUrl,
-        hostLocationName: hostDefaults.hostLocationName,
-        hostLocationAddress: hostDefaults.hostLocationAddress,
-        hostDialInfo: hostDefaults.hostDialInfo,
-      } as any,
-    });
+      talkingPoints:
+        body.talkingPoints !== undefined
+          ? body.talkingPoints
+          : current.talkingPoints,
 
+      appearanceScope: scope,
+      accessProvisioning: provisioning,
+      appearanceType: scope === "UNIFIED" ? (unifiedType as any) : null,
+      locationUrl: effectiveDefaults.locationUrl,
+      locationName: effectiveDefaults.locationName,
+      locationAddress: effectiveDefaults.locationAddress,
+      dialInfo: effectiveDefaults.dialInfo,
+
+      hostAppearanceScope: derivedHostScope as any,
+      hostAccessProvisioning: derivedHostProvisioning as any,
+      hostAppearanceType:
+        derivedHostScope === "UNIFIED" ? (derivedHostType as any) : null,
+      hostLocationUrl: hostDefaults.hostLocationUrl,
+      hostLocationName: hostDefaults.hostLocationName,
+      hostLocationAddress: hostDefaults.hostLocationAddress,
+      hostDialInfo: hostDefaults.hostDialInfo,
+    };
+
+    await tx.booking.update({ where: { id }, data: mainUpdate } as any);
+
+    // Guests full-replace (unchanged)
     if (nextGuests) {
       const ptx = tx as any;
       await ptx.bookingGuest.deleteMany({ where: { bookingId: id } });
@@ -698,7 +707,6 @@ async function updateBooking(id: string, body: UpdatePayload) {
       // Mirror expert (legacy fields)
       let mirrorExpertUserId: string | null = null;
       let mirrorExpertName: string = "";
-
       const firstInternal = nextGuests.find((g) => !!g.userId) || null;
       const firstAny = nextGuests[0];
 
@@ -733,6 +741,7 @@ async function updateBooking(id: string, body: UpdatePayload) {
       });
     }
 
+    // Hosts full-replace
     if (nextHosts) {
       const ptx = tx as any;
       await ptx.bookingHost.deleteMany({ where: { bookingId: id } });
@@ -790,39 +799,41 @@ async function updateBooking(id: string, body: UpdatePayload) {
         });
       }
 
-      // Mirror host (legacy fields)
-      let mirrorHostUserId: string | null = null;
-      let mirrorHostName: string | null = null;
+      // ⛔ Skip legacy host mirroring when participants are enabled.
+      if (!MULTI_PARTICIPANTS_ENABLED) {
+        let mirrorHostUserId: string | null = null;
+        let mirrorHostName: string | null = null;
 
-      const firstInternalH = nextHosts.find((h) => !!h.userId) || null;
-      const firstAnyH = nextHosts[0];
+        const firstInternalH = nextHosts.find((h) => !!h.userId) || null;
+        const firstAnyH = nextHosts[0];
 
-      if (firstInternalH?.userId) {
-        const u = await (tx as any).user.findUnique({
-          where: { id: firstInternalH.userId },
-          select: { id: true, name: true },
-        });
-        if (u?.id) {
-          mirrorHostUserId = u.id;
-          const candidate =
-            (firstInternalH.name || "").trim() || (u.name || "").trim();
-          mirrorHostName = candidate || null;
+        if (firstInternalH?.userId) {
+          const u = await (tx as any).user.findUnique({
+            where: { id: firstInternalH.userId },
+            select: { id: true, name: true },
+          });
+          if (u?.id) {
+            mirrorHostUserId = u.id;
+            const candidate =
+              (firstInternalH.name || "").trim() || (u.name || "").trim();
+            mirrorHostName = candidate || null;
+          } else {
+            mirrorHostUserId = null;
+            mirrorHostName = (firstInternalH.name || "").trim() || null;
+          }
+        } else if (firstAnyH) {
+          mirrorHostUserId = null;
+          mirrorHostName = (firstAnyH.name || "").trim() || null;
         } else {
           mirrorHostUserId = null;
-          mirrorHostName = (firstInternalH.name || "").trim() || null;
+          mirrorHostName = null;
         }
-      } else if (firstAnyH) {
-        mirrorHostUserId = null;
-        mirrorHostName = (firstAnyH.name || "").trim() || null;
-      } else {
-        mirrorHostUserId = null;
-        mirrorHostName = null;
-      }
 
-      await tx.booking.update({
-        where: { id },
-        data: { hostUserId: mirrorHostUserId, hostName: mirrorHostName },
-      });
+        await tx.booking.update({
+          where: { id },
+          data: { hostUserId: mirrorHostUserId, hostName: mirrorHostName },
+        });
+      }
     }
 
     const updated = await tx.booking.findUnique({ where: { id } });
