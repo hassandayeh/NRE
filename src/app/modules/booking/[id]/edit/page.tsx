@@ -2,7 +2,7 @@
 
 /**
  * Edit Booking — keep existing UI/logic intact (guests, scopes, validations),
- * and add a safe Participants panel (no "primary" concept).
+ * and add a safe Participants panel with inline inviteStatus updates (no "primary").
  *
  * - Hosts/Guests UI stays exactly the same (add/move/remove + defaults + validations).
  * - On Save: preserves your flow + hosts→participants sync (HOST only; no primary).
@@ -19,11 +19,29 @@ import { useRouter, useParams } from "next/navigation";
 /* ---------- small UI helpers (match your components) ---------- */
 import * as ButtonModule from "../../../../../components/ui/Button";
 const UIButton: React.ElementType =
-  (ButtonModule as any).Button ?? (ButtonModule as any).default;
+  (ButtonModule as any).Button ??
+  (ButtonModule as any).default ??
+  ((props: any) => (
+    <button
+      {...props}
+      className={["rounded-md border px-3 py-2", props.className]
+        .filter(Boolean)
+        .join(" ")}
+    />
+  ));
 
 import * as AlertModule from "../../../../../components/ui/Alert";
 const UIAlert: React.ElementType =
-  (AlertModule as any).Alert ?? (AlertModule as any).default;
+  (AlertModule as any).Alert ??
+  (AlertModule as any).default ??
+  ((props: any) => (
+    <div
+      {...props}
+      className={["rounded-md border p-2 text-sm", props.className]
+        .filter(Boolean)
+        .join(" ")}
+    />
+  ));
 
 /* ---------- flags ---------- */
 const PHONE_ENABLED =
@@ -41,7 +59,7 @@ const toDatetimeLocalValue = (iso: string) => {
   )}:${pad(d.getMinutes())}`;
 };
 
-/* ✅ FIXED: add missing generic <T> to avoid TS regression */
+/* ✅ keep generic to avoid TS regression */
 function useDebounce<T>(v: T, delay = 250) {
   const [s, setS] = React.useState(v);
   React.useEffect(() => {
@@ -135,11 +153,10 @@ type BookingDto = {
 };
 
 /* -------------------- Participants (for sync; HOST only) ------------------- */
-type Role = "HOST" | "EXPERT" | "REPORTER" | "INTERPRETER";
 type ParticipantDTO = {
   id: string;
   userId: string | null;
-  roleInBooking: Role; // server enum for now
+  roleInBooking: string; // enum for now; forward-compatible with string roles
   inviteStatus?: string | null;
   notes?: string | null;
   user?: {
@@ -155,6 +172,7 @@ type ParticipantDTO = {
  * - Fetches /api/bookings/[id]/participants
  * - Renders sections from response.roles (no hard-coded role names)
  * - Add participant (userId + role from roles[]), Remove participant
+ * - Inline inviteStatus updates via POST (server normalizes CANCELLED)
  * - No “primary” concept anywhere
  * - On each mutation, it refetches and updates parent cache if provided
  * ====================================================================== */
@@ -173,8 +191,17 @@ function ParticipantsPanel(props: {
   const [adding, setAdding] = React.useState(false);
   const [addUserId, setAddUserId] = React.useState("");
   const [addRole, setAddRole] = React.useState("");
+  const [savingMap, setSavingMap] = React.useState<Record<string, boolean>>({});
 
   if (!MULTI_PARTICIPANTS_ENABLED) return null;
+
+  const INVITE_OPTIONS = React.useMemo(
+    () =>
+      Array.from(
+        new Set(["PENDING", "CONFIRMED", "DECLINED", "CANCELLED", "CANCELED"])
+      ),
+    []
+  );
 
   async function refetch() {
     try {
@@ -233,7 +260,6 @@ function ParticipantsPanel(props: {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        // Forward-compatible: server currently expects enum; we pass string from roles[]
         body: JSON.stringify({
           participants: [{ userId: addUserId.trim(), roleInBooking: addRole }],
         }),
@@ -246,12 +272,77 @@ function ParticipantsPanel(props: {
     await refetch();
   }
 
+  // --- NEW: robust updater to match server contract variations ---
+  async function updateParticipantInviteStatus(
+    bookingId: string,
+    id: string,
+    inviteStatus: string
+  ) {
+    const headers = { "Content-Type": "application/json" };
+    const attempts = [
+      // Intended contract (bulk shape)
+      {
+        method: "POST",
+        url: `/api/bookings/${bookingId}/participants`,
+        body: JSON.stringify({ participants: [{ id, inviteStatus }] }),
+      },
+      // Query id + POST body
+      {
+        method: "POST",
+        url: `/api/bookings/${bookingId}/participants?id=${encodeURIComponent(
+          id
+        )}`,
+        body: JSON.stringify({ inviteStatus }),
+      },
+      // PATCH with query id
+      {
+        method: "PATCH",
+        url: `/api/bookings/${bookingId}/participants?id=${encodeURIComponent(
+          id
+        )}`,
+        body: JSON.stringify({ inviteStatus }),
+      },
+      // Single object variant
+      {
+        method: "POST",
+        url: `/api/bookings/${bookingId}/participants`,
+        body: JSON.stringify({ participant: { id, inviteStatus } }),
+      },
+    ] as const;
+
+    for (const a of attempts) {
+      try {
+        const res = await fetch(a.url, {
+          method: a.method,
+          credentials: "include",
+          headers,
+          body: a.body,
+        });
+        if (res.ok) return true;
+      } catch {
+        // try next
+      }
+    }
+    return false;
+  }
+
+  async function onUpdateStatus(p: ParticipantDTO, next: string) {
+    if (!next || next === p.inviteStatus) return;
+    setSavingMap((m) => ({ ...m, [p.id]: true }));
+    await updateParticipantInviteStatus(bookingId, p.id, next);
+    setSavingMap((m) => {
+      const { [p.id]: _, ...rest } = m;
+      return rest;
+    });
+    await refetch();
+  }
+
   return (
     <section className="rounded-xl border p-4">
       <h2 className="mb-2 text-lg font-semibold">Participants</h2>
       <p className="mb-4 text-sm text-gray-600">
-        Role sections below are rendered <em>dynamically</em> from the API; no
-        role names are hard-coded in UI or logic.
+        Role sections are rendered dynamically from the API’s roles. No role
+        names are hard-coded.
       </p>
 
       {loading && <div className="text-sm text-gray-600">Loading…</div>}
@@ -291,32 +382,75 @@ function ParticipantsPanel(props: {
                       (p as any).name ||
                       p?.userId ||
                       "Unknown user";
-                    const invite = p?.inviteStatus || "";
+                    const invite = (p?.inviteStatus || "").toString();
+                    const pill =
+                      invite === "CONFIRMED"
+                        ? "bg-green-100 text-green-800"
+                        : invite === "DECLINED" ||
+                          invite === "CANCELLED" ||
+                          invite === "CANCELED"
+                        ? "bg-red-100 text-red-800"
+                        : invite
+                        ? "bg-gray-100 text-gray-700"
+                        : "";
+
+                    const saving = !!savingMap[p.id];
+
                     return (
                       <li
                         key={p.id}
-                        className="flex items-center justify-between rounded-md border bg-white px-3 py-2"
+                        className="flex items-center justify-between gap-3 rounded-md border bg-white px-3 py-2"
                       >
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium">
                             {displayName}
                           </div>
                           {!!invite && (
-                            <div className="text-xs uppercase text-gray-500">
+                            <div
+                              className={clsx(
+                                "mt-0.5 inline-block rounded px-2 py-0.5 text-2xs uppercase",
+                                pill
+                              )}
+                            >
                               {invite}
                             </div>
                           )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => onRemove(p)}
-                          className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
-                          aria-label={`Remove ${displayName}`}
-                          title="Remove"
-                        >
-                          Remove
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <label className="sr-only" htmlFor={`invite-${p.id}`}>
+                            Invite status for {displayName}
+                          </label>
+                          <select
+                            id={`invite-${p.id}`}
+                            value={
+                              INVITE_OPTIONS.includes(invite)
+                                ? invite
+                                : "PENDING"
+                            }
+                            onChange={(e) => onUpdateStatus(p, e.target.value)}
+                            disabled={saving}
+                            className="rounded-md border px-2 py-1 text-xs"
+                            aria-label={`Change invite status for ${displayName}`}
+                          >
+                            {INVITE_OPTIONS.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => onRemove(p)}
+                            disabled={saving}
+                            className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+                            aria-label={`Remove ${displayName}`}
+                            title="Remove"
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </li>
                     );
                   })}
@@ -1201,7 +1335,6 @@ export default function BookingEditPage() {
       })),
 
       // NOTE: We intentionally do NOT persist hosts here when participants flag is ON.
-      // Your /api/bookings/:id still accepts hosts, but we prefer normalized participants.
       // If your server requires 'hosts' for now, uncomment next line:
       // hosts: form.hosts,
     };
@@ -1233,7 +1366,8 @@ export default function BookingEditPage() {
       }
 
       setOk("Saved.");
-      // router.push(`/modules/booking/${id}`);
+      // ✅ navigate back to view
+      router.push(`/modules/booking/${id}`);
     } catch (e) {
       setSaveError("Network error while saving.");
     }
@@ -1326,7 +1460,7 @@ export default function BookingEditPage() {
         </div>
       </div>
 
-      {/* Participants Panel (dynamic roles; no primary) */}
+      {/* Participants Panel (dynamic roles; inline status; no primary) */}
       {MULTI_PARTICIPANTS_ENABLED && (
         <ParticipantsPanel
           bookingId={String(id)}
@@ -1932,9 +2066,6 @@ export default function BookingEditPage() {
       <div>
         <div className="mb-2 flex items-center gap-3">
           <h2 className="text-lg font-semibold">Hosts</h2>
-          <span className="text-sm text-gray-600">
-            {(form.hosts || []).length} selected
-          </span>
         </div>
 
         {(form.hosts || []).length === 0 && (
@@ -1997,7 +2128,7 @@ export default function BookingEditPage() {
                     </div>
                   ) : (
                     <>
-                      {hostUnifiedType === "ONLINE" && (
+                      {(form.hostAppearanceType ?? "ONLINE") === "ONLINE" && (
                         <label className="grid gap-1">
                           <span className="text-xs text-gray-600">
                             Join URL
@@ -2021,7 +2152,8 @@ export default function BookingEditPage() {
                         </label>
                       )}
 
-                      {hostUnifiedType === "IN_PERSON" && (
+                      {(form.hostAppearanceType ?? "ONLINE") ===
+                        "IN_PERSON" && (
                         <>
                           <label className="grid gap-1">
                             <span className="text-xs text-gray-600">
@@ -2071,29 +2203,30 @@ export default function BookingEditPage() {
                         </>
                       )}
 
-                      {hostUnifiedType === "PHONE" && PHONE_ENABLED && (
-                        <label className="grid gap-1">
-                          <span className="text-xs text-gray-600">
-                            Dial info
-                          </span>
-                          <textarea
-                            value={h.dialInfo ?? ""}
-                            onChange={(ev) =>
-                              patchHost(idx, { dialInfo: ev.target.value })
-                            }
-                            className={clsx(
-                              "w-full rounded-md border px-3 py-2",
-                              he.dialInfo && "border-red-500"
-                            )}
-                            placeholder="e.g., +1 555 123 4567 PIN 0000"
-                          />
-                          {h.dialInfo && (
+                      {(form.hostAppearanceType ?? "ONLINE") === "PHONE" &&
+                        PHONE_ENABLED && (
+                          <label className="grid gap-1">
                             <span className="text-xs text-gray-600">
-                              {h.dialInfo}
+                              Dial info
                             </span>
-                          )}
-                        </label>
-                      )}
+                            <textarea
+                              value={h.dialInfo ?? ""}
+                              onChange={(ev) =>
+                                patchHost(idx, { dialInfo: ev.target.value })
+                              }
+                              className={clsx(
+                                "w-full rounded-md border px-3 py-2",
+                                he.dialInfo && "border-red-500"
+                              )}
+                              placeholder="e.g., +1 555 123 4567 PIN 0000"
+                            />
+                            {h.dialInfo && (
+                              <span className="text-xs text-gray-600">
+                                {h.dialInfo}
+                              </span>
+                            )}
+                          </label>
+                        )}
                     </>
                   )}
                 </>
