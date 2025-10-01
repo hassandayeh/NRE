@@ -168,19 +168,19 @@ type ParticipantDTO = {
 };
 
 /** ======================================================================
- * ParticipantsPanel (flag-gated)
+ * ParticipantsPanel (flag-free, hooks-safe, no primary)
  * - Fetches /api/bookings/[id]/participants
  * - Renders sections from response.roles (no hard-coded role names)
  * - Add participant (userId + role from roles[]), Remove participant
- * - Inline inviteStatus updates via POST (server normalizes CANCELLED)
- * - No “primary” concept anywhere
- * - On each mutation, it refetches and updates parent cache if provided
+ * - Inline inviteStatus updates (robust to server variants)
  * ====================================================================== */
 function ParticipantsPanel(props: {
   bookingId: string;
   onParticipantsRefetched?: (ps: ParticipantDTO[]) => void;
 }) {
   const { bookingId, onParticipantsRefetched } = props;
+
+  // ✅ Hooks are always called (no flag gating, no conditional calls)
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [participants, setParticipants] = React.useState<ParticipantDTO[]>([]);
@@ -193,12 +193,17 @@ function ParticipantsPanel(props: {
   const [addRole, setAddRole] = React.useState("");
   const [savingMap, setSavingMap] = React.useState<Record<string, boolean>>({});
 
-  if (!MULTI_PARTICIPANTS_ENABLED) return null;
-
   const INVITE_OPTIONS = React.useMemo(
     () =>
       Array.from(
-        new Set(["PENDING", "CONFIRMED", "DECLINED", "CANCELLED", "CANCELED"])
+        new Set([
+          "PENDING",
+          "CONFIRMED",
+          "ACCEPTED",
+          "DECLINED",
+          "CANCELLED",
+          "CANCELED",
+        ])
       ),
     []
   );
@@ -207,6 +212,7 @@ function ParticipantsPanel(props: {
     try {
       setLoading(true);
       setError(null);
+
       const res = await fetch(`/api/bookings/${bookingId}/participants`, {
         credentials: "include",
         cache: "no-store",
@@ -214,9 +220,14 @@ function ParticipantsPanel(props: {
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j?.error || `Failed (${res.status})`);
 
-      const ps = Array.isArray(j.participants) ? j.participants : [];
-      const rs = Array.isArray(j.roles) ? j.roles : [];
-      const gr = j.grouped && typeof j.grouped === "object" ? j.grouped : {};
+      const ps = Array.isArray(j.participants)
+        ? (j.participants as ParticipantDTO[])
+        : [];
+      const rs = Array.isArray(j.roles) ? (j.roles as string[]) : [];
+      const gr =
+        j.grouped && typeof j.grouped === "object"
+          ? (j.grouped as Record<string, ParticipantDTO[]>)
+          : {};
 
       setParticipants(ps);
       setRoles(rs);
@@ -245,7 +256,7 @@ function ParticipantsPanel(props: {
         { method: "DELETE", credentials: "include" }
       );
     } catch {
-      // ignore
+      // ignore network errors; refetch will reconcile
     }
     await refetch();
   }
@@ -266,13 +277,15 @@ function ParticipantsPanel(props: {
       });
       setAddUserId("");
     } catch {
-      // ignore
+      // ignore; refetch below will show the truth
+    } finally {
+      setAdding(false);
     }
-    setAdding(false);
+
     await refetch();
   }
 
-  // --- NEW: robust updater to match server contract variations ---
+  // Robust updater to match server shapes used during refactors
   async function updateParticipantInviteStatus(
     bookingId: string,
     id: string,
@@ -280,13 +293,11 @@ function ParticipantsPanel(props: {
   ) {
     const headers = { "Content-Type": "application/json" };
     const attempts = [
-      // Intended contract (bulk shape)
       {
         method: "POST",
         url: `/api/bookings/${bookingId}/participants`,
         body: JSON.stringify({ participants: [{ id, inviteStatus }] }),
       },
-      // Query id + POST body
       {
         method: "POST",
         url: `/api/bookings/${bookingId}/participants?id=${encodeURIComponent(
@@ -294,7 +305,6 @@ function ParticipantsPanel(props: {
         )}`,
         body: JSON.stringify({ inviteStatus }),
       },
-      // PATCH with query id
       {
         method: "PATCH",
         url: `/api/bookings/${bookingId}/participants?id=${encodeURIComponent(
@@ -302,7 +312,6 @@ function ParticipantsPanel(props: {
         )}`,
         body: JSON.stringify({ inviteStatus }),
       },
-      // Single object variant
       {
         method: "POST",
         url: `/api/bookings/${bookingId}/participants`,
@@ -320,7 +329,7 @@ function ParticipantsPanel(props: {
         });
         if (res.ok) return true;
       } catch {
-        // try next
+        // try next shape
       }
     }
     return false;
@@ -328,6 +337,7 @@ function ParticipantsPanel(props: {
 
   async function onUpdateStatus(p: ParticipantDTO, next: string) {
     if (!next || next === p.inviteStatus) return;
+
     setSavingMap((m) => ({ ...m, [p.id]: true }));
     await updateParticipantInviteStatus(bookingId, p.id, next);
     setSavingMap((m) => {
@@ -337,23 +347,26 @@ function ParticipantsPanel(props: {
     await refetch();
   }
 
+  // ---------- UI ----------
   return (
-    <section className="rounded-xl border p-4">
+    <section className="rounded-lg border p-4">
       <h2 className="mb-2 text-lg font-semibold">Participants</h2>
       <p className="mb-4 text-sm text-gray-600">
         Role sections are rendered dynamically from the API’s roles. No role
         names are hard-coded.
       </p>
 
-      {loading && <div className="text-sm text-gray-600">Loading…</div>}
+      {loading && (
+        <div className="text-sm text-gray-600">Loading participants…</div>
+      )}
       {error && (
-        <div className="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
           {error}
         </div>
       )}
 
       {!loading && !error && roles.length === 0 && (
-        <div className="rounded-md border bg-gray-50 p-3 text-sm text-gray-700">
+        <div className="text-sm text-gray-600">
           No roles found for this booking yet.
         </div>
       )}
@@ -363,20 +376,18 @@ function ParticipantsPanel(props: {
         roles.map((role) => {
           const list = grouped?.[role] ?? [];
           return (
-            <div key={role} className="mb-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold tracking-wide">
-                  {role} ({list.length})
-                </h3>
-              </div>
+            <div key={role} className="mb-6">
+              <h3 className="mb-2 font-medium">
+                {role} ({list.length})
+              </h3>
 
               {list.length === 0 ? (
-                <div className="rounded-md border bg-white p-2 text-sm text-gray-600">
+                <div className="text-sm text-gray-600">
                   No participants for this role yet.
                 </div>
               ) : (
-                <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                  {list.map((p: ParticipantDTO) => {
+                <ul className="space-y-2">
+                  {list.map((p) => {
                     const displayName =
                       p?.user?.name ||
                       (p as any).name ||
@@ -393,44 +404,39 @@ function ParticipantsPanel(props: {
                         : invite
                         ? "bg-gray-100 text-gray-700"
                         : "";
-
                     const saving = !!savingMap[p.id];
 
                     return (
                       <li
                         key={p.id}
-                        className="flex items-center justify-between gap-3 rounded-md border bg-white px-3 py-2"
+                        className="flex flex-wrap items-center gap-3 rounded-md border p-2 text-sm"
                       >
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">
-                            {displayName}
-                          </div>
-                          {!!invite && (
-                            <div
-                              className={clsx(
-                                "mt-0.5 inline-block rounded px-2 py-0.5 text-2xs uppercase",
-                                pill
-                              )}
-                            >
-                              {invite}
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate">{displayName}</div>
+                          {p.userId && (
+                            <div className="text-xs text-gray-500">
+                              User: {p.userId}
                             </div>
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <label className="sr-only" htmlFor={`invite-${p.id}`}>
+                        {!!invite && (
+                          <span
+                            className={`rounded px-2 py-0.5 text-xs ${pill}`}
+                          >
+                            {invite}
+                          </span>
+                        )}
+
+                        <label className="flex items-center gap-2 text-xs">
+                          <span className="whitespace-nowrap">
                             Invite status for {displayName}
-                          </label>
+                          </span>
                           <select
-                            id={`invite-${p.id}`}
-                            value={
-                              INVITE_OPTIONS.includes(invite)
-                                ? invite
-                                : "PENDING"
-                            }
+                            className="rounded-md border px-2 py-1 text-xs"
+                            value={(p.inviteStatus || "PENDING").toString()}
                             onChange={(e) => onUpdateStatus(p, e.target.value)}
                             disabled={saving}
-                            className="rounded-md border px-2 py-1 text-xs"
                             aria-label={`Change invite status for ${displayName}`}
                           >
                             {INVITE_OPTIONS.map((opt) => (
@@ -439,18 +445,17 @@ function ParticipantsPanel(props: {
                               </option>
                             ))}
                           </select>
+                        </label>
 
-                          <button
-                            type="button"
-                            onClick={() => onRemove(p)}
-                            disabled={saving}
-                            className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
-                            aria-label={`Remove ${displayName}`}
-                            title="Remove"
-                          >
-                            Remove
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => onRemove(p)}
+                          disabled={saving}
+                          className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+                          aria-label={`Remove ${displayName}`}
+                          title="Remove"
+                        >
+                          Remove
+                        </button>
                       </li>
                     );
                   })}
@@ -461,8 +466,8 @@ function ParticipantsPanel(props: {
         })}
 
       {/* Add row (role list comes from API) */}
-      <form onSubmit={onAdd} className="mt-4 flex flex-wrap items-end gap-2">
-        <div className="flex min-w-[220px] flex-col">
+      <form onSubmit={onAdd} className="mt-6 flex flex-wrap items-end gap-3">
+        <div className="flex flex-col">
           <label className="text-xs text-gray-600">User ID</label>
           <input
             value={addUserId}
@@ -472,7 +477,7 @@ function ParticipantsPanel(props: {
           />
         </div>
 
-        <div className="flex min-w-[180px] flex-col">
+        <div className="flex flex-col">
           <label className="text-xs text-gray-600">Role</label>
           <select
             value={addRole}
@@ -489,8 +494,8 @@ function ParticipantsPanel(props: {
 
         <button
           type="submit"
-          disabled={adding || !addUserId.trim() || !addRole.trim()}
-          className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+          disabled={adding}
+          className="rounded-md border px-3 py-2 text-sm"
         >
           {adding ? "Adding…" : "Add participant"}
         </button>

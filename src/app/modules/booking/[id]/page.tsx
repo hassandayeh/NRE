@@ -1,48 +1,26 @@
 "use client";
 
 /**
- * Booking View (read-only)
- *
- * What’s new (no regressions):
- * - Prefer Hosts from /api/bookings/:id/participants (role=HOST), no “primary” host.
- * - If participants are unavailable/disabled, fall back to your existing hosts model.
- * - If neither exists, fall back to legacy single-host summary (hostUserId/hostName).
- * - Guests, booking defaults, and notes behavior preserved as before.
- *
- * Flags:
- * - NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED (default: true) → use participants for Hosts.
- * - NEXT_PUBLIC_FEATURE_MULTI_HOSTS (respected as legacy fallback)
- * - NEXT_PUBLIC_APPEARANCE_PHONE (default: true)
+ * Booking View (read-only) — flag-free, Vercel-friendly
+ * - Hosts are derived from /api/bookings/:id/participants (role=HOST)
+ * - No “primary host” and no legacy env flags
+ * - Guests, defaults, and notes preserved
  */
 
 import * as React from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
-/* --- Feature flags --- */
-const PHONE_ENABLED =
-  (process.env.NEXT_PUBLIC_APPEARANCE_PHONE ?? "true") !== "false";
-const MULTI_PARTICIPANTS_ENABLED =
-  (process.env.NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
-/** Legacy flag — kept for fallback only (no regressions) */
-const MULTI_HOSTS_ENABLED =
-  (process.env.NEXT_PUBLIC_FEATURE_MULTI_HOSTS ?? "false") === "true";
-
 /* --- Types (DTO aligned with API) --- */
 type TAppearance = "ONLINE" | "IN_PERSON" | "PHONE";
 type TScope = "UNIFIED" | "PER_GUEST";
 type TProvisioning = "SHARED" | "PER_GUEST";
 
-type THostScope = "UNIFIED" | "PER_HOST";
-type THostProvisioning = "SHARED" | "PER_HOST";
-
-type TKind = "EXPERT" | "REPORTER";
-
 type GuestRow = {
   id?: string;
   userId?: string | null;
   name: string;
-  kind: TKind;
+  kind: "EXPERT" | "REPORTER";
   order: number;
   appearanceType: TAppearance;
   joinUrl?: string | null;
@@ -66,10 +44,8 @@ type HostRow = {
 type BookingDto = {
   id: string;
   orgId?: string;
-
   subject: string;
   newsroomName: string;
-
   startAt: string;
   durationMins: number;
 
@@ -88,22 +64,20 @@ type BookingDto = {
   programName?: string | null;
   talkingPoints?: string | null;
 
-  // Legacy mirrors
+  // Legacy mirrors (kept only to print raw IDs if present; no flags)
   hostUserId?: string | null;
   hostName?: string | null;
-  expertUserId?: string | null;
-  expertName?: string | null;
 
-  // Hosts model (legacy multi-hosts fallback)
-  hostAppearanceScope?: THostScope;
-  hostAccessProvisioning?: THostProvisioning;
+  // Legacy multi-hosts structure (we won’t gate on it anymore)
+  hostAppearanceScope?: "UNIFIED" | "PER_HOST";
+  hostAccessProvisioning?: "SHARED" | "PER_HOST";
   hostAppearanceType?: TAppearance | null; // when UNIFIED
   hostLocationUrl?: string | null;
   hostLocationName?: string | null;
   hostLocationAddress?: string | null;
   hostDialInfo?: string | null;
-  hosts?: HostRow[];
 
+  hosts?: HostRow[];
   guests?: GuestRow[];
 };
 
@@ -123,6 +97,7 @@ type ParticipantDTO = {
   id: string;
   userId: string | null;
   roleInBooking: Role;
+  inviteStatus?: string | null;
   user?: {
     id: string;
     name: string | null;
@@ -148,6 +123,7 @@ function fmtDateRange(startISO: string, durationMins: number) {
     x.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return sameDay ? `${d(start)} — ${t(end)}` : `${d(start)} → ${d(end)}`;
 }
+
 function fmtDate(iso: string) {
   try {
     return new Date(iso).toLocaleString();
@@ -160,30 +136,29 @@ function ExternalLink(props: { href: string; children: React.ReactNode }) {
   const { href, children } = props;
   return (
     <a
+      className="underline underline-offset-2 hover:opacity-80"
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900"
     >
       {children}
     </a>
   );
 }
 
-/* Minimal inline UI primitives */
 function ButtonLike(props: React.ComponentProps<"button">) {
   const { className = "", ...rest } = props;
   return (
     <button
       {...rest}
-      className={[
-        "inline-flex items-center rounded-md border px-3 py-1.5 text-sm",
-        "bg-black text-white hover:bg-black/90 focus:outline-none focus:ring-2 focus:ring-black",
-        className,
-      ].join(" ")}
+      className={
+        "rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 " +
+        className
+      }
     />
   );
 }
+
 function AlertBox(props: {
   children: React.ReactNode;
   variant?: "error" | "success";
@@ -194,9 +169,7 @@ function AlertBox(props: {
       ? "border-green-200 bg-green-50 text-green-800"
       : "border-red-200 bg-red-50 text-red-800";
   return (
-    <div className={`mb-2 rounded-md border p-2 text-sm ${styles}`}>
-      {children}
-    </div>
+    <div className={`rounded-md border p-3 text-sm ${styles}`}>{children}</div>
   );
 }
 
@@ -287,17 +260,13 @@ function effectiveForHost(
 }
 
 /** ======================================================================
- * ParticipantsByRolePanel (read-only, flag-gated)
+ * ParticipantsByRolePanel (read-only)
  * - Fetches /api/bookings/[id]/participants
  * - Renders sections from response.roles (NO hard-coded role names)
- * - Read-only: no add/remove/toggles; no “primary” anywhere
+ * - No flags; hooks unconditionally called
  * ====================================================================== */
 function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
-  const MULTI_PARTICIPANTS_ENABLED =
-    (process.env.NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
-  if (!MULTI_PARTICIPANTS_ENABLED) return null;
-
-  type ParticipantDTO = {
+  type Participant = {
     id: string;
     userId: string | null;
     roleInBooking: string; // enum today; future: string/catalog
@@ -310,12 +279,13 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
     } | null;
   };
 
+  // ✅ Hooks are always called; no early returns
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [roles, setRoles] = React.useState<string[]>([]);
-  const [grouped, setGrouped] = React.useState<
-    Record<string, ParticipantDTO[]>
-  >({});
+  const [grouped, setGrouped] = React.useState<Record<string, Participant[]>>(
+    {}
+  );
 
   React.useEffect(() => {
     let alive = true;
@@ -333,7 +303,7 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
         setRoles(Array.isArray(j.roles) ? j.roles : []);
         setGrouped(
           j.grouped && typeof j.grouped === "object"
-            ? (j.grouped as Record<string, ParticipantDTO[]>)
+            ? (j.grouped as Record<string, Participant[]>)
             : {}
         );
       } catch (e: any) {
@@ -348,7 +318,7 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
   }, [bookingId]);
 
   return (
-    <section className="rounded-xl border p-4">
+    <section className="mt-10 rounded-lg border p-4">
       <h2 className="mb-2 text-lg font-semibold">Participants (by role)</h2>
       <p className="mb-4 text-sm text-gray-600">
         Rendered dynamically from the API’s roles. No role names are hard-coded.
@@ -356,16 +326,10 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
 
       {loading && <div className="text-sm text-gray-600">Loading…</div>}
 
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-800">
-          {error}
-        </div>
-      )}
+      {error && <AlertBox>{error}</AlertBox>}
 
       {!loading && !error && roles.length === 0 && (
-        <div className="rounded-md border bg-gray-50 p-3 text-sm text-gray-700">
-          No participants yet.
-        </div>
+        <div className="text-sm text-gray-600">No participants yet.</div>
       )}
 
       {!loading &&
@@ -373,19 +337,17 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
         roles.map((role) => {
           const list = grouped?.[role] ?? [];
           return (
-            <div key={role} className="mb-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold tracking-wide">
-                  {role} ({list.length})
-                </h3>
-              </div>
+            <div key={role} className="mb-6">
+              <h3 className="mb-2 font-medium">
+                {role} ({list.length})
+              </h3>
 
               {list.length === 0 ? (
-                <div className="rounded-md border bg-white p-2 text-sm text-gray-600">
+                <div className="text-sm text-gray-600">
                   No entries for this role.
                 </div>
               ) : (
-                <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <ul className="space-y-1">
                   {list.map((p) => {
                     const name =
                       p?.user?.name ||
@@ -401,23 +363,20 @@ function ParticipantsByRolePanel({ bookingId }: { bookingId: string }) {
                         : invite
                         ? "bg-gray-100 text-gray-700"
                         : "";
+
                     return (
                       <li
                         key={p.id}
-                        className="flex items-center justify-between rounded-md border bg-white px-3 py-2"
+                        className="flex items-center gap-2 text-sm"
                       >
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">
-                            {name}
-                          </div>
-                          {!!invite && (
-                            <div
-                              className={`mt-0.5 inline-block rounded px-2 py-0.5 text-2xs uppercase ${pill}`}
-                            >
-                              {invite}
-                            </div>
-                          )}
-                        </div>
+                        <span>{name}</span>
+                        {!!invite && (
+                          <span
+                            className={`rounded px-2 py-0.5 text-xs ${pill}`}
+                          >
+                            {invite}
+                          </span>
+                        )}
                       </li>
                     );
                   })}
@@ -439,7 +398,7 @@ export default function BookingViewPage() {
   const [booking, setBooking] = React.useState<BookingDto | null>(null);
   const [canEdit, setCanEdit] = React.useState(false);
 
-  // Participants (HOSTS only used here)
+  // Participants (HOSTS only used in the "Hosts" section)
   const [participantsHosts, setParticipantsHosts] = React.useState<
     ParticipantDTO[]
   >([]);
@@ -462,13 +421,11 @@ export default function BookingViewPage() {
       try {
         setLoading(true);
         setError(null);
-
         const res = await fetch(`/api/bookings/${id}`, {
           credentials: "include",
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j?.error || "Failed to load booking");
-
         const b: BookingDto = j?.booking ?? j;
 
         // Sort guests/hosts by order for display parity
@@ -478,12 +435,6 @@ export default function BookingViewPage() {
         b.hosts = (b.hosts || [])
           .slice()
           .sort((a, z) => (a.order ?? 0) - (z.order ?? 0));
-
-        // Phone flag safety
-        if (!PHONE_ENABLED && b.appearanceType === "PHONE")
-          b.appearanceType = "ONLINE";
-        if (!PHONE_ENABLED && b.hostAppearanceType === "PHONE")
-          b.hostAppearanceType = "ONLINE";
 
         if (alive) {
           setBooking(b);
@@ -500,12 +451,8 @@ export default function BookingViewPage() {
     };
   }, [id]);
 
-  // Load participants (HOSTS), preferring normalized participants if enabled
+  // Load participants (HOSTS)
   React.useEffect(() => {
-    if (!MULTI_PARTICIPANTS_ENABLED) {
-      setParticipantsReady(true);
-      return;
-    }
     let cancelled = false;
     (async () => {
       try {
@@ -537,6 +484,7 @@ export default function BookingViewPage() {
   // Load notes (expert-safe handling)
   React.useEffect(() => {
     let cancelled = false;
+
     async function loadNotes() {
       setNotesLoading(true);
       setNoteMsg(null);
@@ -548,6 +496,7 @@ export default function BookingViewPage() {
         });
         const json = await res.json().catch(() => ({}));
         if (cancelled) return;
+
         if (res.ok && json?.ok) {
           setNotes(json.notes || []);
         } else if (res.status === 403) {
@@ -570,6 +519,7 @@ export default function BookingViewPage() {
         if (!cancelled) setNotesLoading(false);
       }
     }
+
     if (id) loadNotes();
     return () => {
       cancelled = true;
@@ -616,22 +566,21 @@ export default function BookingViewPage() {
     }
   }
 
-  if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>;
+  if (loading) return <div className="p-6 text-sm text-gray-600">Loading…</div>;
+
   if (error || !booking) {
     return (
-      <div className="p-4 text-sm text-red-700">{error || "Not found"}</div>
+      <div className="p-6">
+        <AlertBox>{error || "Not found"}</AlertBox>
+      </div>
     );
   }
 
   const b = booking;
 
-  // Build a view list for Hosts:
-  // If participants HOSTs are available, map them to display rows.
-  // Use per-host details from legacy hosts[] when present (match by userId).
+  // Build a view list for Hosts from participants HOSTs; if none, show "None"
   const participantHostRows =
-    MULTI_PARTICIPANTS_ENABLED &&
-    participantsReady &&
-    participantsHosts.length > 0
+    participantsReady && participantsHosts.length > 0
       ? participantsHosts.map((p, i) => {
           const byUser = (b.hosts || []).find(
             (h) => String(h.userId ?? "") === String(p.userId ?? "")
@@ -654,9 +603,9 @@ export default function BookingViewPage() {
       : [];
 
   return (
-    <div className="mx-auto max-w-4xl p-4">
+    <div className="mx-auto max-w-4xl p-6">
       {/* Title */}
-      <div className="mb-4">
+      <section className="mb-4">
         <h1 className="text-2xl font-semibold">{b.subject}</h1>
         <div className="text-sm text-gray-600">{b.newsroomName}</div>
         <div className="text-sm text-gray-600">
@@ -664,33 +613,26 @@ export default function BookingViewPage() {
         </div>
         {canEdit && (
           <div className="mt-2 flex gap-2">
-            <Link
-              href={`/modules/booking/${b.id}/edit`}
-              className="rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
-            >
+            <Link href={`/modules/booking/${b.id}/edit`} className="underline">
               Edit
             </Link>
-            <Link
-              href={`/modules/booking/new`}
-              className="rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
-            >
+            <Link href="/modules/booking/new" className="underline">
               New booking
             </Link>
           </div>
         )}
-      </div>
+      </section>
 
-      {MULTI_PARTICIPANTS_ENABLED && (
-        <ParticipantsByRolePanel bookingId={String(id)} />
-      )}
+      {/* Participants by role (always rendered; no flags) */}
+      <ParticipantsByRolePanel bookingId={b.id} />
 
       {/* Hosts */}
-      <section className="mb-6 rounded-lg border p-4">
-        <h2 className="mb-2 text-lg font-medium">Hosts</h2>
+      <section className="mt-6 rounded-lg border p-4">
+        <h2 className="mb-2 text-lg font-semibold">Hosts</h2>
 
         {/* Preferred: participants HOSTs */}
         {participantHostRows.length > 0 ? (
-          <div className="flex flex-col gap-3">
+          <ul className="space-y-4">
             {participantHostRows.map(({ p, hRow }, idx) => {
               const eff = effectiveForHost(hRow, b);
               const scope = b.hostAppearanceScope ?? "UNIFIED";
@@ -699,27 +641,21 @@ export default function BookingViewPage() {
                   ? b.hostAppearanceType ?? "ONLINE"
                   : hRow.appearanceType;
               return (
-                <div key={p.id} className="rounded-md border p-3">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
-                      #{idx + 1}
-                    </span>
-                    <span className="font-medium">
-                      {hRow.name || p.user?.name || "Host"}
-                    </span>
+                <li key={p.id ?? idx} className="rounded-md border p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">#{idx + 1}</span>
+                    <span>{hRow.name || p.user?.name || "Host"}</span>
                     {p.userId && (
-                      <span className="text-xs text-gray-500">
-                        ({p.userId})
-                      </span>
+                      <span className="text-gray-500">({p.userId})</span>
                     )}
-                    <span className="ml-auto rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
+                    <span className="ml-auto rounded bg-gray-100 px-2 py-0.5 text-xs">
                       {typeLabel}
                     </span>
                   </div>
 
                   {/* Appearance-specific effective detail */}
                   {eff.kind === "ONLINE" && (
-                    <div className="text-sm">
+                    <div className="mt-1">
                       Join:{" "}
                       {eff.value ? (
                         <ExternalLink href={eff.value}>Open link</ExternalLink>
@@ -727,280 +663,183 @@ export default function BookingViewPage() {
                         "—"
                       )}{" "}
                       {eff.usedFallback && (
-                        <span className="text-xs text-gray-600">
+                        <span className="text-xs text-gray-500">
                           (using booking defaults)
                         </span>
                       )}
                     </div>
                   )}
                   {eff.kind === "IN_PERSON" && (
-                    <div className="text-sm">
+                    <div className="mt-1">
                       Venue/address: {eff.value || "—"}{" "}
                       {eff.usedFallback && (
-                        <span className="text-xs text-gray-600">
+                        <span className="text-xs text-gray-500">
                           (using booking defaults)
                         </span>
                       )}
                     </div>
                   )}
-                  {PHONE_ENABLED && eff.kind === "PHONE" && (
-                    <div className="text-sm">
+                  {eff.kind === "PHONE" && (
+                    <div className="mt-1">
                       Dial info: {eff.value || "—"}{" "}
                       {eff.usedFallback && (
-                        <span className="text-xs text-gray-600">
+                        <span className="text-xs text-gray-500">
                           (using booking defaults)
                         </span>
                       )}
                     </div>
                   )}
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
         ) : (
-          // Fallback: original multi-hosts section (respects legacy flag)
-          <>
-            {MULTI_HOSTS_ENABLED && (b.hosts?.length ?? 0) > 0 ? (
-              <>
-                <div className="flex flex-col gap-3">
-                  {(b.hosts || []).map((h, idx) => {
-                    const eff = effectiveForHost(h, b);
-                    const scope = b.hostAppearanceScope ?? "UNIFIED";
-                    const typeLabel =
-                      scope === "UNIFIED"
-                        ? b.hostAppearanceType ?? "ONLINE"
-                        : h.appearanceType;
-                    return (
-                      <div
-                        key={h.id || `${h.userId}-${idx}`}
-                        className="rounded-md border p-3"
-                      >
-                        <div className="mb-1 flex items-center gap-2">
-                          <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
-                            #{idx + 1}
-                          </span>
-                          <span className="font-medium">
-                            {h.name || "Host"}
-                          </span>
-                          {h.userId && (
-                            <span className="text-xs text-gray-500">
-                              ({h.userId})
-                            </span>
-                          )}
-                          <span className="ml-auto rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
-                            {typeLabel}
-                          </span>
-                        </div>
-
-                        {eff.kind === "ONLINE" && (
-                          <div className="text-sm">
-                            Join:{" "}
-                            {eff.value ? (
-                              <ExternalLink href={eff.value}>
-                                Open link
-                              </ExternalLink>
-                            ) : (
-                              "—"
-                            )}{" "}
-                            {eff.usedFallback && (
-                              <span className="text-xs text-gray-600">
-                                (using booking defaults)
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {eff.kind === "IN_PERSON" && (
-                          <div className="text-sm">
-                            Venue/address: {eff.value || "—"}{" "}
-                            {eff.usedFallback && (
-                              <span className="text-xs text-gray-600">
-                                (using booking defaults)
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {PHONE_ENABLED && eff.kind === "PHONE" && (
-                          <div className="text-sm">
-                            Dial info: {eff.value || "—"}{" "}
-                            {eff.usedFallback && (
-                              <span className="text-xs text-gray-600">
-                                (using booking defaults)
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Legacy single-host summary for parity */}
-                <div className="mt-3 rounded-md border p-3 text-sm text-gray-700">
-                  <div className="font-medium">Legacy host summary</div>
-                  {b.hostUserId ? (
-                    <div>
-                      {b.hostName || "Host"} ({b.hostUserId})
-                    </div>
-                  ) : (
-                    <div>None</div>
-                  )}
-                </div>
-              </>
-            ) : (
-              /* Final fallback: legacy single-host section (unchanged) */
-              <div className="text-sm text-gray-700">
-                {b.hostUserId ? (
-                  <div>
-                    <div className="font-medium">{b.hostName || "Host"}</div>
-                    <div className="text-xs text-gray-500">{b.hostUserId}</div>
-                  </div>
-                ) : (
-                  <div>None</div>
-                )}
-              </div>
-            )}
-          </>
+          <div className="text-sm text-gray-600">None</div>
         )}
       </section>
 
       {/* Booking defaults (Guests UNIFIED) */}
       {b.appearanceScope === "UNIFIED" && (
-        <section className="mb-6 rounded-lg border p-4">
-          <h2 className="mb-2 text-lg font-medium">
+        <section className="mt-6 rounded-lg border p-4">
+          <h2 className="mb-2 text-lg font-semibold">
             Booking defaults (guests)
           </h2>
-          <div className="text-sm">
-            <div className="mb-1">Type: {b.appearanceType ?? "ONLINE"}</div>
-            {(b.appearanceType ?? "ONLINE") === "ONLINE" && (
-              <div>
-                {b.locationUrl ? (
-                  <>
-                    Join link:{" "}
-                    <ExternalLink href={b.locationUrl}>Open link</ExternalLink>
-                  </>
-                ) : (
-                  "No link provided."
-                )}
-              </div>
-            )}
-            {(b.appearanceType ?? "ONLINE") === "IN_PERSON" && (
-              <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-                <div>Venue: {b.locationName || "—"}</div>
-                <div>Address: {b.locationAddress || "—"}</div>
-              </div>
-            )}
-            {PHONE_ENABLED && (b.appearanceType ?? "ONLINE") === "PHONE" && (
-              <div>Dial info: {b.dialInfo || "—"}</div>
-            )}
-          </div>
+          <div className="text-sm">Type: {b.appearanceType ?? "ONLINE"}</div>
+
+          {(b.appearanceType ?? "ONLINE") === "ONLINE" && (
+            <div className="mt-1 text-sm">
+              {b.locationUrl ? (
+                <>
+                  Join link:{" "}
+                  <ExternalLink href={b.locationUrl}>Open link</ExternalLink>
+                </>
+              ) : (
+                "No link provided."
+              )}
+            </div>
+          )}
+
+          {(b.appearanceType ?? "ONLINE") === "IN_PERSON" && (
+            <div className="mt-1 text-sm">
+              <div>Venue: {b.locationName || "—"}</div>
+              <div>Address: {b.locationAddress || "—"}</div>
+            </div>
+          )}
+
+          {(b.appearanceType ?? "ONLINE") === "PHONE" && (
+            <div className="mt-1 text-sm">Dial info: {b.dialInfo || "—"}</div>
+          )}
         </section>
       )}
 
       {/* Guests */}
-      <section className="mb-6 rounded-lg border p-4">
-        <h2 className="mb-2 text-lg font-medium">Guests</h2>
+      <section className="mt-6 rounded-lg border p-4">
+        <h2 className="mb-2 text-lg font-semibold">Guests</h2>
+
         {(!b.guests || b.guests.length === 0) && (
-          <div className="text-sm text-gray-700">None added.</div>
+          <div className="text-sm text-gray-600">None added.</div>
         )}
-        <div className="flex flex-col gap-3">
-          {(b.guests || []).map((g, idx) => {
-            const eff = effectiveForGuest(g, b);
-            return (
-              <div
-                key={g.id || `${g.userId}-${idx}`}
-                className="rounded-md border p-3"
-              >
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
-                    #{idx + 1}
-                  </span>
-                  <span className="font-medium">{g.name}</span>
-                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
-                    {g.kind}
-                  </span>
-                  <span className="ml-auto rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
-                    {g.appearanceType}
-                  </span>
-                </div>
 
-                {g.userId && (
-                  <div className="text-xs text-gray-500">User: {g.userId}</div>
-                )}
-
-                {/* Appearance-specific detail (effective) */}
-                {eff.kind === "ONLINE" && (
-                  <div className="text-sm">
-                    Join:{" "}
-                    {eff.value ? (
-                      <ExternalLink href={eff.value}>Open link</ExternalLink>
-                    ) : (
-                      "—"
-                    )}{" "}
-                    {eff.usedFallback && (
-                      <span className="text-xs text-gray-600">
-                        (using default)
-                      </span>
-                    )}
-                  </div>
-                )}
-                {eff.kind === "IN_PERSON" && (
-                  <div className="text-sm">
-                    Venue/address: {eff.value || "—"}{" "}
-                    {eff.usedFallback && (
-                      <span className="text-xs text-gray-600">
-                        (using default)
-                      </span>
-                    )}
-                  </div>
-                )}
-                {PHONE_ENABLED && eff.kind === "PHONE" && (
-                  <div className="text-sm">
-                    Dial info: {eff.value || "—"}{" "}
-                    {eff.usedFallback && (
-                      <span className="text-xs text-gray-600">
-                        (using default)
-                      </span>
-                    )}
-                  </div>
-                )}
+        {(b.guests || []).map((g, idx) => {
+          const eff = effectiveForGuest(g, b);
+          return (
+            <div
+              key={g.id ?? idx}
+              className="mb-3 rounded-md border p-3 text-sm"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">#{idx + 1}</span>
+                <span>{g.name}</span>
+                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
+                  {g.kind}
+                </span>
+                <span className="ml-auto rounded bg-gray-100 px-2 py-0.5 text-xs">
+                  {g.appearanceType}
+                </span>
               </div>
-            );
-          })}
-        </div>
+
+              {g.userId && (
+                <div className="mt-1 text-xs text-gray-600">
+                  User: <span className="font-mono">{g.userId}</span>
+                </div>
+              )}
+
+              {/* Appearance-specific detail (effective) */}
+              {eff.kind === "ONLINE" && (
+                <div className="mt-1">
+                  Join:{" "}
+                  {eff.value ? (
+                    <ExternalLink href={eff.value}>Open link</ExternalLink>
+                  ) : (
+                    "—"
+                  )}{" "}
+                  {eff.usedFallback && (
+                    <span className="text-xs text-gray-500">
+                      (using default)
+                    </span>
+                  )}
+                </div>
+              )}
+              {eff.kind === "IN_PERSON" && (
+                <div className="mt-1">
+                  Venue/address: {eff.value || "—"}{" "}
+                  {eff.usedFallback && (
+                    <span className="text-xs text-gray-500">
+                      (using default)
+                    </span>
+                  )}
+                </div>
+              )}
+              {eff.kind === "PHONE" && (
+                <div className="mt-1">
+                  Dial info: {eff.value || "—"}{" "}
+                  {eff.usedFallback && (
+                    <span className="text-xs text-gray-500">
+                      (using default)
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </section>
 
       {/* Additional details */}
       {(b.programName || b.talkingPoints) && (
-        <section className="mb-6 rounded-lg border p-4">
-          <h2 className="mb-2 text-lg font-medium">Additional details</h2>
-          <div className="text-sm">
-            {b.programName && <div>Program: {b.programName}</div>}
-            {b.talkingPoints && (
-              <div className="mt-2">
-                <div className="mb-1 font-medium">Talking points:</div>
-                <div className="whitespace-pre-wrap">{b.talkingPoints}</div>
-              </div>
-            )}
-          </div>
+        <section className="mt-6 rounded-lg border p-4">
+          <h2 className="mb-2 text-lg font-semibold">Additional details</h2>
+          {b.programName && (
+            <div className="text-sm">Program: {b.programName}</div>
+          )}
+          {b.talkingPoints && (
+            <div className="mt-1 whitespace-pre-wrap text-sm">
+              {b.talkingPoints}
+            </div>
+          )}
         </section>
       )}
 
       {/* Notes (server enforces who sees what; guests can post and only see their own) */}
-      <section className="mb-6 rounded-lg border p-4">
-        <h2 className="mb-2 text-lg font-medium">Notes</h2>
-        {noteMsg && <AlertBox variant={noteMsg.tone}>{noteMsg.text}</AlertBox>}
+      <section className="mt-6 rounded-lg border p-4">
+        <h2 className="mb-2 text-lg font-semibold">Notes</h2>
+
+        {noteMsg && (
+          <div className="mb-2">
+            <AlertBox variant={noteMsg.tone}>{noteMsg.text}</AlertBox>
+          </div>
+        )}
 
         {notesLoading ? (
           <div className="text-sm text-gray-600">Loading notes…</div>
         ) : notes.length === 0 ? (
-          <div className="text-sm text-gray-700">No notes yet.</div>
+          <div className="text-sm text-gray-600">No notes yet.</div>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="space-y-2">
             {notes.map((n) => (
               <li key={n.id} className="rounded-md border p-2">
-                <div className="mb-1 text-xs text-gray-600">
-                  <span className="font-medium">{n.authorName}</span> •{" "}
-                  {fmtDate(n.createdAt)}
+                <div className="text-xs text-gray-500">
+                  {n.authorName} • {fmtDate(n.createdAt)}
                 </div>
                 <div className="whitespace-pre-wrap text-sm">{n.body}</div>
               </li>
