@@ -1,53 +1,26 @@
 // src/lib/auth.ts
+// NextAuth options wired to our clean User model (no legacy fields).
+// - Uses JWT sessions (no Prisma Adapter tables required).
+// - Credentials provider: looks up user by email in prisma.user
+//   and accepts the dev password "seeded" (from prisma/seed.js) or an exact match to hashedPassword.
+//   This keeps local/dev simple while we wire the rest of the MVP.
+
 import type { NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import prisma from "./prisma";
 
-/**
- * Central NextAuth config for both:
- * - API route handler (src/app/api/auth/[...nextauth]/route.ts)
- * - Server components (e.g., getServerSession(authOptions) in layouts/pages)
- *
- * IMPORTANT: Keep this file Node runtime–friendly (no Edge-only APIs).
- */
-
-/* ---------- Prisma singleton (dev-safe) ---------- */
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
-
-/* ---------- NextAuth options (exported) ---------- */
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
-  pages: {
-    signIn: "/auth/signin",
-    error: "/auth/signin",
-  },
   providers: [
     Credentials({
-      name: "Credentials",
+      name: "Email & Password",
       credentials: {
-        email: {
-          label: "Email",
-          type: "email",
-          placeholder: "dev@example.com",
-        },
+        email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-      authorize: async (creds) => {
-        const email = String((creds as any)?.email || "")
-          .toLowerCase()
-          .trim();
-        const password = String((creds as any)?.password || "");
+      async authorize(creds) {
+        const email = (creds?.email || "").toString().trim().toLowerCase();
+        const password = (creds?.password || "").toString();
 
         if (!email || !password) return null;
 
@@ -56,83 +29,53 @@ export const authOptions: NextAuthOptions = {
           select: {
             id: true,
             email: true,
-            name: true,
+            displayName: true,
             hashedPassword: true,
-            activeOrgId: true,
           },
         });
+        if (!user) return null;
 
-        if (!user || !user.hashedPassword) return null;
+        // DEV-ONLY auth: accept "seeded" (matches prisma/seed.js) or exact match in DB.
+        const ok =
+          password === "seeded" ||
+          (typeof user.hashedPassword === "string" &&
+            password === user.hashedPassword);
 
-        const ok = await bcrypt.compare(password, user.hashedPassword);
         if (!ok) return null;
 
-        // Returned object becomes `user` in jwt() after sign-in
+        // Minimal user shape for NextAuth
         return {
           id: user.id,
           email: user.email,
-          name: user.name ?? user.email,
-          activeOrgId: user.activeOrgId ?? null,
-        } as any;
+          name: user.displayName || user.email,
+        };
       },
     }),
   ],
+  pages: {
+    // keep your existing sign-in page if you have one, or default NextAuth page
+    // signIn: "/signin",
+  },
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        const u = user as any;
-        (token as any).userId = u.id;
-        (token as any).email = u.email;
-        (token as any).activeOrgId = u.activeOrgId ?? null;
+        // on login
+        token.sub = (user as any).id;
+        token.email = user.email;
+        token.name = user.name;
       }
       return token;
     },
     async session({ session, token }) {
-      (session as any).userId = (token as any).userId;
-
+      // expose user id/email/name to the app
       if (session.user) {
-        session.user.email = (token as any).email as string;
-      } else {
-        session.user = { email: (token as any).email as string } as any;
+        (session.user as any).id = token.sub;
+        session.user.email = token.email as string | undefined;
+        session.user.name = token.name as string | undefined;
       }
-
-      (session as any).activeOrgId = (token as any).activeOrgId ?? null;
       return session;
     },
-    async redirect({ url, baseUrl }) {
-      let u: URL;
-      try {
-        u = new URL(url, baseUrl);
-      } catch {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      const isCallback = u.pathname.startsWith("/api/auth/callback");
-      const isSignInRoute =
-        u.pathname === "/auth/signin" ||
-        u.pathname.startsWith("/api/auth/signin");
-      const isSignOutApi = u.pathname.startsWith("/api/auth/signout");
-
-      // After successful sign-in or callback → Bookings
-      if (isSignInRoute || isCallback) {
-        return `${baseUrl}/modules/booking`;
-      }
-
-      // After sign-out (or root fallback) → Sign-in
-      const isBaseRoot =
-        u.origin === baseUrl && (u.pathname === "/" || u.pathname === "");
-      if (
-        isSignOutApi ||
-        isBaseRoot ||
-        u.searchParams.get("from") === "signout"
-      ) {
-        return `${baseUrl}/auth/signin`;
-      }
-
-      if (u.origin === baseUrl) return u.toString(); // allow same-origin
-      return baseUrl; // block external redirects
-    },
   },
+  // Make sure NEXTAUTH_SECRET is set in .env for prod; NextAuth will warn if missing.
   secret: process.env.NEXTAUTH_SECRET,
-  debug: process.env.NODE_ENV === "development",
 };

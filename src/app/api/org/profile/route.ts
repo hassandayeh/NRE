@@ -1,123 +1,159 @@
 // src/app/api/org/profile/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
-import { z } from "zod";
+import { resolveViewerFromRequest } from "../../../../lib/viewer";
+import { hasCan } from "../../../../lib/access/permissions";
 
-/** Helpers */
-function json(data: unknown, init?: number | ResponseInit) {
-  const normalized: ResponseInit | undefined =
-    typeof init === "number" ? { status: init } : init;
-  return NextResponse.json(data, normalized);
-}
-
-async function requireUser() {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) return null;
-
-  const id = (session.user as any)?.id as string | undefined;
-  const email = (session.user as any)?.email as string | undefined;
-
-  if (id) {
-    const u = await prisma.user.findUnique({ where: { id } });
-    if (u) return u;
-  }
-  if (email) {
-    const u = await prisma.user.findUnique({ where: { email } });
-    if (u) return u;
-  }
-  return null;
-}
-
-/**
- * Resolve the organization the requester OWNS.
- * If `?orgId=` is provided, we verify ownership of that org.
- * Otherwise we pick the first org where the user has role OWNER.
- */
-async function resolveOwnerOrgId(userId: string, req: NextRequest) {
-  const url = new URL(req.url);
-  const qOrgId = url.searchParams.get("orgId")?.trim();
-
-  if (qOrgId) {
-    const own = await prisma.organizationMembership.findFirst({
-      where: { userId, orgId: qOrgId, role: "OWNER" as any },
-      select: { orgId: true },
-    });
-    if (!own) return null;
-    return own.orgId;
-  }
-
-  const anyOwned = await prisma.organizationMembership.findFirst({
-    where: { userId, role: "OWNER" as any },
-    select: { orgId: true },
-  });
-  return anyOwned?.orgId ?? null;
-}
-
-/** Validation */
-const putSchema = z
-  .object({
-    name: z.string().trim().min(1, "Name is required").max(200, "Too long"),
-  })
-  .strict();
-
-/** GET /api/org/profile[?orgId=...] — owner only */
+// ---------------- GET /api/org/profile ----------------
+// Query: orgId (required), includeRoles=true|false (default true)
 export async function GET(req: NextRequest) {
-  const user = await requireUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
-
-  const orgId = await resolveOwnerOrgId((user as any).id, req);
-  if (!orgId) return json({ error: "Forbidden (owner only)" }, 403);
-
-  // Avoid typed select (older Prisma clients): fetch broad and pick fields
-  const org = (await prisma.organization.findUnique({
-    where: { id: orgId },
-  })) as any;
-
-  if (!org) return json({ error: "Organization not found" }, 404);
-
-  return json({
-    org: {
-      id: org.id,
-      name: org.name,
-      // Future: logoUrl, description (after schema adds)
-    },
-  });
-}
-
-/** PUT /api/org/profile[?orgId=...] — owner only */
-export async function PUT(req: NextRequest) {
-  const user = await requireUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
-
-  const orgId = await resolveOwnerOrgId((user as any).id, req);
-  if (!orgId) return json({ error: "Forbidden (owner only)" }, 403);
-
-  let payload: unknown = {};
   try {
-    payload = await req.json();
-  } catch {
-    return json({ error: "Invalid JSON" }, 400);
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer?.isSignedIn || !viewer.userId) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const { searchParams } = new URL(req.url);
+    const orgId = searchParams.get("orgId") ?? "";
+    const includeRoles =
+      (searchParams.get("includeRoles") ?? "true").toLowerCase() === "true";
+    if (!orgId) {
+      return NextResponse.json(
+        { ok: false, error: "orgId is required" },
+        { status: 400 }
+      );
+    }
+
+    // Basic read gate — anyone who can view bookings can read org profile
+    const canRead = await hasCan({
+      userId: viewer.userId,
+      orgId,
+      permission: "booking:view",
+    });
+    if (!canRead) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
+    const org = await prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { id: true, name: true, createdAt: true, updatedAt: true },
+    });
+    if (!org) {
+      return NextResponse.json(
+        { ok: false, error: "Not found" },
+        { status: 404 }
+      );
+    }
+
+    let roles: Array<{ slot: number; label: string; isActive: boolean }> = [];
+    if (includeRoles) {
+      roles = await prisma.orgRole.findMany({
+        where: { orgId },
+        orderBy: { slot: "asc" },
+        select: { slot: true, label: true, isActive: true },
+      });
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        org: {
+          id: org.id,
+          name: org.name,
+          createdAt: org.createdAt.toISOString(),
+          updatedAt: org.updatedAt.toISOString(),
+          roles,
+        },
+      },
+      { status: 200 }
+    );
+  } catch (err) {
+    console.error("GET /api/org/profile error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to load org profile" },
+      { status: 500 }
+    );
   }
-
-  const parsed = putSchema.safeParse(payload);
-  if (!parsed.success) {
-    return json({ error: parsed.error.flatten() }, 400);
-  }
-
-  const updated = (await prisma.organization.update({
-    where: { id: orgId },
-    data: { name: parsed.data.name } as any,
-  })) as any;
-
-  return json({
-    org: {
-      id: updated.id,
-      name: updated.name,
-    },
-  });
 }
 
-// PATCH behaves like PUT for convenience
-export const PATCH = PUT;
+// ---------------- PATCH /api/org/profile ----------------
+// Body: { orgId: string, name?: string }
+// Requires: settings:manage
+export async function PATCH(req: NextRequest) {
+  try {
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer?.isSignedIn || !viewer.userId) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const body = (await req.json().catch(() => ({}))) as Partial<{
+      orgId: string;
+      name: string;
+    }>;
+    const orgId = typeof body.orgId === "string" ? body.orgId : "";
+    if (!orgId) {
+      return NextResponse.json(
+        { ok: false, error: "orgId is required" },
+        { status: 400 }
+      );
+    }
+
+    const canUpdate = await hasCan({
+      userId: viewer.userId,
+      orgId,
+      permission: "settings:manage",
+    });
+    if (!canUpdate) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
+    const data: { name?: string } = {};
+    if (typeof body.name === "string" && body.name.trim()) {
+      data.name = body.name.trim().slice(0, 200);
+    }
+
+    if (!Object.keys(data).length) {
+      return NextResponse.json(
+        { ok: false, error: "No changes supplied" },
+        { status: 400 }
+      );
+    }
+
+    const updated = await prisma.organization.update({
+      where: { id: orgId },
+      data,
+      select: { id: true, name: true, createdAt: true, updatedAt: true },
+    });
+
+    return NextResponse.json(
+      {
+        ok: true,
+        org: {
+          id: updated.id,
+          name: updated.name,
+          createdAt: updated.createdAt.toISOString(),
+          updatedAt: updated.updatedAt.toISOString(),
+        },
+      },
+      { status: 200 }
+    );
+  } catch (err) {
+    console.error("PATCH /api/org/profile error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to update org profile" },
+      { status: 500 }
+    );
+  }
+}

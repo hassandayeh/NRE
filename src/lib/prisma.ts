@@ -1,23 +1,22 @@
 // src/lib/prisma.ts
+// Single Prisma client for the whole app.
+// Exports BOTH a default and a named `prisma` to avoid import-style mismatches.
+
 import { PrismaClient } from "@prisma/client";
 
-/**
- * Prisma singleton for Next.js (prevents exhausting DB connections during HMR).
- * In dev, we stash the client on globalThis; in prod, we create a single instance.
- */
 const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
+  __prisma?: PrismaClient;
 };
 
-export const prisma =
-  globalForPrisma.prisma ??
+const prisma =
+  globalForPrisma.__prisma ??
   new PrismaClient({
-    // You can uncomment logs while debugging Prisma:
-    // log: ["query", "error", "warn"],
+    log: ["warn", "error"],
   });
 
 if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
+  globalForPrisma.__prisma = prisma;
 }
 
-export default prisma;
+export { prisma }; // named export
+export default prisma; // default export

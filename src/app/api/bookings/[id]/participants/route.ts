@@ -1,102 +1,18 @@
 // src/app/api/bookings/[id]/participants/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "../../../../../lib/prisma";
-import {
-  resolveViewerFromRequest,
-  canEditBooking,
-} from "../../../../../lib/viewer";
-import { Prisma, BookingParticipantRole, InviteStatus } from "@prisma/client";
+import { resolveViewerFromRequest } from "../../../../../lib/viewer";
+import { hasCan } from "../../../../../lib/access/permissions";
+import { InviteStatus } from "@prisma/client";
 
-const MULTI_PARTICIPANTS_ENABLED =
-  (process.env.MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
-
-/* ----------------------------- helpers ------------------------------ */
-function upcaseString(v: unknown): string | null {
-  if (typeof v !== "string") return null;
-  const s = v.trim();
-  if (!s) return null;
-  return s.toUpperCase();
-}
-function coerceRoleEnum(v: unknown): BookingParticipantRole | null {
-  const s = upcaseString(v);
-  if (!s) return null;
-  const vals = Object.values(BookingParticipantRole) as string[];
-  return vals.includes(s) ? (s as BookingParticipantRole) : null;
-}
-// STRICT string version (no union) to satisfy includes()
-function coerceStatusEnum(v: unknown): InviteStatus | null {
-  const raw = upcaseString(v);
-  if (!raw) return null;
-  const s = raw === "CANCELED" ? "CANCELLED" : raw; // prisma uses CANCELLED
-  const vals = Object.values(InviteStatus) as string[];
-  return vals.includes(s) ? (s as InviteStatus) : null;
-}
-function asTrimmedOrNull(v: unknown): string | null {
-  if (typeof v !== "string") return null;
-  const t = v.trim();
-  return t.length ? t : null;
-}
-function ensureEnabled() {
-  if (!MULTI_PARTICIPANTS_ENABLED) {
-    throw Object.assign(new Error("Participants API is disabled"), {
-      status: 404,
-    });
-  }
-}
-async function canViewerRead(viewer: any, bookingId: string, orgId: string) {
-  if (canEditBooking(viewer, orgId)) return true;
-  if (viewer?.userId) {
-    const exists = await prisma.bookingParticipant.findFirst({
-      where: { bookingId, userId: viewer.userId },
-      select: { id: true },
-    });
-    if (exists) return true;
-  }
-  return false;
-}
-function mapParticipant(p: any) {
-  return {
-    id: p.id,
-    role: p.role as string,
-    inviteStatus: (p.inviteStatus as InviteStatus | null) ?? null,
-    isPrimaryHost: !!p.isPrimaryHost,
-    notes: p.notes ?? null,
-    invitedAt: p.invitedAt ?? null,
-    respondedAt: p.respondedAt ?? null,
-    createdAt: p.createdAt ?? null,
-    updatedAt: p.updatedAt ?? null,
-    userId: p.userId ?? null,
-    user: p.user
-      ? {
-          id: p.user.id,
-          displayName: p.user.displayName,
-          name: p.user.name,
-          email: p.user.email,
-          avatarUrl: p.user.avatarUrl,
-        }
-      : null,
-  };
-}
-function groupDynamically(rows: Array<{ role: string } & any>) {
-  const grouped: Record<string, any[]> = {};
-  for (const r of rows) {
-    const key = r.role || "UNKNOWN";
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(r);
-  }
-  return grouped;
-}
-
-/* ------------------------------- GET -------------------------------- */
+// GET: list participants on a booking (requires participant:view)
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    ensureEnabled();
-
     const viewer = await resolveViewerFromRequest(req);
-    if (!viewer?.isSignedIn) {
+    if (!viewer?.isSignedIn || !viewer.userId) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
         { status: 401 }
@@ -114,79 +30,64 @@ export async function GET(
       );
     }
 
-    // orgId is non-null in schema; assert to satisfy TS
-    const canRead = await canViewerRead(
-      viewer,
-      booking.id,
-      booking.orgId as string
-    );
-    if (!canRead) {
+    const canView = await hasCan({
+      userId: viewer.userId,
+      orgId: booking.orgId,
+      permission: "participant:view",
+    });
+    if (!canView) {
       return NextResponse.json(
-        { ok: false, error: "Not found" },
-        { status: 404 }
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
       );
     }
 
     const rows = await prisma.bookingParticipant.findMany({
       where: { bookingId: booking.id },
-      orderBy: [
-        { role: "asc" },
-        { isPrimaryHost: "desc" },
-        { createdAt: "asc" },
-      ],
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            name: true,
-            email: true,
-            avatarUrl: true,
-          },
-        },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        bookingId: true,
+        userId: true,
+        roleSlot: true,
+        roleLabelSnapshot: true,
+        inviteStatus: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, displayName: true } },
       },
     });
 
-    const participants = rows.map(mapParticipant);
-    const grouped = groupDynamically(participants);
-    const roles = Object.keys(grouped);
+    const participants = rows.map((r) => ({
+      id: r.id,
+      bookingId: r.bookingId,
+      userId: r.userId,
+      displayName: r.user?.displayName ?? "Unknown",
+      roleSlot: r.roleSlot,
+      roleLabel: r.roleLabelSnapshot ?? `Role ${r.roleSlot}`,
+      inviteStatus: r.inviteStatus,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
 
-    return NextResponse.json({ ok: true, participants, grouped, roles });
-  } catch (e: any) {
-    const status = Number(e?.status) || 500;
-    console.error("GET /participants failed:", e);
+    return NextResponse.json({ ok: true, participants }, { status: 200 });
+  } catch (err) {
+    console.error("GET /api/bookings/[id]/participants error:", err);
     return NextResponse.json(
-      { ok: false, error: status === 404 ? "Not found" : "Server error" },
-      { status }
+      { ok: false, error: "Failed to load participants" },
+      { status: 500 }
     );
   }
 }
 
-/* ------------------------------- POST ------------------------------- */
-type AddInput = {
-  userId?: string | null;
-  name?: string | null;
-  role: BookingParticipantRole;
-  inviteStatus?: InviteStatus | null;
-  isPrimaryHost?: boolean;
-  notes?: string | null;
-};
-type UpdateInput = {
-  id: string;
-  inviteStatus?: InviteStatus | null;
-  isPrimaryHost?: boolean;
-  notes?: string | null;
-};
-
+// POST: add a participant by userId and roleSlot (requires participant:add)
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    ensureEnabled();
-
     const viewer = await resolveViewerFromRequest(req);
-    if (!viewer?.isSignedIn) {
+    if (!viewer?.isSignedIn || !viewer.userId) {
       return NextResponse.json(
         { ok: false, error: "Unauthorized" },
         { status: 401 }
@@ -204,7 +105,12 @@ export async function POST(
       );
     }
 
-    if (!canEditBooking(viewer, booking.orgId as string)) {
+    const canAdd = await hasCan({
+      userId: viewer.userId,
+      orgId: booking.orgId,
+      permission: "participant:add",
+    });
+    if (!canAdd) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
         { status: 403 }
@@ -212,146 +118,74 @@ export async function POST(
     }
 
     const body = (await req.json().catch(() => ({}))) as {
-      add?: any[];
-      update?: any[];
-      removeIds?: string[];
+      userId?: string;
+      roleSlot?: number;
     };
+    const userId = typeof body.userId === "string" ? body.userId : "";
+    const roleSlot = Number(body.roleSlot);
 
-    const adds: AddInput[] = Array.isArray(body.add)
-      ? body.add
-          .map((r) => ({
-            role: coerceRoleEnum(r?.role) as BookingParticipantRole,
-            userId: asTrimmedOrNull(r?.userId),
-            name: asTrimmedOrNull(r?.name),
-            inviteStatus: coerceStatusEnum(r?.inviteStatus),
-            isPrimaryHost: !!r?.isPrimaryHost,
-            notes: asTrimmedOrNull(r?.notes),
-          }))
-          .filter((r) => !!r.role)
-      : [];
+    if (
+      !userId ||
+      !Number.isInteger(roleSlot) ||
+      roleSlot < 1 ||
+      roleSlot > 10
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "userId and roleSlot (1..10) are required" },
+        { status: 400 }
+      );
+    }
 
-    const updates: UpdateInput[] = Array.isArray(body.update)
-      ? body.update
-          .map((r) => ({
-            id: String(r?.id || ""),
-            inviteStatus: coerceStatusEnum(r?.inviteStatus) ?? undefined,
-            isPrimaryHost:
-              typeof r?.isPrimaryHost === "boolean"
-                ? r.isPrimaryHost
-                : undefined,
-            notes: asTrimmedOrNull(r?.notes),
-          }))
-          .filter((r) => r.id)
-      : [];
-
-    const removeIds: string[] = Array.isArray(body.removeIds)
-      ? body.removeIds.map((x) => String(x)).filter(Boolean)
-      : [];
-
-    const now = new Date();
-
-    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      if (removeIds.length > 0) {
-        await tx.bookingParticipant.deleteMany({
-          where: { bookingId: booking.id, id: { in: removeIds } },
-        });
-      }
-
-      if (adds.length > 0) {
-        await tx.bookingParticipant.createMany({
-          data: adds.map((a) => ({
-            bookingId: booking.id,
-            role: a.role,
-            userId: a.userId ?? null,
-            name: a.name ?? "",
-            inviteStatus: a.inviteStatus ?? InviteStatus.PENDING,
-            isPrimaryHost: !!a.isPrimaryHost,
-            notes: a.notes ?? undefined,
-            invitedAt: now,
-          })),
-        });
-      }
-
-      for (const u of updates) {
-        const before = await tx.bookingParticipant.findFirst({
-          where: { id: u.id, bookingId: booking.id },
-          select: { inviteStatus: true },
-        });
-        if (!before) continue;
-
-        await tx.bookingParticipant.update({
-          where: { id: u.id },
-          data: {
-            ...(u.inviteStatus
-              ? { inviteStatus: { set: u.inviteStatus } }
-              : {}),
-            isPrimaryHost:
-              typeof u.isPrimaryHost === "boolean"
-                ? u.isPrimaryHost
-                : undefined,
-            notes: u.notes ?? undefined,
-            ...(u.inviteStatus &&
-            (u.inviteStatus === InviteStatus.ACCEPTED ||
-              u.inviteStatus === InviteStatus.DECLINED ||
-              u.inviteStatus === InviteStatus.CANCELLED)
-              ? { respondedAt: now }
-              : {}),
-          },
-        });
-      }
+    // Snapshot current org role label for stable UI
+    const orgRole = await prisma.orgRole.findUnique({
+      where: { orgId_slot: { orgId: booking.orgId, slot: roleSlot } },
+      select: { label: true },
     });
 
-    const rows = await prisma.bookingParticipant.findMany({
-      where: { bookingId: booking.id },
-      orderBy: [
-        { role: "asc" },
-        { isPrimaryHost: "desc" },
-        { createdAt: "asc" },
-      ],
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            name: true,
-            email: true,
-            avatarUrl: true,
-          },
-        },
+    const created = await prisma.bookingParticipant.create({
+      data: {
+        bookingId: booking.id,
+        userId,
+        roleSlot,
+        roleLabelSnapshot: orgRole?.label ?? `Role ${roleSlot}`,
+        inviteStatus: InviteStatus.PENDING,
+        invitedByUserId: viewer.userId,
+        invitedAt: new Date(),
+      },
+      select: {
+        id: true,
+        bookingId: true,
+        userId: true,
+        roleSlot: true,
+        roleLabelSnapshot: true,
+        inviteStatus: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, displayName: true } },
       },
     });
 
-    const participants = rows.map(mapParticipant);
-    const grouped = groupDynamically(participants);
-    const roles = Object.keys(grouped);
-
-    return NextResponse.json({ ok: true, participants, grouped, roles });
-  } catch (e: any) {
-    const msg = String(e?.message || e);
-    const code = e?.code || "";
-
-    if (e?.status === 404) {
-      return NextResponse.json(
-        { ok: false, error: "Not found" },
-        { status: 404 }
-      );
-    }
-    if (code === "P2003") {
-      return NextResponse.json(
-        { ok: false, error: "Invalid user reference." },
-        { status: 400 }
-      );
-    }
-    if (code === "P2002") {
-      return NextResponse.json(
-        { ok: false, error: "Duplicate participant for this role." },
-        { status: 400 }
-      );
-    }
-
-    console.error("POST /participants failed:", e);
     return NextResponse.json(
-      { ok: false, error: msg || "Server error" },
+      {
+        ok: true,
+        participant: {
+          id: created.id,
+          bookingId: created.bookingId,
+          userId: created.userId,
+          displayName: created.user?.displayName ?? "Unknown",
+          roleSlot: created.roleSlot,
+          roleLabel: created.roleLabelSnapshot ?? `Role ${created.roleSlot}`,
+          inviteStatus: created.inviteStatus,
+          createdAt: created.createdAt.toISOString(),
+          updatedAt: created.updatedAt.toISOString(),
+        },
+      },
+      { status: 201 }
+    );
+  } catch (err) {
+    console.error("POST /api/bookings/[id]/participants error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to add participant" },
       { status: 500 }
     );
   }

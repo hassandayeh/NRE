@@ -1,7 +1,7 @@
 // src/app/api/health/route.ts
 import { NextRequest, NextResponse } from "next/server";
 // from src/app/api/health/route.ts -> src/lib/auth.ts
-import { prisma } from "../../../lib/auth";
+import prisma from "../../../lib/prisma";
 
 export const runtime = "nodejs";
 

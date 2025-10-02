@@ -1,221 +1,190 @@
 // src/app/api/hosts/search/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "../../../../lib/prisma";
+import { resolveViewerFromRequest } from "../../../../lib/viewer";
+import { hasCan, getEffectiveRole } from "../../../../lib/access/permissions";
+
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "../../../../lib/auth";
-import prisma from "../../../../lib/prisma";
-
-/** Minimal where-input type (avoid Prisma namespace types that vary by version) */
-type UserWhereInput = Record<string, unknown>;
-
 /**
  * GET /api/hosts/search
  * Query:
- * - q?: string
- * - take?: number (1..50, default 20)
- * - cursor?: string (id cursor)
- * - start?: ISO string \
- * - end?: ISO string     |=> either this pair
- *   OR
- * - startAt?: ISO string \
- * - durationMins?: number |=> or this pair
+ *  - orgId (required)
+ *  - q (optional)                    // name/email search
+ *  - languages=ar,en (optional)      // comma-separated; match if any
+ *  - tags=legal,tech (optional)      // comma-separated; match if any
+ *  - online=true|false (optional)    // supportsOnline
+ *  - inPerson=true|false (optional)  // supportsInPerson
+ *  - country=US (optional)
+ *  - city=Amman (optional)
+ *  - slots=4,5 (optional)            // restrict to specific role slots (1..10)
+ *  - take (default 50), skip (default 0)
  *
- * Returns: { items: Array<{ id, name, availability? }>, count, nextCursor }
- * Only lists users who are HOSTs in the caller's org.
+ * Note: This endpoint **always** returns inviteable members only
+ * (directory:listed_internal + booking:inviteable), no hardcoded role names.
  */
-
-function firstStaffOrg(rolesByOrg: Map<string, string>): string | null {
-  for (const [orgId, role] of rolesByOrg) {
-    if (
-      role === "OWNER" ||
-      role === "ADMIN" ||
-      role === "PRODUCER" ||
-      role === "HOST"
-    ) {
-      return orgId;
-    }
-  }
-  return null;
-}
-
-function parseWindow(url: URL) {
-  const startQS =
-    url.searchParams.get("start") ?? url.searchParams.get("startAt");
-  const endQS = url.searchParams.get("end");
-  const durQS = url.searchParams.get("durationMins");
-
-  const start = startQS ? new Date(startQS) : null;
-  let end: Date | null = null;
-
-  if (endQS) {
-    end = new Date(endQS);
-  } else if (start && durQS && Number(durQS) > 0) {
-    end = new Date(start.getTime() + Number(durQS) * 60_000);
-  }
-
-  if (start && end && !Number.isNaN(+start) && !Number.isNaN(+end)) {
-    return { start, end };
-  }
-  return { start: null, end: null };
-}
-
-function overlaps(a0: Date, a1: Date, b0: Date, b1: Date) {
-  return b0 < a1 && b1 > a0;
-}
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const q = (url.searchParams.get("q") || "").trim();
-    const take = Math.max(
-      1,
-      Math.min(50, Number(url.searchParams.get("take") || "20"))
-    );
-    const cursor = url.searchParams.get("cursor") || undefined;
-
-    const session = await getServerSession(authOptions);
-    const email = session?.user?.email as string | undefined;
-
-    // Anonymous → empty list (same behavior as before)
-    if (!email)
+    const viewer = await resolveViewerFromRequest(req);
+    if (!viewer?.isSignedIn || !viewer.userId) {
       return NextResponse.json(
-        { items: [], count: 0, nextCursor: null },
-        { status: 200 }
-      );
-
-    // Me + org context
-    const me = await prisma.user.findUnique({
-      where: { email },
-      select: { id: true, activeOrgId: true },
-    });
-
-    const userId = me?.id ?? null;
-
-    const memberships = userId
-      ? await prisma.organizationMembership.findMany({
-          where: { userId },
-          select: { orgId: true, role: true },
-        })
-      : [];
-
-    const rolesByOrg = new Map<string, string>();
-    for (const m of memberships) rolesByOrg.set(m.orgId, m.role as string);
-
-    const staffOrgId =
-      me?.activeOrgId ?? firstStaffOrg(rolesByOrg) ?? undefined;
-    if (!staffOrgId) {
-      // No org context → nothing to list
-      return NextResponse.json(
-        { items: [], count: 0, nextCursor: null },
-        { status: 200 }
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
       );
     }
 
-    // Build WHERE for host users (typed locally)
-    const AND: UserWhereInput[] = [
-      { memberships: { some: { role: "HOST", orgId: staffOrgId } } },
-    ];
-    if (q) AND.push({ name: { contains: q, mode: "insensitive" } });
+    const { searchParams } = new URL(req.url);
+    const orgId = searchParams.get("orgId") ?? "";
+    if (!orgId) {
+      return NextResponse.json(
+        { ok: false, error: "orgId is required" },
+        { status: 400 }
+      );
+    }
 
-    const where: UserWhereInput = { AND };
-
-    const users = await prisma.user.findMany({
-      where: where as any, // safe: structure matches Prisma where input
-      orderBy: [{ name: "asc" }, { id: "asc" }],
-      take,
-      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-      select: { id: true, name: true },
+    // Permission gate — basic read access to directory/people
+    const canView = await hasCan({
+      userId: viewer.userId,
+      orgId,
+      permission: "booking:view",
     });
+    if (!canView) {
+      return NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
 
-    const items: Array<{
-      id: string;
-      name: string;
-      availability?: { status: "AVAILABLE" | "BUSY" };
-    }> = users.map((u: { id: string; name: string | null }) => ({
-      id: u.id,
-      name: u.name || "Unnamed",
-    }));
+    // Parse filters
+    const q = (searchParams.get("q") || "").trim();
+    const langs = splitCSV(searchParams.get("languages"));
+    const tags = splitCSV(searchParams.get("tags"));
+    const online = parseBool(searchParams.get("online"));
+    const inPerson = parseBool(searchParams.get("inPerson"));
+    const country = (searchParams.get("country") || "").trim() || null;
+    const city = (searchParams.get("city") || "").trim() || null;
+    const slots = toSlotList(searchParams.get("slots"));
+    const take = clampInt(
+      parseInt(searchParams.get("take") || "50", 10),
+      1,
+      200
+    );
+    const skip = Math.max(parseInt(searchParams.get("skip") || "0", 10), 0);
 
-    const { start, end } = parseWindow(url);
+    // Build Prisma where for UserRole + User facets
+    const where: any = { orgId };
+    if (slots) where.slot = { in: slots };
 
-    // If a window is provided, compute availability
-    if (start && end && items.length > 0) {
-      const hostIds = items.map((i) => i.id);
+    const userWhere: any = {};
+    const orSearch: any[] = [];
+    if (q) {
+      orSearch.push(
+        { displayName: { contains: q, mode: "insensitive" } },
+        { email: { contains: q, mode: "insensitive" } }
+      );
+    }
+    if (orSearch.length) userWhere.OR = orSearch;
 
-      // Generous lookback to make sure we fetch any booking that could overlap the window
-      const lookbackMs = 12 * 60 * 60 * 1000; // 12h
-      const since = new Date(start.getTime() - lookbackMs);
+    if (langs.length) userWhere.languages = { hasSome: langs };
+    if (tags.length) userWhere.tags = { hasSome: tags };
+    if (online !== null) userWhere.supportsOnline = online;
+    if (inPerson !== null) userWhere.supportsInPerson = inPerson;
+    if (country) userWhere.countryCode = country.toUpperCase();
+    if (city) userWhere.city = { contains: city, mode: "insensitive" };
+    if (Object.keys(userWhere).length) where.user = userWhere;
 
-      // 1) New model: BookingHost join rows
-      const hostJoins = await prisma.bookingHost.findMany({
-        where: {
-          userId: { in: hostIds },
-          booking: {
-            orgId: staffOrgId,
-            startAt: { gt: since, lt: end }, // narrow server-side; exact overlap checked below
+    // Page query
+    const rows = await prisma.userRole.findMany({
+      where,
+      take,
+      skip,
+      orderBy: { assignedAt: "desc" },
+      select: {
+        userId: true,
+        slot: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            displayName: true,
+            languages: true,
+            tags: true,
+            supportsOnline: true,
+            supportsInPerson: true,
+            city: true,
+            countryCode: true,
           },
         },
-        select: {
-          userId: true,
-          booking: { select: { startAt: true, durationMins: true } },
-        },
-      });
+      },
+    });
 
-      // 2) Legacy mirror: Booking.hostUserId
-      const legacyHosts = await prisma.booking.findMany({
-        where: {
-          orgId: staffOrgId,
-          hostUserId: { in: hostIds },
-          startAt: { gt: since, lt: end },
-        },
-        select: { hostUserId: true, startAt: true, durationMins: true },
-      });
+    // Keep only active slots that are listed+inviteable
+    const people = await Promise.all(
+      rows.map(async (r) => {
+        const eff = await getEffectiveRole(orgId, r.slot);
+        const listed =
+          eff.isActive && eff.perms.has("directory:listed_internal");
+        const inviteable = listed && eff.perms.has("booking:inviteable");
+        if (!inviteable) return null;
 
-      // Bucket by host
-      const buckets = new Map<string, Array<{ s: Date; e: Date }>>();
+        return {
+          id: r.user.id,
+          userId: r.userId,
+          displayName: r.user.displayName ?? r.user.email,
+          email: r.user.email,
+          slot: r.slot,
+          roleLabel: eff.label,
+          languages: r.user.languages,
+          tags: r.user.tags,
+          supportsOnline: r.user.supportsOnline,
+          supportsInPerson: r.user.supportsInPerson,
+          city: r.user.city,
+          countryCode: r.user.countryCode,
+        };
+      })
+    );
 
-      function add(
-        uid: string | null | undefined,
-        s: Date,
-        mins: number | null | undefined
-      ) {
-        if (!uid) return;
-        const endTime = new Date(s.getTime() + (Number(mins) || 0) * 60_000);
-        const arr = buckets.get(uid) || [];
-        arr.push({ s, e: endTime });
-        buckets.set(uid, arr);
-      }
-
-      for (const r of hostJoins) {
-        add(r.userId, new Date(r.booking.startAt), r.booking.durationMins);
-      }
-      for (const r of legacyHosts) {
-        add(r.hostUserId, new Date(r.startAt), r.durationMins);
-      }
-
-      // Compute status per item
-      for (const it of items) {
-        const windows = buckets.get(it.id) || [];
-        const busy = windows.some((w) => overlaps(start, end, w.s, w.e));
-        it.availability = { status: busy ? "BUSY" : "AVAILABLE" };
-      }
-    }
-
-    const nextCursor =
-      users.length === take ? users[users.length - 1]?.id ?? null : null;
+    const filtered = people.filter(Boolean) as NonNullable<
+      (typeof people)[number]
+    >[];
 
     return NextResponse.json(
-      { items, count: items.length, nextCursor },
+      { ok: true, count: filtered.length, people: filtered },
       { status: 200 }
     );
   } catch (err) {
     console.error("GET /api/hosts/search error:", err);
     return NextResponse.json(
-      { items: [], count: 0, nextCursor: null },
-      { status: 200 }
+      { ok: false, error: "Failed to search hosts" },
+      { status: 500 }
     );
   }
+}
+
+// ---- utils ----
+function splitCSV(s: string | null): string[] {
+  return (s || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+function parseBool(v: string | null): boolean | null {
+  if (v == null) return null;
+  const s = v.toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return null;
+}
+function clampInt(n: number, min: number, max: number) {
+  return Math.min(Math.max(Number.isFinite(n) ? n : min, min), max);
+}
+function toSlotList(csv: string | null): number[] | null {
+  if (!csv) return null;
+  const nums = csv
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 10);
+  return nums.length ? nums : null;
 }
