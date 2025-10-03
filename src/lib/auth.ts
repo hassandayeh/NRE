@@ -2,17 +2,30 @@
 // NextAuth options wired to our clean User model.
 // - Uses JWT sessions.
 // - Credentials provider: finds user by email and verifies password.
-//   * Accepts dev password "seeded" (for local/dev speed).
-//   * Prefers bcrypt hashes.
-//   * Falls back to plaintext match for legacy/MVP accounts so we don't break logins.
+// * Accepts dev password "seeded" (for local/dev speed).
+// * Prefers bcrypt hashes; falls back to plaintext for legacy rows (kept for MVP).
 
 import type { NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import prisma from "./prisma";
 import bcrypt from "bcryptjs";
+import prisma from "./prisma";
+import { getEffectiveRole } from "./access/permissions";
+
+// Helper: choose a membership to hydrate org context.
+// For now, pick the first UserRole we find (stable and deterministic).
+async function pickUserOrgAndSlot(userId: string) {
+  const ur = await prisma.userRole.findFirst({
+    where: { userId },
+    orderBy: { assignedAt: "asc" }, // <-- FIX: UserRole has assignedAt (not createdAt)
+    select: { orgId: true, slot: true },
+  });
+  if (!ur) return null;
+  return { orgId: ur.orgId, slot: ur.slot };
+}
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
+
   providers: [
     Credentials({
       name: "Email & Password",
@@ -71,27 +84,67 @@ export const authOptions: NextAuthOptions = {
       },
     }),
   ],
+
   pages: {
-    // signIn: "/signin", // keep default unless you have a custom page
+    // Keep NextAuth default pages unless/until we add custom ones.
+    // signIn: "/auth/signin",
   },
+
   callbacks: {
+    // Hydrate JWT with identity + org/role context (slot-based RBAC).
     async jwt({ token, user }) {
       if (user) {
+        // Set identity on initial sign-in
         token.sub = (user as any).id;
         token.email = user.email;
         token.name = user.name;
       }
+
+      // If org/slot are missing (first login or token just created), hydrate them.
+      if (!(token as any).orgId || !(token as any).roleSlot) {
+        const userId = (user as any)?.id || token.sub;
+        if (userId) {
+          const picked = await pickUserOrgAndSlot(userId);
+          if (picked) {
+            (token as any).orgId = picked.orgId;
+            (token as any).roleSlot = picked.slot;
+
+            // Try to resolve label via access layer (optional).
+            try {
+              const eff = await getEffectiveRole(picked.orgId, picked.slot);
+              (token as any).roleLabel = eff?.label;
+            } catch {
+              // Non-fatal; navbar can fetch /api/org/roles for label later.
+            }
+          }
+        }
+      }
+
       return token;
     },
+
+    // Expose JWT fields on session.user so the UI can read them.
     async session({ session, token }) {
       if (session.user) {
         (session.user as any).id = token.sub;
         session.user.email = token.email as string | undefined;
         session.user.name = token.name as string | undefined;
+
+        // New fields (slot-based RBAC context)
+        (session.user as any).orgId = (token as any).orgId as
+          | string
+          | undefined;
+        (session.user as any).roleSlot = (token as any).roleSlot as
+          | number
+          | undefined;
+        (session.user as any).roleLabel = (token as any).roleLabel as
+          | string
+          | undefined;
       }
       return session;
     },
   },
+
   // Make sure NEXTAUTH_SECRET is set in .env for prod; NextAuth will warn if missing.
   secret: process.env.NEXTAUTH_SECRET,
 };

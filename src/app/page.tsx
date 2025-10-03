@@ -1,150 +1,108 @@
-// Landing page with simple feature-flagged navigation.
-// Flags use NEXT_PUBLIC_* so they're safe to read in the browser.
-// Any flag set to the string "false" will hide its section; everything else shows.
+// src/app/page.tsx
+import Link from "next/link";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../lib/auth";
 
-type Boolish = "true" | "false" | undefined;
+export const runtime = "nodejs";
 
-const readFlag = (v: Boolish, fallback = true) =>
-  v === undefined ? fallback : v !== "false";
+export default async function HomePage() {
+  const session = await getServerSession(authOptions);
 
-const FLAGS = {
-  BOOKING: readFlag(process.env.NEXT_PUBLIC_FEATURE_BOOKING as Boolish, true),
-  PROFILES: readFlag(process.env.NEXT_PUBLIC_FEATURE_PROFILES as Boolish, true),
-  SETTINGS: readFlag(process.env.NEXT_PUBLIC_FEATURE_SETTINGS as Boolish, true),
-  APPEAR_IN_PERSON: readFlag(
-    process.env.NEXT_PUBLIC_APPEARANCE_IN_PERSON as Boolish,
-    true
-  ),
-  APPEAR_ONLINE: readFlag(
-    process.env.NEXT_PUBLIC_APPEARANCE_ONLINE as Boolish,
-    true
-  ),
-};
+  const signedIn = !!session?.user;
+  const name =
+    (session as any)?.user?.name ?? (session as any)?.user?.email ?? "Member";
+  const roleLabel = (session as any)?.user?.roleLabel as string | undefined;
 
-export default function Home() {
+  if (!signedIn) {
+    // Public landing (logged out)
+    return (
+      <div className="mx-auto max-w-3xl space-y-8">
+        <section className="space-y-3">
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Expert Booker — MVP
+          </h1>
+          <p className="text-gray-600">
+            Lightweight newsroom tooling for booking experts. Sign in to explore
+            the MVP, or create a new organization to get started.
+          </p>
+        </section>
+
+        <div className="flex gap-3">
+          <Link
+            href="/auth/signin"
+            className="rounded-md border px-4 py-2 text-sm hover:bg-gray-50 focus:outline-none focus:ring"
+          >
+            Sign in
+          </Link>
+          <Link
+            href="/auth/signup"
+            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:opacity-90 focus:outline-none focus:ring"
+          >
+            Create an account
+          </Link>
+        </div>
+
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">What’s in this MVP</h2>
+          <ul className="list-disc pl-5 text-sm text-gray-700">
+            <li>Bookings module</li>
+            <li>Experts directory</li>
+            <li>Settings → Users &amp; Roles (slot-based RBAC)</li>
+          </ul>
+        </section>
+      </div>
+    );
+  }
+
+  // Member home (logged in)
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-6">
-      <header className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight">Expert Booker MVP</h1>
-        <p className="text-sm text-gray-600">
-          App Router + TypeScript + Tailwind is live. Use the links below to
-          navigate to flagged modules.
+    <div className="mx-auto max-w-3xl space-y-8">
+      <section className="space-y-2">
+        <h1 className="text-2xl font-semibold">
+          Welcome, {name}
+          {roleLabel ? (
+            <span className="text-gray-500"> — {roleLabel}</span>
+          ) : null}
+        </h1>
+        <p className="text-gray-600">
+          Quick links to common areas. You can always use the top navbar too.
         </p>
-      </header>
-
-      {/* Flags quick view */}
-      <section className="rounded-lg border p-4">
-        <h2 className="mb-3 text-lg font-semibold">Feature Flags</h2>
-        <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
-          <li className="flex items-center justify-between">
-            <span>Booking</span>
-            <span
-              className={`rounded px-2 py-0.5 ${
-                FLAGS.BOOKING
-                  ? "bg-green-100 text-green-700"
-                  : "bg-gray-100 text-gray-600"
-              }`}
-            >
-              {FLAGS.BOOKING ? "on" : "off"}
-            </span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Profiles</span>
-            <span
-              className={`rounded px-2 py-0.5 ${
-                FLAGS.PROFILES
-                  ? "bg-green-100 text-green-700"
-                  : "bg-gray-100 text-gray-600"
-              }`}
-            >
-              {FLAGS.PROFILES ? "on" : "off"}
-            </span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Settings</span>
-            <span
-              className={`rounded px-2 py-0.5 ${
-                FLAGS.SETTINGS
-                  ? "bg-green-100 text-green-700"
-                  : "bg-gray-100 text-gray-600"
-              }`}
-            >
-              {FLAGS.SETTINGS ? "on" : "off"}
-            </span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Appearance: In-person</span>
-            <span
-              className={`rounded px-2 py-0.5 ${
-                FLAGS.APPEAR_IN_PERSON
-                  ? "bg-green-100 text-green-700"
-                  : "bg-gray-100 text-gray-600"
-              }`}
-            >
-              {FLAGS.APPEAR_IN_PERSON ? "on" : "off"}
-            </span>
-          </li>
-          <li className="flex items-center justify-between">
-            <span>Appearance: Online</span>
-            <span
-              className={`rounded px-2 py-0.5 ${
-                FLAGS.APPEAR_ONLINE
-                  ? "bg-green-100 text-green-700"
-                  : "bg-gray-100 text-gray-600"
-              }`}
-            >
-              {FLAGS.APPEAR_ONLINE ? "on" : "off"}
-            </span>
-          </li>
-        </ul>
       </section>
 
-      {/* Module links shown only when their flags are on */}
-      <nav className="grid gap-3">
-        {FLAGS.BOOKING && (
-          <a
-            href="/modules/booking"
-            className="rounded-lg border p-4 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2"
-          >
-            <h3 className="font-semibold">Booking</h3>
-            <p className="text-sm text-gray-600">
-              Start scaffolding the booking domain.
-            </p>
-          </a>
-        )}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <HomeCard href="/modules/booking" title="Bookings">
+          Create and manage bookings.
+        </HomeCard>
+        <HomeCard href="/modules/experts" title="Directory">
+          Search and manage expert profiles.
+        </HomeCard>
+        <HomeCard href="/modules/settings" title="Settings">
+          Users &amp; Roles, org configuration.
+        </HomeCard>
+        <HomeCard href="/modules/profile" title="Profile">
+          Your personal details.
+        </HomeCard>
+      </div>
+    </div>
+  );
+}
 
-        {FLAGS.PROFILES && (
-          <a
-            href="/modules/profiles"
-            className="rounded-lg border p-4 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2"
-          >
-            <h3 className="font-semibold">Profiles</h3>
-            <p className="text-sm text-gray-600">
-              Manage expert/newsroom profiles.
-            </p>
-          </a>
-        )}
-
-        {FLAGS.SETTINGS && (
-          <a
-            href="/modules/settings"
-            className="rounded-lg border p-4 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2"
-          >
-            <h3 className="font-semibold">Settings</h3>
-            <p className="text-sm text-gray-600">
-              Toggle modules and appearance options (env for now).
-            </p>
-          </a>
-        )}
-      </nav>
-
-      <footer className="pt-4 text-xs text-gray-500">
-        Tip: Set any flag to <code>false</code> in your environment (e.g.
-        <code className="ml-1 rounded bg-gray-100 px-1">
-          NEXT_PUBLIC_FEATURE_SETTINGS=false
-        </code>
-        ) and restart the dev server to hide that module.
-      </footer>
-    </main>
+function HomeCard({
+  href,
+  title,
+  children,
+}: {
+  href: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      className="block rounded-xl border p-4 hover:bg-gray-50 focus:outline-none focus:ring"
+    >
+      <div className="text-lg font-medium">{title}</div>
+      <p className="mt-1 text-sm text-gray-600">{children}</p>
+    </Link>
   );
 }

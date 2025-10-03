@@ -20,74 +20,83 @@ export default function SignInPage() {
       redirect: true,
       email,
       password,
-      // After success, our authOptions.redirect() sends to /modules/booking
+      // Keep existing behavior for now (we'll adjust home routing later)
       callbackUrl: "/modules/booking",
     });
 
-    /// If redirect is true, NextAuth will navigate away; no need to handle res here
+    // If redirect is true, NextAuth will navigate away; no need to handle res.
     setLoading(false);
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-2xl border p-6 shadow-sm">
-        <h1 className="text-xl font-semibold mb-2">Sign in</h1>
-        <p className="text-sm text-gray-500 mb-6">
-          Use your email and password (seed or existing user).
-        </p>
+    <div className="mx-auto max-w-md space-y-6">
+      <h1 className="text-2xl font-semibold">Sign in</h1>
+      <p className="text-sm text-gray-600">
+        Use your email and password (seed or existing user).
+      </p>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm mb-1">Email</label>
-            <input
-              type="email"
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
-              placeholder="owner@nre.test"
-              required
-            />
-          </div>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <label className="block text-sm">
+          <span className="mb-1 block">Email</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.currentTarget.value)}
+            className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
+            placeholder="owner@nre.test"
+            required
+          />
+        </label>
 
-          <div>
-            <label className="block text-sm mb-1">Password</label>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
-              placeholder="123"
-              required
-            />
-          </div>
+        <label className="block text-sm">
+          <span className="mb-1 block">Password</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
+            className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
+            placeholder="123"
+            required
+          />
+        </label>
 
-          {error && (
-            <div className="text-sm text-red-600" role="alert">
-              {error}
-            </div>
-          )}
+        {error ? (
+          <p role="alert" className="text-sm text-red-600">
+            {error}
+          </p>
+        ) : null}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-md bg-black text-white py-2 font-medium disabled:opacity-50"
-          >
-            {loading ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full rounded-md bg-black px-4 py-2 text-white hover:opacity-90 disabled:opacity-60"
+        >
+          {loading ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
 
-        <div className="mt-4 text-center">
-          <Link
-            href="/api/auth/signin"
-            className="text-xs text-gray-500 underline"
-            prefetch={false}
-          >
-            Use NextAuth default sign-in
-          </Link>
-        </div>
-      </div>
+      {/* New: self-serve sign-up entry point */}
+      <p className="text-sm text-gray-700">
+        New here?{" "}
+        <Link
+          href="/auth/signup"
+          className="underline underline-offset-2 hover:opacity-80"
+        >
+          Create an account
+        </Link>
+        .
+      </p>
+
+      <p className="text-xs text-gray-500">
+        Prefer the default page?{" "}
+        <a
+          href="/api/auth/signin"
+          className="underline underline-offset-2 hover:opacity-80"
+        >
+          Use NextAuth default sign-in
+        </a>
+        .
+      </p>
     </div>
   );
 }
