@@ -3,14 +3,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
-import { randomBytes } from "crypto"; // NEW: to populate required hashedPassword
+import { randomBytes } from "crypto";
 
 // Prisma-safe
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type JsonErr = { error: string; code?: string };
-
 function badRequest(msg: string, code?: string) {
   return NextResponse.json({ error: msg, code } as JsonErr, { status: 400 });
 }
@@ -65,6 +64,7 @@ async function hasPermission(
     },
   });
   if (!orgRole || !orgRole.isActive) return false;
+
   const override = orgRole.permissions[0];
   if (override) return !!override.allowed;
 
@@ -79,19 +79,52 @@ async function hasPermission(
       },
     },
   });
+
   return !!template?.permissions?.length;
 }
 
-/** ---------- GET (kept intact) ---------- */
+/**
+ * Ensure we have a valid org for the acting user.
+ * If requested orgId is missing OR the user isn't a member of it,
+ * and the user belongs to exactly one org, auto-select that org.
+ * Returns null if still ambiguous.
+ */
+async function resolveOrgForUser(
+  requestedOrgId: string | null,
+  userId: string
+): Promise<string | null> {
+  if (requestedOrgId) {
+    const member = await prisma.userRole.findUnique({
+      where: { userId_orgId: { userId, orgId: requestedOrgId } },
+      select: { userId: true },
+    });
+    if (member) return requestedOrgId; // valid request
+  }
+
+  // Fallback: detect a single org membership
+  const memberships = await prisma.userRole.findMany({
+    where: { userId },
+    select: { orgId: true },
+    take: 2, // we only need to know if more than one
+  });
+
+  if (memberships.length === 1) return memberships[0].orgId;
+  return null; // ambiguous -> caller should error
+}
+
+/** ---------- GET (list org members) ---------- */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const orgId = (searchParams.get("orgId") || "").trim();
-  if (!orgId) return badRequest("Missing orgId");
+  const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
   // AuthN
   const session = await getServerSession(authOptions);
   const userId = (session?.user as any)?.id as string | undefined;
   if (!userId) return unauthorized();
+
+  // Resolve org (robust to wrong/missing orgId)
+  const orgId = await resolveOrgForUser(requestedOrgId, userId);
+  if (!orgId) return badRequest("Missing or invalid orgId");
 
   // AuthZ (org-scoped settings read/manage)
   const ok = await hasPermission(orgId, userId, "settings:manage");
@@ -155,13 +188,16 @@ export async function GET(req: NextRequest) {
  */
 export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const orgId = (searchParams.get("orgId") || "").trim();
-  if (!orgId) return badRequest("Missing orgId");
+  const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
   // AuthN
   const session = await getServerSession(authOptions);
   const actingUserId = (session?.user as any)?.id as string | undefined;
   if (!actingUserId) return unauthorized();
+
+  // Resolve org (robust to wrong/missing orgId)
+  const orgId = await resolveOrgForUser(requestedOrgId, actingUserId);
+  if (!orgId) return badRequest("Missing or invalid orgId");
 
   // AuthZ (reuse same guard as GET)
   const ok = await hasPermission(orgId, actingUserId, "settings:manage");
@@ -210,14 +246,14 @@ export async function POST(req: NextRequest) {
 
   if (!targetUser) {
     // Org-owned creation of a minimal staff account
-    // NOTE: Your schema requires `hashedPassword` -> provide a safe placeholder.
+    // NOTE: schema requires `hashedPassword` -> provide a safe placeholder.
     // This is NOT a usable password; invited users will set credentials later.
     const placeholderHash = `invited:${randomBytes(48).toString("hex")}`;
     targetUser = await prisma.user.create({
       data: {
         email: rawEmail,
         displayName: displayName || null,
-        hashedPassword: placeholderHash, // <-- REQUIRED by your schema
+        hashedPassword: placeholderHash, // REQUIRED by schema
       },
       select: { id: true, email: true, displayName: true },
     });
@@ -246,11 +282,7 @@ export async function POST(req: NextRequest) {
 
   // Create membership
   const created = await prisma.userRole.create({
-    data: {
-      orgId,
-      userId: targetUser.id,
-      slot,
-    },
+    data: { orgId, userId: targetUser.id, slot },
     include: {
       user: { select: { id: true, displayName: true, email: true } },
       orgRole: { select: { label: true, isActive: true } },

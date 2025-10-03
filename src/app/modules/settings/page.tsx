@@ -2,28 +2,23 @@
 
 /**
  * Settings (autosave)
- * - Toggles save IMMEDIATELY on switch (no Save buttons).
- * - Green toast appears on every successful change.
- * - Still resilient to GET failures and flat/legacy response shapes.
- * - Updates after successful save so booking UI reacts.
- * - "Organization" section now ALWAYS shows.
- *   - "Users (Org access)" button links to /modules/settings/users (dedicated users page).
- *   - "Organization profile" link appears only if GET /api/org/profile is 200.
+ * - Renamed button: "Users & Roles" → /modules/settings/users (org auto-detected there)
+ * - No dependency on ThemeProvider (props mismatch). Uses a safe local theme toggle.
+ * - Toggles still autosave to /api/toggles and apply to <body data-*>.
  */
 
 import * as React from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 
-// ThemeProvider default export, useTheme is named export
-import ThemeProvider, { useTheme } from "../../../components/theme-provider";
-
-// Minimal Alert (kept style)
+// Minimal Alert (keep original style/compat if present)
 import * as AlertModule from "../../../components/ui/Alert";
 const Alert: React.ElementType =
-  (AlertModule as any).Alert ?? (AlertModule as any).default;
+  (AlertModule as any).Alert ??
+  (AlertModule as any).default ??
+  ((props: any) => <div {...props} />);
 
-/** ---------- Types ---------- */
+/* ---------- Types ---------- */
 type Toggles = {
   showProgramName: boolean;
   showHostName: boolean;
@@ -31,20 +26,17 @@ type Toggles = {
   allowInPerson: boolean;
   allowOnline: boolean;
 };
-
 type PartialTogglesFromApi = Partial<Toggles> & { [k: string]: unknown };
 
-/** ---------- Toast ---------- */
+/* ---------- Toast ---------- */
 function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   return (
-    <div className="fixed inset-x-0 top-3 z-50 mx-auto w-fit rounded-lg bg-green-600 px-3 py-1.5 text-sm text-white shadow-md">
+    <div className="fixed right-4 top-4 z-50 rounded-md bg-green-600 px-3 py-2 text-sm text-white shadow">
       {props.children}
       {props.onClose && (
         <button
-          type="button"
           onClick={props.onClose}
-          className="ml-2 inline-flex h-6 w-6 items-center justify-center rounded hover:bg-white/20"
-          aria-label="Close"
+          className="ml-3 rounded bg-white/20 px-2 py-0.5 text-xs"
         >
           ✕
         </button>
@@ -53,7 +45,7 @@ function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   );
 }
 
-/** ---------- helpers ---------- */
+/* ---------- helpers ---------- */
 function toBool(v: unknown, fallback: boolean): boolean {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
@@ -64,23 +56,20 @@ function toBool(v: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
-/** =========================================================
- * Wrapper component: provides Theme context for the inner page
+/* =========================================================
+ * Page
  * ========================================================= */
 export default function SettingsPage() {
-  return (
-    <ThemeProvider>
-      <SettingsInner />
-    </ThemeProvider>
-  );
+  return <SettingsInner />;
 }
 
-/** ----------
- * Inner page (original UI/logic lives here)
+/* ----------
+ * Inner page
  * ---------- */
 function SettingsInner() {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
+
   const [toggles, setToggles] = React.useState<Toggles>({
     showProgramName: true,
     showHostName: true,
@@ -96,32 +85,7 @@ function SettingsInner() {
   const savingRef = React.useRef<Set<keyof Toggles>>(new Set());
 
   // Owner check → only controls "Organization profile" link visibility
-  const [canEditOrg, setCanEditOrg] = React.useState<boolean>(false);
-
-  // Theme (original behavior)
-  const themeApi = useTheme() as any;
-  const theme: string | undefined = themeApi?.theme;
-  const setTheme: ((v: "light" | "dark") => void) | undefined =
-    themeApi?.setTheme;
-  const toggleTheme: (() => void) | undefined = themeApi?.toggleTheme;
-
-  function chooseTheme(next: "light" | "dark") {
-    if (setTheme) return setTheme(next);
-    if (toggleTheme && typeof theme === "string") {
-      const wantDark = next === "dark";
-      const isDark = theme === "dark";
-      if (wantDark !== isDark) toggleTheme();
-      return;
-    }
-    if (typeof document !== "undefined") {
-      const root = document.documentElement;
-      if (next === "dark") root.classList.add("dark");
-      else root.classList.remove("dark");
-      try {
-        localStorage.setItem("theme", next);
-      } catch {}
-    }
-  }
+  const [canEditOrg, setCanEditOrg] = React.useState(false);
 
   // Load toggles (accepts flat or { toggles } shapes)
   React.useEffect(() => {
@@ -136,6 +100,7 @@ function SettingsInner() {
           (raw && typeof raw === "object" && "toggles" in raw
             ? (raw as any).toggles
             : raw) ?? {};
+
         const next: Toggles = {
           showProgramName: toBool(data.showProgramName, true),
           showHostName: toBool(data.showHostName, true),
@@ -143,9 +108,11 @@ function SettingsInner() {
           allowInPerson: toBool((data as any).allowInPerson, true),
           allowOnline: toBool((data as any).allowOnline, true),
         };
+
         if (!ignore) {
           setToggles(next);
           setLoadError(null);
+          applyBodyDatasets(next);
         }
       } catch (e: any) {
         if (!ignore) setLoadError(e?.message || "Failed to load toggles");
@@ -184,6 +151,18 @@ function SettingsInner() {
     ds.showTalkingPoints = String(next.showTalkingPoints);
     ds.allowInPerson = String(next.allowInPerson);
     ds.allowOnline = String(next.allowOnline);
+  }
+
+  // Local theme switch without relying on a provider
+  function chooseTheme(next: "light" | "dark") {
+    if (typeof document !== "undefined") {
+      const root = document.documentElement;
+      if (next === "dark") root.classList.add("dark");
+      else root.classList.remove("dark");
+      try {
+        localStorage.setItem("theme", next);
+      } catch {}
+    }
   }
 
   // Autosave a single key (optimistic)
@@ -238,98 +217,104 @@ function SettingsInner() {
   React.useEffect(() => setPortalReady(true), []);
 
   return (
-    <div className="mx-auto max-w-3xl p-4">
-      <h1 className="text-xl font-semibold">Settings</h1>
-
-      <div className="mt-2">
+    <main className="mx-auto max-w-3xl p-6">
+      {/* Title + Back */}
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Settings</h1>
         <Link
           href="/modules/booking"
-          className="inline-flex items-center gap-1 text-sm text-gray-600 underline-offset-2 hover:underline"
+          className="text-sm text-blue-600 underline"
         >
           ← Back to bookings
         </Link>
       </div>
 
       {/* ========== Organization (ALWAYS visible) ========== */}
-      <section className="mt-6 rounded-lg border bg-white p-4 shadow-sm">
-        <h2 className="text-sm font-semibold">Organization</h2>
-        <p className="mt-1 text-xs text-gray-600">
+      <section className="mb-8 rounded-xl border bg-white p-4">
+        <h2 className="mb-1 text-lg font-medium">Organization</h2>
+        <p className="mb-3 text-sm text-gray-600">
           Manage org users and profile.
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {/* Users button goes to the dedicated Users page */}
-          <Link
-            href="/modules/settings/users"
-            className="rounded-lg bg-black px-3 py-2 text-sm text-white shadow-sm"
-          >
-            Users (Org access)
-          </Link>
 
-          {/* Org profile link is owner-only */}
-          {canEditOrg && (
-            <Link
-              href="/modules/settings/org-profile"
-              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm"
-            >
-              Open organization profile →
-            </Link>
-          )}
-        </div>
+        {/* Users button goes to the unified Users & Roles page */}
+        <Link
+          href="/modules/settings/users"
+          className="mr-3 inline-flex h-9 items-center rounded-lg border bg-white px-3 text-sm shadow-sm hover:bg-gray-50"
+        >
+          Users &amp; Roles
+        </Link>
+
+        {/* Org profile link is owner-only */}
+        {canEditOrg && (
+          <Link
+            href="/modules/settings/org"
+            className="inline-flex h-9 items-center rounded-lg border bg-white px-3 text-sm shadow-sm hover:bg-gray-50"
+          >
+            Open organization profile →
+          </Link>
+        )}
       </section>
 
       {/* ========== Org Feature Toggles (autosave) ========== */}
-      <section className="mt-6 rounded-lg border bg-white p-4 shadow-sm">
-        <h2 className="text-sm font-semibold">Org Feature Toggles</h2>
-        <p className="mt-1 text-xs text-gray-600">
+      <section className="mb-8 rounded-xl border bg-white p-4">
+        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
+        <p className="mb-3 text-sm text-gray-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <div className="mt-3 text-sm text-gray-600">Loading…</div>
+          <div className="text-sm text-gray-600">Loading…</div>
         ) : (
           <>
             {loadError && (
-              <div className="mt-3">
-                <Alert intent="danger">{loadError}</Alert>
-              </div>
+              <Alert className="mb-3">
+                <span className="text-sm text-red-700">{loadError}</span>
+              </Alert>
             )}
 
-            <div className="mt-3 divide-y">
+            <div className="space-y-3">
               <ToggleRow
                 label="Show program name"
-                description="Display the program name field on the booking form."
+                description="Display program name in booking details."
                 checked={toggles.showProgramName}
                 onChange={(v) => saveToggle("showProgramName", v)}
               />
+
               <ToggleRow
                 label="Show host name"
-                description="Display the host name field on the booking form."
+                description="Display host name in booking details."
                 checked={toggles.showHostName}
                 onChange={(v) => saveToggle("showHostName", v)}
               />
+
               <ToggleRow
                 label="Show talking points"
-                description="Display a talking points textarea on the booking form."
+                description="Display talking points section."
                 checked={toggles.showTalkingPoints}
                 onChange={(v) => saveToggle("showTalkingPoints", v)}
               />
-            </div>
 
-            <p className="mt-2 text-xs text-gray-600">
-              Tip: Changes apply immediately. The Booking form reads flags from{" "}
-              <code>&lt;body data-* &gt;</code> on mount.
-            </p>
+              <p className="mt-4 text-xs text-gray-500">
+                Tip: Changes apply immediately. The Booking form reads flags
+                from{" "}
+                <code className="rounded bg-gray-100 px-1">
+                  {"<body data-* >"}
+                </code>{" "}
+                on mount.
+              </p>
+            </div>
           </>
         )}
       </section>
 
       {/* ========== Appearance Types (autosave) ========== */}
-      <section className="mt-6 rounded-lg border bg-white p-4 shadow-sm">
-        <h2 className="text-sm font-semibold">Appearance Types</h2>
-        <p className="mt-1 text-xs text-gray-600">
+      <section className="mb-8 rounded-xl border bg-white p-4">
+        <h2 className="mb-1 text-lg font-medium">Appearance Types</h2>
+        <p className="mb-3 text-sm text-gray-600">
           Choose which appearance types are available to your team.
         </p>
-        <div className="mt-3 divide-y">
+
+        <div className="space-y-3">
           <ToggleRow
             label="Allow in-person"
             checked={toggles.allowInPerson}
@@ -343,30 +328,30 @@ function SettingsInner() {
         </div>
       </section>
 
-      {/* ========== Theme (original) ========== */}
-      <section className="mt-6 rounded-lg border bg-white p-4 shadow-sm">
-        <h2 className="text-sm font-semibold">Appearance</h2>
-        <p className="mt-1 text-xs text-gray-600">
+      {/* ========== Theme (local) ========== */}
+      <section className="mb-8 rounded-xl border bg-white p-4">
+        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
+        <p className="mb-3 text-sm text-gray-600">
           Choose your theme for this device.
         </p>
-        <div className="mt-3 flex gap-2">
+
+        <div className="flex gap-3">
           <button
-            type="button"
             onClick={() => chooseTheme("light")}
-            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm"
+            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
           >
             Light (default)
           </button>
           <button
-            type="button"
             onClick={() => chooseTheme("dark")}
-            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm"
+            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
           >
             Dark
           </button>
         </div>
-        <p className="mt-2 text-xs text-gray-600">
-          Stored locally (or via provider). We can persist per-user later.
+
+        <p className="mt-2 text-xs text-gray-500">
+          Stored locally. We can wire this to your global provider later.
         </p>
       </section>
 
@@ -377,11 +362,11 @@ function SettingsInner() {
             document.body
           )
         : null}
-    </div>
+    </main>
   );
 }
 
-/** ---------- Toggle row ---------- */
+/* ---------- Toggle row ---------- */
 function ToggleRow(props: {
   label: string;
   description?: string;
@@ -390,13 +375,12 @@ function ToggleRow(props: {
 }) {
   const id = React.useId();
   const [local, setLocal] = React.useState(props.checked);
-
   React.useEffect(() => setLocal(props.checked), [props.checked]);
 
   return (
-    <div className="flex items-start justify-between gap-4 py-3">
-      <div className="min-w-0">
-        <label htmlFor={id} className="block text-sm font-medium">
+    <div className="flex items-start justify-between rounded-lg border p-3">
+      <div className="pr-3">
+        <label htmlFor={id} className="block text-sm font-medium text-gray-900">
           {props.label}
         </label>
         {props.description && (
@@ -406,21 +390,20 @@ function ToggleRow(props: {
 
       <button
         id={id}
-        type="button"
         role="switch"
         aria-checked={local ? "true" : "false"}
-        className={`relative h-6 w-11 rounded-full transition-colors ${
-          local ? "bg-black" : "bg-gray-300"
-        }`}
         onClick={() => {
           const next = !local;
           setLocal(next);
           props.onChange(next);
         }}
+        className={`h-6 w-11 rounded-full border transition ${
+          local ? "bg-emerald-500" : "bg-gray-200"
+        }`}
       >
         <span
-          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-            local ? "translate-x-5" : "translate-x-0.5"
+          className={`block h-5 w-5 translate-x-0.5 rounded-full bg-white shadow transition ${
+            local ? "translate-x-5" : ""
           }`}
         />
       </button>

@@ -1,165 +1,70 @@
 // src/app/api/directory/org/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
-import { resolveViewerFromRequest } from "../../../../lib/viewer";
-import { hasCan, getEffectiveRole } from "../../../../lib/access/permissions";
 
-export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const revalidate = 0;
+export const dynamic = "force-dynamic";
 
-type MemberRow = {
-  userId: string;
-  slot: number;
-  user: {
-    id: string;
-    displayName: string | null;
-    email: string;
-    languages: string[];
-    tags: string[];
-    supportsOnline: boolean;
-    supportsInPerson: boolean;
-    city: string | null;
-    countryCode: string | null;
-  };
-};
+type Err = { error: string; code?: string };
 
-function toIntList(csv: string | null): number[] | null {
-  if (!csv) return null;
-  const nums = csv
-    .split(",")
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 10);
-  return nums.length ? nums : null;
+function json(data: any, init?: ResponseInit) {
+  return NextResponse.json(data, init);
+}
+function badRequest(msg: string, code?: string) {
+  return json({ error: msg, code } as Err, { status: 400 });
+}
+function unauthorized() {
+  return json({ error: "Unauthorized" } as Err, { status: 401 });
+}
+function forbidden() {
+  return json({ error: "Forbidden" } as Err, { status: 403 });
+}
+function notFound() {
+  return json({ error: "Not found" } as Err, { status: 404 });
+}
+function conflict(msg = "Multiple organizations") {
+  return json({ error: msg, code: "MULTI_ORG" } as Err, { status: 409 });
 }
 
-// GET /api/directory/org?orgId=...&q=...&slots=4,5&inviteableOnly=true&take=50&skip=0
+/**
+ * GET /api/directory/org
+ *
+ * Returns the acting user's organization in a simple, client-friendly shape.
+ * - If orgId is provided, validates membership and echoes it back.
+ * - If orgId is not provided and the user belongs to exactly one org, auto-selects it.
+ * - If user belongs to multiple orgs, returns 409 so the caller can choose.
+ */
 export async function GET(req: NextRequest) {
-  try {
-    const viewer = await resolveViewerFromRequest(req);
-    if (!viewer?.isSignedIn || !viewer.userId) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any)?.id as string | undefined;
+  if (!userId) return unauthorized();
 
-    const { searchParams } = new URL(req.url);
-    const orgId = searchParams.get("orgId") ?? "";
-    const q = (searchParams.get("q") || "").trim();
-    const inviteableOnly =
-      (searchParams.get("inviteableOnly") || "false").toLowerCase() === "true";
-    const slots = toIntList(searchParams.get("slots"));
-    const take = Math.min(
-      Math.max(parseInt(searchParams.get("take") || "50", 10), 1),
-      200
-    );
-    const skip = Math.max(parseInt(searchParams.get("skip") || "0", 10), 0);
+  const { searchParams } = new URL(req.url);
+  const orgIdParam = (searchParams.get("orgId") || "").trim() || null;
 
-    if (!orgId) {
-      return NextResponse.json(
-        { ok: false, error: "orgId is required" },
-        { status: 400 }
-      );
-    }
-
-    // Gate directory access by booking:view (broad read capability)
-    const canViewDirectory = await hasCan({
-      userId: viewer.userId,
-      orgId,
-      permission: "booking:view",
+  // If explicit orgId was given, ensure the caller is a member of it.
+  if (orgIdParam) {
+    const member = await prisma.userRole.findUnique({
+      where: { userId_orgId: { userId, orgId: orgIdParam } },
+      select: { orgId: true },
     });
-    if (!canViewDirectory) {
-      return NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      );
-    }
-
-    // Build query
-    const where: any = { orgId };
-    if (slots) where.slot = { in: slots };
-    if (q) {
-      // search by name/email (basic)
-      where.user = {
-        OR: [
-          { displayName: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-        ],
-      };
-    }
-
-    // Fetch org members (page)
-    const rows: MemberRow[] = await prisma.userRole.findMany({
-      where,
-      take,
-      skip,
-      orderBy: { assignedAt: "desc" }, // stable order; we’ll prettify order client-side
-      select: {
-        userId: true,
-        slot: true,
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
-            languages: true,
-            tags: true,
-            supportsOnline: true,
-            supportsInPerson: true,
-            city: true,
-            countryCode: true,
-          },
-        },
-      },
-    });
-
-    // Filter by role activity & directory permissions; attach label/flags
-    const people = await Promise.all(
-      rows.map(async (r) => {
-        const eff = await getEffectiveRole(orgId, r.slot);
-        const listed =
-          eff.isActive && eff.perms.has("directory:listed_internal");
-        const inviteable = listed && eff.perms.has("booking:inviteable");
-        if (!listed) return null;
-        if (inviteableOnly && !inviteable) return null;
-
-        return {
-          id: r.user.id,
-          userId: r.userId,
-          displayName: r.user.displayName ?? r.user.email,
-          email: r.user.email,
-          slot: r.slot,
-          roleLabel: eff.label,
-          isActiveSlot: eff.isActive,
-          isInviteable: inviteable,
-          languages: r.user.languages,
-          tags: r.user.tags,
-          supportsOnline: r.user.supportsOnline,
-          supportsInPerson: r.user.supportsInPerson,
-          city: r.user.city,
-          countryCode: r.user.countryCode,
-        };
-      })
-    );
-
-    const filtered = people.filter(Boolean) as NonNullable<
-      (typeof people)[number]
-    >[];
-
-    return NextResponse.json(
-      {
-        ok: true,
-        count: filtered.length,
-        people: filtered,
-      },
-      { status: 200 }
-    );
-  } catch (err) {
-    console.error("GET /api/directory/org error:", err);
-    return NextResponse.json(
-      { ok: false, error: "Failed to load directory" },
-      { status: 500 }
-    );
+    if (!member) return forbidden();
+    // Redundant keys so clients can read orgId via several shapes
+    return json({ orgId: member.orgId, id: member.orgId });
   }
+
+  // No explicit orgId → infer from memberships.
+  const memberships = await prisma.userRole.findMany({
+    where: { userId },
+    select: { orgId: true },
+    take: 2, // we only need to know if there’s more than one
+  });
+
+  if (memberships.length === 0) return notFound();
+  if (memberships.length > 1) return conflict();
+
+  const only = memberships[0]!;
+  return json({ orgId: only.orgId, id: only.orgId });
 }
