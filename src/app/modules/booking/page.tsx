@@ -16,17 +16,13 @@ type BookingListItem = {
   startAt: string; // ISO
   durationMins: number;
   appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE" | null;
-
   expertName?: string | null;
   newsroomName?: string | null;
   programName?: string | null;
-
   // Legacy, still displayed if present
   hostName?: string | null;
-
   locationName?: string | null;
   locationAddress?: string | null;
-
   // NEW (optional, safe): how many HOST participants exist
   hostsCount?: number;
 };
@@ -94,47 +90,47 @@ function extractRoles(s: any): Set<string> {
   return roles;
 }
 
+/* ---------- new: org context helpers on the client ---------- */
+function getSessionOrgId(s: any): string | null {
+  return (
+    (s?.orgId as string | undefined) ??
+    (s?.user?.orgId as string | undefined) ??
+    null
+  );
+}
+
 export default function BookingsPage() {
   const qs = useSearchParams();
   const updated = qs.get("updated") === "1";
+  const overrideOrgId = qs.get("orgId"); // optional admin/dev override
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true); // bookings loading
   const [err, setErr] = useState<string | null>(null);
   const [items, setItems] = useState<BookingListItem[]>([]);
-  const [sessionObj, setSessionObj] = useState<any>(null);
+  // IMPORTANT: undefined = not loaded yet, null = loaded + no session
+  const [sessionObj, setSessionObj] = useState<any | undefined>(undefined);
+
+  const sessionReady = sessionObj !== undefined;
 
   const roles = useMemo(
-    () => (sessionObj ? extractRoles(sessionObj) : new Set<string>()),
-    [sessionObj]
+    () => (sessionReady ? extractRoles(sessionObj) : new Set<string>()),
+    [sessionReady, sessionObj]
   );
-  const canCreate = roles.has("OWNER") || roles.has("PRODUCER"); // Hosts & Experts => false
 
+  // Treat OWNER/PRODUCER as admin-like in current UI
+  const isAdminLike = roles.has("OWNER") || roles.has("PRODUCER");
+  const isDev = process.env.NODE_ENV !== "production";
+  const overrideAllowed = !!overrideOrgId && (isDev || isAdminLike);
+
+  // Resolve the effective org id (only meaningful once session is ready)
+  const sessionOrgId = sessionReady ? getSessionOrgId(sessionObj) : null;
+  const effectiveOrgId = overrideAllowed ? overrideOrgId : sessionOrgId;
+
+  const canCreate = isAdminLike; // Hosts & Experts => false
+
+  /* Load session */
   useEffect(() => {
     let cancelled = false;
-
-    async function loadList() {
-      setLoading(true);
-      setErr(null);
-      try {
-        const res = await fetch("/api/bookings", {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-        });
-        const json = (await res.json()) as ApiList;
-        if (cancelled) return;
-        if (res.ok && (json as any).ok) {
-          setItems((json as any).bookings as BookingListItem[]);
-        } else {
-          setErr((json as any)?.error || "Failed to load bookings.");
-        }
-      } catch {
-        if (!cancelled) setErr("Network error while loading bookings.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
     async function loadSession() {
       try {
         const r = await fetch("/api/auth/session", {
@@ -151,24 +147,81 @@ export default function BookingsPage() {
         if (!cancelled) setSessionObj(null);
       }
     }
-
-    loadList();
     loadSession();
     return () => {
       cancelled = true;
     };
   }, []);
 
+  /* Load bookings — wait until session is known to avoid banner flash */
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadList() {
+      // Wait for session to be known (prevents "no org" flash)
+      if (!sessionReady) {
+        setLoading(true);
+        setErr(null);
+        return;
+      }
+
+      // If we know there's no org, stop loading and show the banner
+      if (!effectiveOrgId) {
+        setItems([]);
+        setErr(null);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      setErr(null);
+
+      try {
+        // Always include the effective orgId (session by default; override if allowed)
+        const url = `/api/bookings?orgId=${encodeURIComponent(effectiveOrgId)}`;
+
+        const res = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        });
+
+        const json = (await res.json()) as ApiList;
+        if (cancelled) return;
+
+        if (res.ok && (json as any).ok) {
+          setItems((json as any).bookings as BookingListItem[]);
+        } else {
+          setErr((json as any)?.error || "Failed to load bookings.");
+        }
+      } catch {
+        if (!cancelled) setErr("Network error while loading bookings.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadList();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionReady, effectiveOrgId]);
+
+  // Spinner logic: show while session OR bookings are loading
+  const showSpinner = !sessionReady || loading;
+
   return (
-    <div className="mx-auto max-w-3xl p-4 space-y-4">
+    <>
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Bookings</h1>
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Bookings</h1>
+
         {/* Owners & Producers only */}
         {canCreate ? (
           <Link
             href="/modules/booking/new"
-            className="rounded-lg border px-3 py-1 text-sm hover:bg-gray-50"
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50"
           >
             New booking
           </Link>
@@ -177,31 +230,43 @@ export default function BookingsPage() {
 
       {/* Success banner (after edit/save flows that redirect with ?updated=1) */}
       {updated && (
-        <div
-          role="status"
-          className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm"
-        >
+        <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
           Booking updated successfully.
         </div>
       )}
 
-      {loading && (
-        <div className="text-sm text-gray-500" role="status">
+      {/* No-org inline banner — only after session is known */}
+      {sessionReady && !effectiveOrgId && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <div className="flex items-center justify-between gap-3">
+            <span>No organization selected.</span>
+            <Link
+              href="/modules/settings" // safer hub page (doesn't require orgId)
+              className="shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100"
+            >
+              Choose org
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {showSpinner && (
+        <div className="text-sm text-gray-600" role="status">
           Loading…
         </div>
       )}
 
       {err && (
-        <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
           {err}
         </div>
       )}
 
-      {!loading && !err && items.length === 0 && (
-        <div className="rounded-lg border px-3 py-4">
-          <p className="text-sm">No bookings yet.</p>
+      {!showSpinner && !err && effectiveOrgId && items.length === 0 && (
+        <div className="rounded-lg border bg-white px-4 py-8 text-center text-sm text-gray-600">
+          <p className="mb-2">No bookings yet.</p>
           {canCreate ? (
-            <p className="mt-1 text-sm">
+            <p>
               Create your first booking{" "}
               <Link
                 className="underline underline-offset-2"
@@ -212,91 +277,84 @@ export default function BookingsPage() {
               .
             </p>
           ) : (
-            <p className="mt-1 text-sm">
-              When a newsroom invites you, you’ll see it here.
-            </p>
+            <p>When a newsroom invites you, you’ll see it here.</p>
           )}
         </div>
       )}
 
-      <ul className="space-y-3">
-        {items.map((b) => {
+      {/* List */}
+      {!showSpinner &&
+        effectiveOrgId &&
+        items.map((b) => {
           const ap = b.appearanceType;
           const multiHost =
             typeof b.hostsCount === "number" && b.hostsCount > 1;
 
           return (
-            <li key={b.id} className="rounded-lg border p-3 hover:bg-gray-50">
+            <Link
+              key={b.id}
+              href={`/modules/booking/${b.id}`}
+              className="mb-3 block rounded-xl border bg-white p-4 hover:bg-gray-50"
+            >
               {/* Whole card is a link → VIEW page */}
-              <Link href={`/modules/booking/${b.id}`} className="block">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-base font-medium">
-                    {b.subject || "(no subject)"}
-                  </h2>
+              <div className="mb-1 flex items-center justify-between">
+                <h2 className="text-base font-medium">
+                  {b.subject || "(no subject)"}
+                </h2>
+                {ap && (
+                  <span className="rounded-md border px-2 py-0.5 text-xs">
+                    {ap === "IN_PERSON"
+                      ? "IN PERSON"
+                      : ap === "ONLINE"
+                      ? "ONLINE"
+                      : "PHONE"}
+                  </span>
+                )}
+              </div>
 
-                  {ap && (
-                    <span
-                      className="rounded-md border px-2 py-0.5 text-xs"
-                      aria-label="appearance type"
-                    >
-                      {ap === "IN_PERSON"
-                        ? "IN PERSON"
-                        : ap === "ONLINE"
-                        ? "ONLINE"
-                        : "PHONE"}
-                    </span>
-                  )}
+              <div className="mb-1 text-sm text-gray-600">
+                {fmtDate(b.startAt)} • {b.durationMins}m
+                {/* NEW: Multi-host hint, only when hostsCount > 1 */}
+                {multiHost && (
+                  <span className="ml-2 rounded-md border px-1.5 py-0.5 text-xs">
+                    Hosts ×{b.hostsCount}
+                  </span>
+                )}
+              </div>
+
+              {(b.expertName || b.newsroomName) && (
+                <div className="text-sm text-gray-600">
+                  <span className="font-medium">Expert:</span>{" "}
+                  {b.expertName ?? "—"}{" "}
+                  <span className="mx-1.5 text-gray-400">•</span>{" "}
+                  <span className="font-medium">Newsroom:</span>{" "}
+                  {b.newsroomName ?? "—"}
                 </div>
+              )}
 
+              {(b.programName || b.hostName) && (
+                <div className="text-sm text-gray-600">
+                  <span className="font-medium">Program:</span>{" "}
+                  {b.programName ?? "—"}{" "}
+                  <span className="mx-1.5 text-gray-400">•</span>{" "}
+                  <span className="font-medium">Host:</span> {b.hostName ?? "—"}
+                </div>
+              )}
+
+              {ap === "IN_PERSON" && (b.locationName || b.locationAddress) && (
                 <div className="mt-1 text-sm text-gray-600">
-                  {fmtDate(b.startAt)} • {b.durationMins}m
-                  {/* NEW: Multi-host hint, only when hostsCount > 1 */}
-                  {multiHost && (
-                    <span
-                      className="ml-2 rounded-md border px-1.5 py-0.5 text-xs"
-                      title="Multiple hosts"
-                      aria-label="multiple hosts"
-                    >
-                      Hosts ×{b.hostsCount}
+                  <span className="font-medium">Location:</span>{" "}
+                  {b.locationName ?? ""}{" "}
+                  {b.locationAddress ? (
+                    <span className="text-gray-500">
+                      {` — ${b.locationAddress}`}
                     </span>
-                  )}
+                  ) : null}
                 </div>
-
-                {(b.expertName || b.newsroomName) && (
-                  <div className="mt-1 text-sm">
-                    <span className="text-gray-500">Expert:</span>{" "}
-                    {b.expertName ?? "—"}{" "}
-                    <span className="text-gray-400">•</span>{" "}
-                    <span className="text-gray-500">Newsroom:</span>{" "}
-                    {b.newsroomName ?? "—"}
-                  </div>
-                )}
-
-                {(b.programName || b.hostName) && (
-                  <div className="mt-1 text-sm">
-                    <span className="text-gray-500">Program:</span>{" "}
-                    {b.programName ?? "—"}{" "}
-                    <span className="text-gray-400">•</span>{" "}
-                    <span className="text-gray-500">Host:</span>{" "}
-                    {b.hostName ?? "—"}
-                  </div>
-                )}
-
-                {ap === "IN_PERSON" &&
-                  (b.locationName || b.locationAddress) && (
-                    <div className="mt-1 text-sm text-gray-600">
-                      <span className="text-gray-500">Location:</span>{" "}
-                      {b.locationName ?? ""}
-                      {b.locationAddress ? (
-                        <span>{` — ${b.locationAddress}`}</span>
-                      ) : null}
-                    </div>
-                  )}
-              </Link>
-            </li>
+              )}
+            </Link>
           );
         })}
-      </ul>
-    </div>
+    </>
   );
 }
