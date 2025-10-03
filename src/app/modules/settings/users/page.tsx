@@ -13,8 +13,12 @@ type UserItem = {
   slot: number | null;
   roleLabel?: string | null;
   roleActive?: boolean | null;
+  // Old/alt field name from API (supported for robustness):
   invited?: boolean | null;
+  // New field name from API (what the server now returns):
+  isInvited?: boolean | null;
 };
+
 type UsersResponse = {
   items: UserItem[];
   page: number;
@@ -28,6 +32,7 @@ type RoleSlot = {
   isActive: boolean;
   overrides: { key: string; allowed: boolean }[];
 };
+
 type RolesResponse = {
   ok?: boolean;
   orgId: string;
@@ -36,6 +41,7 @@ type RolesResponse = {
 };
 
 type PermState = "inherit" | "allow" | "deny";
+
 type RoleDraft = {
   slot: number;
   label: string;
@@ -63,27 +69,21 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 function CopyField(props: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
   return (
-    <div className="mt-2">
-      <label className="block text-sm font-medium text-gray-700">
-        {props.label}
-      </label>
-      <div className="mt-1 flex gap-2">
-        <input
-          readOnly
-          value={props.value}
-          className="h-9 flex-1 rounded-md border border-gray-300 px-3 font-mono text-xs text-gray-700"
-        />
-        <button
-          onClick={async () => {
-            await navigator.clipboard.writeText(props.value);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          }}
-          className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
+    <div className="flex items-center gap-2">
+      <div className="text-sm text-gray-600">{props.label}</div>
+      <div className="flex-1 truncate rounded-md border px-3 py-2 text-sm">
+        {props.value}
       </div>
+      <button
+        onClick={async () => {
+          await navigator.clipboard.writeText(props.value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        }}
+        className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
     </div>
   );
 }
@@ -108,9 +108,8 @@ function useToast() {
     },
     node: msg ? (
       <div
-        role="status"
         className={classNames(
-          "fixed right-4 top-4 z-50 rounded-md px-3 py-2 text-sm shadow",
+          "fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm shadow",
           variant === "ok" ? "bg-green-600 text-white" : "bg-red-600 text-white"
         )}
       >
@@ -131,6 +130,7 @@ async function getJSON<T>(url: string): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -145,6 +145,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
 async function patchJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "PATCH",
@@ -174,9 +175,9 @@ function parseOrgFromPayload(obj: any): string | null {
   if (looksLikeId(obj?.item?.org?.id)) return obj.item.org.id as string;
   return null;
 }
-async function tryFetchJson(url: string) {
+async function tryFetchJson<T>(url: string) {
   try {
-    return await getJSON<any>(url);
+    return await getJSON<T>(url);
   } catch {
     return null;
   }
@@ -194,7 +195,7 @@ async function detectOrgId(): Promise<string | null> {
     "/api/org/me",
   ];
   for (const url of candidates) {
-    const data = await tryFetchJson(url);
+    const data = await tryFetchJson<any>(url);
     const found = parseOrgFromPayload(data);
     if (found) {
       if (typeof window !== "undefined")
@@ -202,16 +203,16 @@ async function detectOrgId(): Promise<string | null> {
       return found;
     }
   }
-  const sess = await tryFetchJson("/api/auth/session");
+  const sess = await tryFetchJson<any>("/api/auth/session");
   const fromSess =
     (sess?.user && parseOrgFromPayload(sess.user)) ||
     parseOrgFromPayload(sess) ||
-    sess?.user?.orgId ||
-    sess?.user?.org?.id;
+    (sess?.user?.orgId as string | undefined) ||
+    (sess?.user?.org?.id as string | undefined);
   if (looksLikeId(fromSess)) {
     if (typeof window !== "undefined")
-      window.localStorage.setItem("orgId", fromSess);
-    return fromSess;
+      window.localStorage.setItem("orgId", fromSess!);
+    return fromSess!;
   }
   return null;
 }
@@ -267,8 +268,8 @@ export default function UsersAndRolesPage() {
 
   // ── Users data state
   const [items, setItems] = React.useState<UserItem[] | null>(null);
-  const [total, setTotal] = React.useState<number>(0);
-  const [loading, setLoading] = React.useState<boolean>(false);
+  const [total, setTotal] = React.useState(0);
+  const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState<Record<string, boolean>>({});
 
@@ -298,7 +299,6 @@ export default function UsersAndRolesPage() {
         if (!alive) return;
         setRolesRes(data);
         setPermissionKeys(data.permissionKeys);
-
         // seed drafts for tri-state
         const map = new Map<number, RoleDraft>();
         for (const s of data.slots) {
@@ -421,7 +421,6 @@ export default function UsersAndRolesPage() {
       return;
     }
     setPending((p) => ({ ...p, [userId]: true }));
-
     const prev = items ?? [];
     setItems((list) =>
       (list ?? []).map((x) =>
@@ -430,7 +429,6 @@ export default function UsersAndRolesPage() {
           : x
       )
     );
-
     try {
       await patchJSON<{ item: UserItem }>(
         `/api/org/users/${encodeURIComponent(
@@ -451,16 +449,13 @@ export default function UsersAndRolesPage() {
     if (!orgId) return;
     const ok = window.confirm(`Remove "${userName}" from this organization?`);
     if (!ok) return;
-
     setPending((p) => ({ ...p, [userId]: true }));
-
     // optimistic remove
     const prevItems = items ?? [];
     const nextItems = prevItems.filter((x) => x.id !== userId);
     const prevTotal = total;
     setItems(nextItems);
     setTotal(Math.max(0, prevTotal - 1));
-
     try {
       await patchJSON<{ removed: true }>(
         `/api/org/users/${encodeURIComponent(
@@ -479,7 +474,7 @@ export default function UsersAndRolesPage() {
     }
   }
 
-  // ── Invite
+  // ── Invite (panel)
   const [showInvite, setShowInvite] = React.useState(false);
   const [inviteEmail, setInviteEmail] = React.useState("");
   const [inviteName, setInviteName] = React.useState("");
@@ -500,23 +495,73 @@ export default function UsersAndRolesPage() {
         `/api/org/users/invite?orgId=${encodeURIComponent(orgId)}`,
         { email: inviteEmail.trim(), name: inviteName.trim() || undefined }
       );
+
+      // New server shape: { status, invitePath?, path? }
+      const status: string | undefined = resp?.status;
       const link: string =
-        typeof resp?.link === "string"
+        typeof resp?.invitePath === "string"
+          ? resp.invitePath
+          : typeof resp?.path === "string"
+          ? resp.path
+          : typeof resp?.link === "string"
           ? resp.link
           : typeof resp?.token === "string"
           ? `/auth/invite/accept?token=${resp.token}`
           : "";
-      if (link) {
+
+      if (status === "already_member") {
+        setInviteLink(null);
+        toast.showOk("This user is already in your org.");
+      } else if (link) {
         setInviteLink(link);
         toast.showOk("Invite created.");
       } else {
         toast.showErr("Invite created, but no link was returned.");
       }
+
       setPage(1);
     } catch (err: any) {
       toast.showErr(err?.message || "Failed to create invite.");
     } finally {
       setInviting(false);
+    }
+  }
+
+  // Per-row Copy invite action
+  async function onCopyInvite(email: string, userId: string) {
+    if (!orgId || !email) return;
+    setPending((p) => ({ ...p, [userId]: true }));
+    try {
+      const resp = await postJSON<any>(
+        `/api/org/users/invite?orgId=${encodeURIComponent(orgId)}`,
+        { email }
+      );
+      const status: string | undefined = resp?.status;
+      const link: string =
+        typeof resp?.invitePath === "string"
+          ? resp.invitePath
+          : typeof resp?.path === "string"
+          ? resp.path
+          : typeof resp?.link === "string"
+          ? resp.link
+          : typeof resp?.token === "string"
+          ? `/auth/invite/accept?token=${resp.token}`
+          : "";
+
+      if (status === "already_member") {
+        toast.showOk("This user is already in your org.");
+        return;
+      }
+      if (!link) {
+        toast.showErr("Invite created, but no link was returned.");
+        return;
+      }
+      await navigator.clipboard.writeText(link);
+      toast.showOk("Invite link copied.");
+    } catch (e: any) {
+      toast.showErr(e?.message || "Failed to create invite link.");
+    } finally {
+      setPending((p) => ({ ...p, [userId]: false }));
     }
   }
 
@@ -565,6 +610,7 @@ export default function UsersAndRolesPage() {
 
   async function saveRole(slotNum: number) {
     if (!orgId) return;
+
     const draft = draftFor(slotNum);
     const orig = originalFor(slotNum);
     if (!orig) return;
@@ -583,6 +629,7 @@ export default function UsersAndRolesPage() {
           updates: { [String(slotNum)]: { label: draft.label.trim() } },
         });
         toast.showOk("Role saved.");
+
         const data = await getJSON<RolesResponse>(
           `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
         );
@@ -615,7 +662,6 @@ export default function UsersAndRolesPage() {
     const overrides = Object.entries(draft.permState)
       .filter(([, v]) => v !== "inherit")
       .map(([key, v]) => ({ key, allowed: v === "allow" }));
-
     const update: {
       label?: string;
       isActive?: boolean;
@@ -623,13 +669,11 @@ export default function UsersAndRolesPage() {
     } = {};
     if (draft.label.trim() !== orig.label) update.label = draft.label.trim();
     if (draft.isActive !== orig.isActive) update.isActive = draft.isActive;
-
     const origMap = new Map(orig.overrides.map((o) => [o.key, o.allowed]));
     const changed =
       overrides.length !== orig.overrides.length ||
       overrides.some((o) => origMap.get(o.key) !== o.allowed);
     if (changed) update.overrides = overrides;
-
     if (!Object.keys(update).length) {
       toast.showOk("Already saved.");
       return;
@@ -649,7 +693,6 @@ export default function UsersAndRolesPage() {
       );
       setRolesRes(data);
       setPermissionKeys(data.permissionKeys);
-
       const map = new Map<number, RoleDraft>();
       for (const s of data.slots) {
         const permState: Record<string, PermState> = {};
@@ -675,50 +718,54 @@ export default function UsersAndRolesPage() {
   // ── Rendering ────────────────────────────────────────────────────────────────
   if (!orgId) {
     return (
-      <main className="mx-auto max-w-5xl p-6">
-        <h1 className="mb-2 text-2xl font-semibold">Users &amp; Roles</h1>
-        <p className="text-sm text-gray-600">
-          {resolvingOrg
-            ? "Resolving your organization…"
-            : "We couldn’t determine your organization automatically."}
-        </p>
-        {!resolvingOrg && (
-          <button
-            onClick={async () => {
-              setResolvingOrg(true);
-              if (typeof window !== "undefined")
-                window.localStorage.removeItem("orgId");
-              const detected = await detectOrgId();
-              setResolvingOrg(false);
-              if (detected) {
-                setOrgId(detected);
-                const sp = new URLSearchParams(searchParams.toString());
-                sp.set("orgId", detected);
-                router.replace(`/modules/settings/users?${sp.toString()}`);
-              }
-            }}
-            className="mt-3 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-          >
-            Try again
-          </button>
-        )}
-      </main>
+      <div className="mx-auto max-w-5xl px-6 py-8">
+        {toast.node}
+        {/* Header */}
+        <h1 className="mb-6 text-2xl font-semibold">Users &amp; Roles</h1>
+
+        <div className="rounded-lg border p-4">
+          <p className="text-sm text-gray-600">
+            {resolvingOrg
+              ? "Resolving your organization…"
+              : "We couldn’t determine your organization automatically."}
+          </p>
+
+          {!resolvingOrg && (
+            <button
+              onClick={async () => {
+                setResolvingOrg(true);
+                if (typeof window !== "undefined")
+                  window.localStorage.removeItem("orgId");
+                const detected = await detectOrgId();
+                setResolvingOrg(false);
+                if (detected) {
+                  setOrgId(detected);
+                  const sp = new URLSearchParams(searchParams.toString());
+                  sp.set("orgId", detected);
+                  router.replace(`/modules/settings/users?${sp.toString()}`);
+                }
+              }}
+              className="mt-3 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      </div>
     );
   }
 
   return (
-    <main className="mx-auto max-w-5xl p-6">
+    <div className="mx-auto max-w-5xl px-6 py-8">
       {toast.node}
-
       {/* Header */}
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex items-center gap-2">
         <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2">
           <button
             onClick={() => {
-              if (typeof window !== "undefined") {
+              if (typeof window !== "undefined")
                 window.localStorage.removeItem("orgId");
-              }
               location.reload();
             }}
             className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
@@ -736,73 +783,68 @@ export default function UsersAndRolesPage() {
       </div>
 
       {/* Users section (collapsible open by default) */}
-      <details open className="rounded-xl border bg-white">
-        <summary className="cursor-pointer select-none rounded-xl px-4 py-3 text-lg font-medium">
+      <details open className="rounded-lg border">
+        <summary className="cursor-pointer list-none px-4 py-3 text-base font-medium">
           Users
         </summary>
 
-        <div className="border-t px-4 py-4">
+        <div className="border-t p-4">
           {/* Invite panel */}
           {showInvite && (
-            <form onSubmit={onInvite} className="mb-4 rounded-md border p-4">
-              <h2 className="mb-2 text-base font-semibold">
-                Invite a new user
-              </h2>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">
-                    Email
-                  </label>
+            <div className="mb-6 rounded-lg border p-4">
+              <h2 className="mb-3 text-lg font-semibold">Invite a new user</h2>
+
+              <form
+                onSubmit={onInvite}
+                className="grid grid-cols-1 gap-3 md:grid-cols-3"
+              >
+                <label className="text-sm">
+                  <div>Email</div>
                   <input
-                    type="email"
-                    required
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                     className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                   />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">
-                    Name (optional)
-                  </label>
+                </label>
+
+                <label className="text-sm">
+                  <div>Name (optional)</div>
                   <input
                     value={inviteName}
                     onChange={(e) => setInviteName(e.target.value)}
                     className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                   />
-                </div>
-              </div>
+                </label>
 
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  type="submit"
-                  disabled={inviting}
-                  className={classNames(
-                    "h-9 rounded-md border px-3 text-sm",
-                    inviting ? "opacity-50" : "hover:bg-gray-50"
-                  )}
-                >
-                  {inviting ? "Creating…" : "Create invite"}
-                </button>
-              </div>
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    disabled={inviting}
+                    className={classNames(
+                      "h-9 rounded-md border px-3 text-sm",
+                      inviting
+                        ? "cursor-not-allowed opacity-50"
+                        : "hover:bg-gray-50"
+                    )}
+                  >
+                    {inviting ? "Creating…" : "Create invite"}
+                  </button>
+                </div>
+              </form>
 
               {inviteLink && (
-                <CopyField label="Invite link" value={inviteLink} />
+                <div className="mt-3">
+                  <CopyField label="Invite link" value={inviteLink} />
+                </div>
               )}
-            </form>
+            </div>
           )}
 
           {/* Filters */}
-          <div className="mb-3 flex flex-wrap items-end gap-3">
-            <div>
-              <label
-                htmlFor="search"
-                className="block text-sm font-medium text-gray-700"
-              >
-                Search (name or email)
-              </label>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <label className="text-sm">
+              <div>Search (name or email)</div>
               <input
-                id="search"
                 value={q}
                 onChange={(e) => {
                   setPage(1);
@@ -815,17 +857,11 @@ export default function UsersAndRolesPage() {
               <div id="search-hint" className="mt-1 text-xs text-gray-500">
                 Type to filter by name or email
               </div>
-            </div>
+            </label>
 
-            <div>
-              <label
-                htmlFor="slot"
-                className="block text-sm font-medium text-gray-700"
-              >
-                Role slot
-              </label>
+            <label className="text-sm">
+              <div>Role slot</div>
               <select
-                id="slot"
                 value={slot}
                 onChange={(e) => {
                   setPage(1);
@@ -837,24 +873,18 @@ export default function UsersAndRolesPage() {
                 {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
                   const label = roleLabelBySlot.get(n)?.label ?? `Role ${n}`;
                   return (
-                    <option key={n} value={String(n)}>
+                    <option key={n} value={n}>
                       {label} (#{n})
                     </option>
                   );
                 })}
               </select>
-            </div>
+            </label>
 
-            <div>
-              <label
-                htmlFor="pagesize"
-                className="block text-sm font-medium text-gray-700"
-              >
-                Page size
-              </label>
+            <label className="text-sm">
+              <div>Page size</div>
               <select
-                id="pagesize"
-                value={String(pageSize)}
+                value={pageSize}
                 onChange={(e) => {
                   const v = Number(e.target.value) || 20;
                   setPage(1);
@@ -863,144 +893,155 @@ export default function UsersAndRolesPage() {
                 className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {[10, 20, 50].map((n) => (
-                  <option key={n} value={String(n)}>
+                  <option key={n} value={n}>
                     {n}
                   </option>
                 ))}
               </select>
-            </div>
+            </label>
 
             <div className="ml-auto text-sm text-gray-600">
               {loading ? (
-                "Loading…"
+                <span>Loading…</span>
               ) : error ? (
                 <span className="text-red-600">{error}</span>
               ) : (
-                `${total} results`
+                <span>{total} results</span>
               )}
             </div>
           </div>
 
           {/* Table */}
-          <div
-            role="table"
-            aria-label="Organization members"
-            className="overflow-hidden rounded-md border"
-          >
-            <div
-              role="row"
-              className="grid grid-cols-12 gap-2 border-b bg-gray-50 px-3 py-2 text-sm font-medium"
-            >
-              <div role="columnheader" className="col-span-4">
-                Name
-              </div>
-              <div role="columnheader" className="col-span-3">
-                Email
-              </div>
-              <div role="columnheader" className="col-span-3">
-                Role
-              </div>
-              <div role="columnheader" className="col-span-2 text-right">
-                Actions
-              </div>
-            </div>
-
-            {!loading && !error && (items?.length ?? 0) === 0 && (
-              <div className="px-3 py-6 text-sm text-gray-600">
-                No members found. Try clearing filters.
-              </div>
-            )}
-
-            {(items ?? []).map((r) => {
-              const isBusy = !!pending[r.id];
-              const currentSlot = r.slot ?? undefined;
-              const label = r.roleLabel ?? getLabelForSlot(r.slot ?? undefined);
-              const active =
-                typeof r.roleActive === "boolean"
-                  ? r.roleActive
-                  : currentSlot
-                  ? roleLabelBySlot.get(currentSlot)?.isActive ?? true
-                  : true;
-
-              return (
-                <div
-                  key={r.id}
-                  role="row"
-                  className="grid grid-cols-12 items-center gap-2 border-t px-3 py-2 text-sm"
-                >
-                  <div role="cell" className="col-span-4">
-                    <div className="font-medium text-gray-900">
-                      {r.name || "—"}
-                    </div>
-                    <div className="text-xs text-gray-500">ID: {r.id}</div>
-                  </div>
-
-                  <div role="cell" className="col-span-3">
-                    <a
-                      href={`mailto:${r.email}`}
-                      className="text-blue-600 underline"
+          <div className="overflow-hidden rounded-lg border">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50">
+                <tr className="text-left">
+                  <th className="px-4 py-2 font-medium">Name</th>
+                  <th className="px-4 py-2 font-medium">Email</th>
+                  <th className="px-4 py-2 font-medium">Role</th>
+                  <th className="px-4 py-2 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {!loading && !error && (items?.length ?? 0) === 0 && (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="px-4 py-6 text-center text-gray-500"
                     >
-                      {r.email}
-                    </a>
-                  </div>
+                      No members found. Try clearing filters.
+                    </td>
+                  </tr>
+                )}
 
-                  <div role="cell" className="col-span-3">
-                    <span
-                      className={classNames(
-                        "mr-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs",
-                        active
-                          ? "bg-emerald-100 text-emerald-800"
-                          : "bg-gray-100 text-gray-700"
-                      )}
-                    >
-                      {label}{" "}
-                      {typeof r.slot === "number" && (
-                        <span className="ml-1 text-gray-500">#{r.slot}</span>
-                      )}
-                    </span>
+                {(items ?? []).map((r) => {
+                  const isBusy = !!pending[r.id];
+                  const currentSlot = r.slot ?? undefined;
+                  const label =
+                    r.roleLabel ?? getLabelForSlot(r.slot ?? undefined);
+                  const active =
+                    typeof r.roleActive === "boolean"
+                      ? r.roleActive
+                      : currentSlot
+                      ? roleLabelBySlot.get(currentSlot)?.isActive ?? true
+                      : true;
 
-                    <label className="sr-only" htmlFor={`slot-${r.id}`}>
-                      Change role
-                    </label>
-                    <select
-                      id={`slot-${r.id}`}
-                      onChange={(e) => onChangeSlot(r.id, e.target.value)}
-                      className={classNames(
-                        "h-9 w-40 rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
-                        isBusy && "cursor-not-allowed opacity-50"
-                      )}
-                      defaultValue=""
-                    >
-                      <option value="">Select role…</option>
-                      {Array.from({ length: 10 }, (_, i) => i + 1).map((s) => (
-                        <option key={s} value={String(s)}>
-                          {getLabelForSlot(s)} (#{s})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  const invited = (r.isInvited ?? r.invited) === true;
 
-                  <div role="cell" className="col-span-2 text-right">
-                    <button
-                      onClick={() => onRemove(r.id, r.name || r.email)}
-                      disabled={isBusy}
-                      className={classNames(
-                        "h-9 rounded-md border px-3 text-sm",
-                        isBusy
-                          ? "cursor-not-allowed opacity-50"
-                          : "hover:bg-gray-50"
-                      )}
-                      aria-label={`Remove ${r.name || r.email} from org`}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                  return (
+                    <tr key={r.id}>
+                      <td className="px-4 py-2 align-top">
+                        <div className="font-medium">{r.name || "—"}</div>
+                        <div className="mt-0.5 text-xs text-gray-500">
+                          ID: {r.id}
+                        </div>
+                        {invited && (
+                          <span className="mt-1 inline-block rounded-full border px-2 py-0.5 text-xs text-gray-700">
+                            Invited
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 align-top">
+                        <a
+                          href={`mailto:${r.email}`}
+                          className="text-blue-600 underline"
+                        >
+                          {r.email}
+                        </a>
+                      </td>
+                      <td className="px-4 py-2 align-top">
+                        <div>
+                          <span className="inline-block rounded-full border px-2 py-0.5 text-xs text-gray-700">
+                            {label}{" "}
+                            {typeof r.slot === "number" && (
+                              <span className="text-gray-500">#{r.slot}</span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="mt-2">
+                          <label className="sr-only" htmlFor={`slot-${r.id}`}>
+                            Change role
+                          </label>
+                          <select
+                            id={`slot-${r.id}`}
+                            onChange={(e) => onChangeSlot(r.id, e.target.value)}
+                            className={classNames(
+                              "h-9 w-40 rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
+                              isBusy && "cursor-not-allowed opacity-50"
+                            )}
+                            defaultValue=""
+                          >
+                            <option value="" disabled>
+                              Select role…
+                            </option>
+                            {Array.from({ length: 10 }, (_, i) => i + 1).map(
+                              (s) => (
+                                <option key={s} value={s}>
+                                  {getLabelForSlot(s)} (#{s})
+                                </option>
+                              )
+                            )}
+                          </select>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 align-top">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => onCopyInvite(r.email, r.id)}
+                            disabled={isBusy}
+                            className={classNames(
+                              "h-9 rounded-md border px-3 text-sm",
+                              isBusy
+                                ? "cursor-not-allowed opacity-50"
+                                : "hover:bg-gray-50"
+                            )}
+                            title="Create an invite link for this email and copy it"
+                          >
+                            Copy invite
+                          </button>
+                          <button
+                            onClick={() => onRemove(r.id, r.name || r.email)}
+                            disabled={isBusy}
+                            className={classNames(
+                              "h-9 rounded-md border px-3 text-sm",
+                              isBusy
+                                ? "cursor-not-allowed opacity-50"
+                                : "hover:bg-gray-50"
+                            )}
+                            aria-label={`Remove ${r.name || r.email} from org`}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
 
             {/* Pagination */}
-            <div className="flex items-center justify-between border-t px-3 py-2 text-sm">
+            <div className="flex items-center justify-between px-4 py-3">
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page <= 1 || loading}
@@ -1013,7 +1054,7 @@ export default function UsersAndRolesPage() {
               >
                 Previous
               </button>
-              <div>
+              <div className="text-sm">
                 Page {page} of {totalPages}
               </div>
               <button
@@ -1034,190 +1075,171 @@ export default function UsersAndRolesPage() {
       </details>
 
       {/* Roles section with tri-state permissions (slot #1 hides Active + Edit permissions) */}
-      <details className="mt-6 rounded-xl border bg-white">
-        <summary className="cursor-pointer select-none rounded-xl px-4 py-3 text-lg font-medium">
+      <details className="mt-6 rounded-lg border">
+        <summary className="cursor-pointer list-none px-4 py-3 text-base font-medium">
           Roles management
         </summary>
 
-        <div className="border-t px-4 py-4">
-          {!rolesRes || !permissionKeys ? (
-            <div className="text-sm text-gray-600">Loading roles…</div>
-          ) : (
-            <div className="space-y-2">
-              {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
-                const orig = originalFor(slotNum) || {
-                  slot: slotNum,
-                  label: `Role ${slotNum}`,
-                  isActive: true,
-                  overrides: [],
-                };
-                const draft = draftFor(slotNum);
-                const dirty = isDirty(slotNum);
-                const busy = !!roleSaving[slotNum];
-                const isAdmin = slotNum === 1;
+        {!rolesRes || !permissionKeys ? (
+          <div className="border-t p-4 text-sm text-gray-600">
+            Loading roles…
+          </div>
+        ) : (
+          <div className="border-t p-4">
+            {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
+              const orig = originalFor(slotNum) || {
+                slot: slotNum,
+                label: `Role ${slotNum}`,
+                isActive: true,
+                overrides: [],
+              };
+              const draft = draftFor(slotNum);
+              const dirty = isDirty(slotNum);
+              const busy = !!roleSaving[slotNum];
+              const isAdmin = slotNum === 1;
 
-                return (
-                  <div key={slotNum} className="rounded-lg border p-3">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                      <div className="w-20 text-sm font-medium text-gray-700">
-                        #{slotNum}
-                      </div>
+              return (
+                <div key={slotNum} className="mb-6 rounded-md border p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <div className="text-sm font-medium">#{slotNum}</div>
 
-                      <div className="flex-1">
-                        <label
-                          className="sr-only"
-                          htmlFor={`role-label-${slotNum}`}
-                        >
-                          Label for role #{slotNum}
+                    <label className="flex-1 text-sm">
+                      <div>Label for role #{slotNum}</div>
+                      <input
+                        value={draft.label}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setRoleDrafts((m) =>
+                            new Map(m).set(slotNum, { ...draft, label: v })
+                          );
+                          setRoleDirty((d) => ({ ...d, [slotNum]: true }));
+                        }}
+                        className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </label>
+
+                    {/* For slot #1 (Admin), hide Active + Edit permissions */}
+                    {!isAdmin && (
+                      <>
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={draft.isActive}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              setRoleDrafts((m) =>
+                                new Map(m).set(slotNum, {
+                                  ...draft,
+                                  isActive: v,
+                                })
+                              );
+                              setRoleDirty((d) => ({ ...d, [slotNum]: true }));
+                            }}
+                            className="h-5 w-5"
+                          />
+                          Active
                         </label>
-                        <input
-                          id={`role-label-${slotNum}`}
-                          value={draft.label}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setRoleDrafts((m) =>
-                              new Map(m).set(slotNum, { ...draft, label: v })
-                            );
-                            setRoleDirty((d) => ({ ...d, [slotNum]: true }));
-                          }}
-                          className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
 
-                      {/* For slot #1 (Admin), hide Active + Edit permissions */}
-                      {!isAdmin && (
-                        <>
-                          <div className="flex items-center gap-2">
-                            <label
-                              htmlFor={`role-active-${slotNum}`}
-                              className="text-sm text-gray-700"
-                            >
-                              Active
-                            </label>
-                            <input
-                              id={`role-active-${slotNum}`}
-                              type="checkbox"
-                              checked={!!draft.isActive}
-                              onChange={(e) => {
-                                const v = e.target.checked;
-                                setRoleDrafts((m) =>
-                                  new Map(m).set(slotNum, {
-                                    ...draft,
-                                    isActive: v,
-                                  })
-                                );
-                                setRoleDirty((d) => ({
-                                  ...d,
-                                  [slotNum]: true,
-                                }));
-                              }}
-                              className="h-5 w-5"
-                            />
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPermOpen((o) => ({
-                                ...o,
-                                [slotNum]: !o[slotNum],
-                              }))
-                            }
-                            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                          >
-                            {permOpen[slotNum]
-                              ? "Hide permissions"
-                              : "Edit permissions"}
-                          </button>
-                        </>
-                      )}
-
-                      <button
-                        onClick={() => saveRole(slotNum)}
-                        disabled={busy || !dirty}
-                        className={classNames(
-                          "ml-auto h-9 rounded-md border px-3 text-sm",
-                          busy
-                            ? "cursor-not-allowed opacity-50"
-                            : dirty
-                            ? "hover:bg-gray-50"
-                            : "opacity-50"
-                        )}
-                      >
-                        {busy ? "Saving…" : dirty ? "Save" : "Saved"}
-                      </button>
-                    </div>
-
-                    {/* Permissions editor (hidden for Admin/slot #1) */}
-                    {!isAdmin && permOpen[slotNum] && (
-                      <div className="mt-3 rounded-md border p-3">
-                        <p className="mb-2 text-xs text-gray-600">
-                          Choose <strong>Allow</strong> to add a permission,{" "}
-                          <strong>Deny</strong> to explicitly remove it.
-                          <strong> Inherit</strong> uses the slot’s template.
-                        </p>
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          {permissionKeys.map((k) => {
-                            const value = draft.permState[k] || "inherit";
-                            const name = `perm-${slotNum}-${k}`;
-                            return (
-                              <div
-                                key={k}
-                                className="flex items-center justify-between gap-3 rounded border p-2"
-                              >
-                                <div className="text-sm">{k}</div>
-                                <div className="flex items-center gap-3">
-                                  {(["inherit", "allow", "deny"] as const).map(
-                                    (opt) => (
-                                      <label
-                                        key={opt}
-                                        className="flex items-center gap-1 text-xs"
-                                      >
-                                        <input
-                                          type="radio"
-                                          name={name}
-                                          value={opt}
-                                          checked={value === opt}
-                                          onChange={() => {
-                                            setRoleDrafts((m) =>
-                                              new Map(m).set(slotNum, {
-                                                ...draft,
-                                                permState: {
-                                                  ...draft.permState,
-                                                  [k]: opt,
-                                                },
-                                              })
-                                            );
-                                            setRoleDirty((d) => ({
-                                              ...d,
-                                              [slotNum]: true,
-                                            }));
-                                          }}
-                                        />
-                                        {opt}
-                                      </label>
-                                    )
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
+                        <button
+                          onClick={() =>
+                            setPermOpen((o) => ({
+                              ...o,
+                              [slotNum]: !o[slotNum],
+                            }))
+                          }
+                          className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                        >
+                          {permOpen[slotNum]
+                            ? "Hide permissions"
+                            : "Edit permissions"}
+                        </button>
+                      </>
                     )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
 
-          <p className="mt-3 text-xs text-gray-500">
-            Role #1 (Admin) is always active and has all permissions. You can
-            rename it, but you can’t disable it or change its permissions.
-            Changes to other roles take effect immediately after save.
-          </p>
-        </div>
+                    <button
+                      onClick={() => saveRole(slotNum)}
+                      disabled={busy || !dirty}
+                      className={classNames(
+                        "ml-auto h-9 rounded-md border px-3 text-sm",
+                        busy
+                          ? "cursor-not-allowed opacity-50"
+                          : dirty
+                          ? "hover:bg-gray-50"
+                          : "opacity-50"
+                      )}
+                    >
+                      {busy ? "Saving…" : dirty ? "Save" : "Saved"}
+                    </button>
+                  </div>
+
+                  {/* Permissions editor (hidden for Admin/slot #1) */}
+                  {!isAdmin && permOpen[slotNum] && (
+                    <div className="mt-3 rounded-md border p-3">
+                      <p className="mb-3 text-sm text-gray-600">
+                        Choose <strong>Allow</strong> to add a permission,{" "}
+                        <strong>Deny</strong> to explicitly remove it.{" "}
+                        <strong>Inherit</strong> uses the slot’s template.
+                      </p>
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                        {permissionKeys.map((k) => {
+                          const value = draft.permState[k] || "inherit";
+                          const name = `perm-${slotNum}-${k}`;
+                          return (
+                            <label
+                              key={k}
+                              className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"
+                            >
+                              <span className="truncate">{k}</span>
+                              <span className="flex items-center gap-2">
+                                {(["inherit", "allow", "deny"] as const).map(
+                                  (opt) => (
+                                    <label
+                                      key={opt}
+                                      className="flex items-center gap-1"
+                                    >
+                                      <input
+                                        type="radio"
+                                        name={name}
+                                        checked={value === opt}
+                                        onChange={() => {
+                                          setRoleDrafts((m) =>
+                                            new Map(m).set(slotNum, {
+                                              ...draft,
+                                              permState: {
+                                                ...draft.permState,
+                                                [k]: opt,
+                                              },
+                                            })
+                                          );
+                                          setRoleDirty((d) => ({
+                                            ...d,
+                                            [slotNum]: true,
+                                          }));
+                                        }}
+                                      />
+                                      {opt}
+                                    </label>
+                                  )
+                                )}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <p className="text-xs text-gray-600">
+              Role #1 (Admin) is always active and has all permissions. You can
+              rename it, but you can’t disable it or change its permissions.
+              Changes to other roles take effect immediately after save.
+            </p>
+          </div>
+        )}
       </details>
-    </main>
+    </div>
   );
 }

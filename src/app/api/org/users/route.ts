@@ -10,6 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type JsonErr = { error: string; code?: string };
+
 function badRequest(msg: string, code?: string) {
   return NextResponse.json({ error: msg, code } as JsonErr, { status: 400 });
 }
@@ -48,7 +49,6 @@ async function hasPermission(
     select: { slot: true },
   });
   if (!membership) return false;
-
   const slot = membership.slot;
 
   // Check org slot state + org override
@@ -79,7 +79,6 @@ async function hasPermission(
       },
     },
   });
-
   return !!template?.permissions?.length;
 }
 
@@ -107,8 +106,8 @@ async function resolveOrgForUser(
     select: { orgId: true },
     take: 2, // we only need to know if more than one
   });
-
   if (memberships.length === 1) return memberships[0].orgId;
+
   return null; // ambiguous -> caller should error
 }
 
@@ -157,7 +156,15 @@ export async function GET(req: NextRequest) {
     prisma.userRole.findMany({
       where: { ...where, ...(userWhere ? { user: userWhere } : {}) },
       include: {
-        user: { select: { id: true, displayName: true, email: true } },
+        user: {
+          // ⬇️ Add hashedPassword ONLY to compute isInvited server-side; never returned.
+          select: {
+            id: true,
+            displayName: true,
+            email: true,
+            hashedPassword: true,
+          },
+        },
         orgRole: { select: { label: true, isActive: true } },
       },
       orderBy: [{ user: { displayName: "asc" } }, { userId: "asc" }],
@@ -166,14 +173,22 @@ export async function GET(req: NextRequest) {
     }),
   ]);
 
-  const items = rows.map((r) => ({
-    id: r.user.id,
-    name: r.user.displayName || r.user.email,
-    email: r.user.email,
-    slot: r.slot,
-    roleLabel: r.orgRole?.label ?? `Role ${r.slot}`,
-    roleActive: r.orgRole?.isActive ?? false,
-  }));
+  const items = rows.map((r) => {
+    const u = r.user;
+    const isInvited =
+      typeof u.hashedPassword === "string" &&
+      u.hashedPassword.startsWith("invited:");
+
+    return {
+      id: u.id,
+      name: u.displayName || u.email,
+      email: u.email,
+      slot: r.slot,
+      roleLabel: r.orgRole?.label ?? `Role ${r.slot}`,
+      roleActive: r.orgRole?.isActive ?? false,
+      isInvited, // ✅ NEW — safe boolean for UI badge
+    };
+  });
 
   return NextResponse.json({ items, page, pageSize, total });
 }
@@ -237,11 +252,21 @@ export async function POST(req: NextRequest) {
   let targetUser = rawUserId
     ? await prisma.user.findUnique({
         where: { id: rawUserId },
-        select: { id: true, email: true, displayName: true },
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          hashedPassword: true,
+        },
       })
     : await prisma.user.findFirst({
         where: { email: { equals: rawEmail, mode: "insensitive" } },
-        select: { id: true, email: true, displayName: true },
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          hashedPassword: true,
+        },
       });
 
   if (!targetUser) {
@@ -255,7 +280,12 @@ export async function POST(req: NextRequest) {
         displayName: displayName || null,
         hashedPassword: placeholderHash, // REQUIRED by schema
       },
-      select: { id: true, email: true, displayName: true },
+      select: {
+        id: true,
+        email: true,
+        displayName: true,
+        hashedPassword: true,
+      },
     });
   }
 
@@ -263,19 +293,29 @@ export async function POST(req: NextRequest) {
   const existing = await prisma.userRole.findUnique({
     where: { userId_orgId: { userId: targetUser.id, orgId } },
     include: {
-      user: { select: { id: true, displayName: true, email: true } },
+      user: {
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+          hashedPassword: true,
+        },
+      },
       orgRole: { select: { label: true, isActive: true } },
     },
   });
-
   if (existing) {
+    const u = existing.user;
     const member = {
-      id: existing.user.id,
-      name: existing.user.displayName || existing.user.email,
-      email: existing.user.email,
+      id: u.id,
+      name: u.displayName || u.email,
+      email: u.email,
       slot: existing.slot,
       roleLabel: existing.orgRole?.label ?? `Role ${existing.slot}`,
       roleActive: existing.orgRole?.isActive ?? false,
+      isInvited:
+        typeof u.hashedPassword === "string" &&
+        u.hashedPassword.startsWith("invited:"), // ✅ NEW
     };
     return NextResponse.json({ member }, { status: 200 });
   }
@@ -284,18 +324,29 @@ export async function POST(req: NextRequest) {
   const created = await prisma.userRole.create({
     data: { orgId, userId: targetUser.id, slot },
     include: {
-      user: { select: { id: true, displayName: true, email: true } },
+      user: {
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+          hashedPassword: true,
+        },
+      },
       orgRole: { select: { label: true, isActive: true } },
     },
   });
 
+  const u = created.user;
   const member = {
-    id: created.user.id,
-    name: created.user.displayName || created.user.email,
-    email: created.user.email,
+    id: u.id,
+    name: u.displayName || u.email,
+    email: u.email,
     slot: created.slot,
     roleLabel: created.orgRole?.label ?? `Role ${created.slot}`,
     roleActive: created.orgRole?.isActive ?? false,
+    isInvited:
+      typeof u.hashedPassword === "string" &&
+      u.hashedPassword.startsWith("invited:"), // ✅ NEW
   };
 
   return NextResponse.json({ member }, { status: 201 });
