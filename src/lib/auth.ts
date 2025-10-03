@@ -1,13 +1,15 @@
 // src/lib/auth.ts
-// NextAuth options wired to our clean User model (no legacy fields).
-// - Uses JWT sessions (no Prisma Adapter tables required).
-// - Credentials provider: looks up user by email in prisma.user
-//   and accepts the dev password "seeded" (from prisma/seed.js) or an exact match to hashedPassword.
-//   This keeps local/dev simple while we wire the rest of the MVP.
+// NextAuth options wired to our clean User model.
+// - Uses JWT sessions.
+// - Credentials provider: finds user by email and verifies password.
+//   * Accepts dev password "seeded" (for local/dev speed).
+//   * Prefers bcrypt hashes.
+//   * Falls back to plaintext match for legacy/MVP accounts so we don't break logins.
 
 import type { NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import prisma from "./prisma";
+import bcrypt from "bcryptjs";
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
@@ -21,7 +23,6 @@ export const authOptions: NextAuthOptions = {
       async authorize(creds) {
         const email = (creds?.email || "").toString().trim().toLowerCase();
         const password = (creds?.password || "").toString();
-
         if (!email || !password) return null;
 
         const user = await prisma.user.findUnique({
@@ -35,11 +36,29 @@ export const authOptions: NextAuthOptions = {
         });
         if (!user) return null;
 
-        // DEV-ONLY auth: accept "seeded" (matches prisma/seed.js) or exact match in DB.
-        const ok =
-          password === "seeded" ||
-          (typeof user.hashedPassword === "string" &&
-            password === user.hashedPassword);
+        // DEV-ONLY bypass: matches prisma/seed.js
+        if (password === "seeded") {
+          return {
+            id: user.id,
+            email: user.email,
+            name: user.displayName || user.email,
+          };
+        }
+
+        const stored = user.hashedPassword || "";
+        let ok = false;
+
+        // If it's a bcrypt hash (starts with $2a/$2b/$2y), use bcrypt.compare
+        if (typeof stored === "string" && /^\$2[aby]\$/.test(stored)) {
+          try {
+            ok = await bcrypt.compare(password, stored);
+          } catch {
+            ok = false;
+          }
+        } else {
+          // Fallback for MVP/legacy rows saved in plaintext
+          ok = typeof stored === "string" && password === stored;
+        }
 
         if (!ok) return null;
 
@@ -53,13 +72,11 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   pages: {
-    // keep your existing sign-in page if you have one, or default NextAuth page
-    // signIn: "/signin",
+    // signIn: "/signin", // keep default unless you have a custom page
   },
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        // on login
         token.sub = (user as any).id;
         token.email = user.email;
         token.name = user.name;
@@ -67,7 +84,6 @@ export const authOptions: NextAuthOptions = {
       return token;
     },
     async session({ session, token }) {
-      // expose user id/email/name to the app
       if (session.user) {
         (session.user as any).id = token.sub;
         session.user.email = token.email as string | undefined;
