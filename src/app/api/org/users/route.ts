@@ -3,9 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
-import { randomBytes } from "crypto";
+import { randomBytes, createHmac } from "crypto";
 
-// Prisma-safe
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -20,7 +19,6 @@ function unauthorized(msg = "Unauthorized") {
 function forbidden(msg = "Forbidden") {
   return NextResponse.json({ error: msg } as JsonErr, { status: 403 });
 }
-
 function parseIntParam(
   value: string | null,
   def: number,
@@ -32,13 +30,11 @@ function parseIntParam(
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-/**
- * Resolve whether user has a given permission in an org:
- * - Must have a membership (UserRole) in org
- * - OrgRole must be active
- * - If org override exists in OrgRolePermission -> use allowed
- * - Else fall back to RoleTemplatePermission presence (presence = allow)
- */
+/** ------------------------------------------------------------------------
+ * Permission & org helpers
+ * ---------------------------------------------------------------------- */
+
+/** Check org-scoped permission (settings:manage umbrella) */
 async function hasPermission(
   orgId: string,
   userId: string,
@@ -51,7 +47,6 @@ async function hasPermission(
   if (!membership) return false;
   const slot = membership.slot;
 
-  // Check org slot state + org override
   const orgRole = await prisma.orgRole.findUnique({
     where: { orgId_slot: { orgId, slot } },
     select: {
@@ -64,11 +59,9 @@ async function hasPermission(
     },
   });
   if (!orgRole || !orgRole.isActive) return false;
-
   const override = orgRole.permissions[0];
   if (override) return !!override.allowed;
 
-  // Fall back to default template (presence = allow)
   const template = await prisma.roleTemplate.findUnique({
     where: { slot },
     select: {
@@ -82,12 +75,7 @@ async function hasPermission(
   return !!template?.permissions?.length;
 }
 
-/**
- * Ensure we have a valid org for the acting user.
- * If requested orgId is missing OR the user isn't a member of it,
- * and the user belongs to exactly one org, auto-select that org.
- * Returns null if still ambiguous.
- */
+/** Resolve org to act on (robust to missing/wrong orgId) */
 async function resolveOrgForUser(
   requestedOrgId: string | null,
   userId: string
@@ -97,57 +85,88 @@ async function resolveOrgForUser(
       where: { userId_orgId: { userId, orgId: requestedOrgId } },
       select: { userId: true },
     });
-    if (member) return requestedOrgId; // valid request
+    if (member) return requestedOrgId;
   }
-
-  // Fallback: detect a single org membership
   const memberships = await prisma.userRole.findMany({
     where: { userId },
     select: { orgId: true },
-    take: 2, // we only need to know if more than one
+    take: 2,
   });
   if (memberships.length === 1) return memberships[0].orgId;
-
-  return null; // ambiguous -> caller should error
+  return null;
 }
 
-/** ---------- GET (list org members) ---------- */
+/** ------------------------------------------------------------------------
+ * Tiny JWT (HS256) for invite links — no external deps
+ * Matches /auth/invite/accept which expects a 3-part JWT-like token.
+ * ---------------------------------------------------------------------- */
+function b64url(buf: Buffer | string) {
+  const b = Buffer.isBuffer(buf)
+    ? buf.toString("base64")
+    : Buffer.from(buf).toString("base64");
+  return b.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function signHS256(header: any, payload: any, secret: string): string {
+  const h = b64url(JSON.stringify(header));
+  const p = b64url(JSON.stringify(payload));
+  const data = `${h}.${p}`;
+  const sig = createHmac("sha256", secret).update(data).digest();
+  return `${data}.${b64url(sig)}`;
+}
+type InvitePayload = {
+  typ: "invite";
+  orgId: string;
+  userId: string;
+  email: string;
+  iat: number;
+  exp: number;
+};
+function makeInviteToken(origin: string, payload: InvitePayload) {
+  const secret = process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET;
+  if (!secret) {
+    // In dev, fail loudly so we notice
+    throw new Error(
+      "Missing NEXTAUTH_SECRET/AUTH_SECRET: required to sign invite tokens for /auth/invite/accept"
+    );
+  }
+  return signHS256({ alg: "HS256", typ: "JWT" }, payload, secret);
+}
+
+/** ------------------------------------------------------------------------
+ * GET: list members
+ * ---------------------------------------------------------------------- */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
-  // AuthN
   const session = await getServerSession(authOptions);
   const userId = (session?.user as any)?.id as string | undefined;
   if (!userId) return unauthorized();
 
-  // Resolve org (robust to wrong/missing orgId)
   const orgId = await resolveOrgForUser(requestedOrgId, userId);
   if (!orgId) return badRequest("Missing or invalid orgId");
 
-  // AuthZ (org-scoped settings read/manage)
   const ok = await hasPermission(orgId, userId, "settings:manage");
   if (!ok) return forbidden();
 
-  // Filters & pagination
   const q = (searchParams.get("q") || "").trim();
   const slotParam = searchParams.get("slot");
   const slot = slotParam ? Number(slotParam) : undefined;
-
   const page = parseIntParam(searchParams.get("page"), 1, 1, 10_000);
   const pageSize = parseIntParam(searchParams.get("pageSize"), 20, 1, 100);
 
   const where: any = { orgId };
   if (Number.isFinite(slot)) where.slot = slot;
 
-  const userWhere = q
-    ? {
-        OR: [
-          { displayName: { contains: q, mode: "insensitive" as const } },
-          { email: { contains: q, mode: "insensitive" as const } },
-        ],
-      }
-    : undefined;
+  const userWhere =
+    q && q.length
+      ? {
+          OR: [
+            { displayName: { contains: q, mode: "insensitive" as const } },
+            { email: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : undefined;
 
   const [total, rows] = await Promise.all([
     prisma.userRole.count({
@@ -157,7 +176,6 @@ export async function GET(req: NextRequest) {
       where: { ...where, ...(userWhere ? { user: userWhere } : {}) },
       include: {
         user: {
-          // ⬇️ Add hashedPassword ONLY to compute isInvited server-side; never returned.
           select: {
             id: true,
             displayName: true,
@@ -178,7 +196,6 @@ export async function GET(req: NextRequest) {
     const isInvited =
       typeof u.hashedPassword === "string" &&
       u.hashedPassword.startsWith("invited:");
-
     return {
       id: u.id,
       name: u.displayName || u.email,
@@ -186,39 +203,30 @@ export async function GET(req: NextRequest) {
       slot: r.slot,
       roleLabel: r.orgRole?.label ?? `Role ${r.slot}`,
       roleActive: r.orgRole?.isActive ?? false,
-      isInvited, // ✅ NEW — safe boolean for UI badge
+      isInvited,
     };
   });
 
   return NextResponse.json({ items, page, pageSize, total });
 }
 
-/** ---------- POST (org-owned staff creation) ----------
- * Create-or-add staff:
- * - If email/userId points to an existing user, add them to the org (idempotent).
- * - If email doesn't exist, CREATE a minimal staff account (org-owned) then add it.
- * - AuthZ: same as GET — requires `settings:manage` in this org.
- * - Idempotent: if already a member, returns 200 with the same shape.
- * - Slot: accept `slot` (1..10) OR `orgRoleKey` like "role3". Default = 6.
- */
+/** ------------------------------------------------------------------------
+ * POST: create/add user; returns member + inviteUrl (if invited)
+ * ---------------------------------------------------------------------- */
 export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
-  // AuthN
   const session = await getServerSession(authOptions);
   const actingUserId = (session?.user as any)?.id as string | undefined;
   if (!actingUserId) return unauthorized();
 
-  // Resolve org (robust to wrong/missing orgId)
   const orgId = await resolveOrgForUser(requestedOrgId, actingUserId);
   if (!orgId) return badRequest("Missing or invalid orgId");
 
-  // AuthZ (reuse same guard as GET)
   const ok = await hasPermission(orgId, actingUserId, "settings:manage");
   if (!ok) return forbidden();
 
-  // Body
   let body: any;
   try {
     body = await req.json();
@@ -243,12 +251,12 @@ export async function POST(req: NextRequest) {
     const m = /^role(10|[1-9])$/i.exec(body.orgRoleKey);
     if (m) slot = Number(m[1]);
   }
-  if (!slot) slot = 6; // sensible non-privileged default
+  if (!slot) slot = 6; // safe default
   if (!Number.isFinite(slot) || slot < 1 || slot > 10) {
     return badRequest("Invalid 'slot' (must be 1..10)");
   }
 
-  // Find or create target user
+  // Find or create the user
   let targetUser = rawUserId
     ? await prisma.user.findUnique({
         where: { id: rawUserId },
@@ -270,15 +278,12 @@ export async function POST(req: NextRequest) {
       });
 
   if (!targetUser) {
-    // Org-owned creation of a minimal staff account
-    // NOTE: schema requires `hashedPassword` -> provide a safe placeholder.
-    // This is NOT a usable password; invited users will set credentials later.
     const placeholderHash = `invited:${randomBytes(48).toString("hex")}`;
     targetUser = await prisma.user.create({
       data: {
         email: rawEmail,
         displayName: displayName || null,
-        hashedPassword: placeholderHash, // REQUIRED by schema
+        hashedPassword: placeholderHash, // not a real password
       },
       select: {
         id: true,
@@ -289,7 +294,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Idempotent: already a member?
+  // If already a member, return immediately (idempotent)
   const existing = await prisma.userRole.findUnique({
     where: { userId_orgId: { userId: targetUser.id, orgId } },
     include: {
@@ -304,6 +309,31 @@ export async function POST(req: NextRequest) {
       orgRole: { select: { label: true, isActive: true } },
     },
   });
+
+  const origin = req.nextUrl.origin;
+  const inviteUrlFor = (u: {
+    id: string;
+    email: string;
+    hashedPassword: string | null;
+  }) => {
+    const isInvited =
+      typeof u.hashedPassword === "string" &&
+      u.hashedPassword.startsWith("invited:");
+    if (!isInvited) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 60 * 60 * 24 * 7; // 7 days
+    const token = makeInviteToken(origin, {
+      typ: "invite",
+      orgId,
+      userId: u.id,
+      email: u.email,
+      iat: now,
+      exp,
+    });
+    return `${origin}/auth/invite/accept?token=${encodeURIComponent(token)}`;
+  };
+
   if (existing) {
     const u = existing.user;
     const member = {
@@ -315,9 +345,10 @@ export async function POST(req: NextRequest) {
       roleActive: existing.orgRole?.isActive ?? false,
       isInvited:
         typeof u.hashedPassword === "string" &&
-        u.hashedPassword.startsWith("invited:"), // ✅ NEW
+        u.hashedPassword.startsWith("invited:"),
     };
-    return NextResponse.json({ member }, { status: 200 });
+    const inviteUrl = inviteUrlFor(u);
+    return NextResponse.json({ member, inviteUrl }, { status: 200 });
   }
 
   // Create membership
@@ -346,8 +377,9 @@ export async function POST(req: NextRequest) {
     roleActive: created.orgRole?.isActive ?? false,
     isInvited:
       typeof u.hashedPassword === "string" &&
-      u.hashedPassword.startsWith("invited:"), // ✅ NEW
+      u.hashedPassword.startsWith("invited:"),
   };
+  const inviteUrl = inviteUrlFor(u);
 
-  return NextResponse.json({ member }, { status: 201 });
+  return NextResponse.json({ member, inviteUrl }, { status: 201 });
 }

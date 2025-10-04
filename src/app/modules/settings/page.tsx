@@ -308,69 +308,6 @@ function SettingsInner() {
           </section>
         ) : null}
 
-        {/* ========== Org Feature Toggles (autosave) ========== */}
-        <section className="mb-6 rounded-lg border bg-white p-4 shadow-sm">
-          <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
-          <p className="mb-3 text-sm text-neutral-600">
-            Control which optional fields appear on the booking form.
-          </p>
-
-          {loading ? (
-            <div className="rounded-md border p-4 text-sm">Loading…</div>
-          ) : (
-            <>
-              {loadError && (
-                <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-                  {loadError}
-                </div>
-              )}
-
-              <ToggleRow
-                label="Show program name"
-                description="Display the program name on booking forms."
-                checked={toggles.showProgramName}
-                onChange={(v) => saveToggle("showProgramName", v)}
-              />
-              <ToggleRow
-                label="Show host name"
-                description="Display the host name on booking forms."
-                checked={toggles.showHostName}
-                onChange={(v) => saveToggle("showHostName", v)}
-              />
-              <ToggleRow
-                label="Show talking points"
-                description="Display an area for talking points."
-                checked={toggles.showTalkingPoints}
-                onChange={(v) => saveToggle("showTalkingPoints", v)}
-              />
-
-              <p className="mt-2 text-xs text-neutral-500">
-                Tip: Changes apply immediately. The Booking form reads flags
-                from <code>document.body.dataset</code> on mount.
-              </p>
-            </>
-          )}
-        </section>
-
-        {/* ========== Appearance Types (autosave) ========== */}
-        <section className="mb-6 rounded-lg border bg-white p-4 shadow-sm">
-          <h2 className="mb-2 text-lg font-medium">Appearance Types</h2>
-          <p className="mb-3 text-sm text-neutral-600">
-            Choose which appearance types are available to your team.
-          </p>
-
-          <ToggleRow
-            label="Allow in-person"
-            checked={toggles.allowInPerson}
-            onChange={(v) => saveToggle("allowInPerson", v)}
-          />
-          <ToggleRow
-            label="Allow online"
-            checked={toggles.allowOnline}
-            onChange={(v) => saveToggle("allowOnline", v)}
-          />
-        </section>
-
         {/* ========== Theme (local) ========== */}
         <section className="rounded-lg border bg-white p-4 shadow-sm">
           <h2 className="mb-2 text-lg font-medium">Appearance</h2>
