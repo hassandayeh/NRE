@@ -2,21 +2,18 @@
 
 /**
  * Settings (autosave)
- * - Renamed button: "Users & Roles" → /modules/settings/users (org auto-detected there)
- * - No dependency on ThemeProvider (props mismatch). Uses a safe local theme toggle.
- * - Toggles still autosave to /api/toggles and apply to <body data-*>.
+ * - FIX: derive ?orgId=... synchronously from the current URL using useSearchParams()
+ *   and append it to BOTH:
+ *     • Users & Roles
+ *     • Modes & access
+ * - No effects/refs/profile calls are used to build these hrefs.
+ * - Everything else is unchanged.
  */
 
 import * as React from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-
-// Minimal Alert (keep original style/compat if present)
-import * as AlertModule from "../../../components/ui/Alert";
-const Alert: React.ElementType =
-  (AlertModule as any).Alert ??
-  (AlertModule as any).default ??
-  ((props: any) => <div {...props} />);
+import { useSearchParams } from "next/navigation";
 
 /* ---------- Types ---------- */
 type Toggles = {
@@ -31,12 +28,14 @@ type PartialTogglesFromApi = Partial<Toggles> & { [k: string]: unknown };
 /* ---------- Toast ---------- */
 function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   return (
-    <div className="fixed right-4 top-4 z-50 rounded-md bg-green-600 px-3 py-2 text-sm text-white shadow">
+    <div className="fixed right-4 top-4 z-50 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 shadow-sm">
       {props.children}
       {props.onClose && (
         <button
+          type="button"
           onClick={props.onClose}
-          className="ml-3 rounded bg-white/20 px-2 py-0.5 text-xs"
+          className="ml-3 inline-flex rounded-md px-1 text-emerald-900/70 hover:text-emerald-900"
+          aria-label="Dismiss"
         >
           ✕
         </button>
@@ -58,9 +57,13 @@ function toBool(v: unknown, fallback: boolean): boolean {
 
 /* =========================================================
  * Page
- * ========================================================= */
+ * =======================================================*/
 export default function SettingsPage() {
-  return <SettingsInner />;
+  return (
+    <main className="mx-auto max-w-5xl px-4 py-10">
+      <SettingsInner />
+    </main>
+  );
 }
 
 /* ----------
@@ -87,6 +90,14 @@ function SettingsInner() {
   // Owner check → only controls "Organization profile" link visibility
   const [canEditOrg, setCanEditOrg] = React.useState(false);
 
+  // ========== Synchronous orgId passthrough for links ==========
+  const searchParams = useSearchParams();
+  const orgQ = React.useMemo(() => {
+    const id = searchParams.get("orgId");
+    return id ? `?orgId=${encodeURIComponent(id)}` : "";
+  }, [searchParams]);
+  // ============================================================
+
   // Load toggles (accepts flat or { toggles } shapes)
   React.useEffect(() => {
     let ignore = false;
@@ -100,7 +111,6 @@ function SettingsInner() {
           (raw && typeof raw === "object" && "toggles" in raw
             ? (raw as any).toggles
             : raw) ?? {};
-
         const next: Toggles = {
           showProgramName: toBool(data.showProgramName, true),
           showHostName: toBool(data.showHostName, true),
@@ -108,7 +118,6 @@ function SettingsInner() {
           allowInPerson: toBool((data as any).allowInPerson, true),
           allowOnline: toBool((data as any).allowOnline, true),
         };
-
         if (!ignore) {
           setToggles(next);
           setLoadError(null);
@@ -206,115 +215,119 @@ function SettingsInner() {
     }
   }
 
-  // Auto-hide toast
-  React.useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 1500);
-    return () => clearTimeout(t);
-  }, [toast]);
-
   const [portalReady, setPortalReady] = React.useState(false);
   React.useEffect(() => setPortalReady(true), []);
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
+    <>
       {/* Title + Back */}
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <Link
-          href="/modules/booking"
-          className="text-sm text-blue-600 underline"
-        >
-          ← Back to bookings
-        </Link>
-      </div>
+      <header className="mb-6">
+        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+        <div className="mt-2">
+          <Link
+            href="/modules/bookings"
+            className="text-sm text-neutral-600 underline underline-offset-4 hover:text-neutral-800"
+          >
+            ← Back to bookings
+          </Link>
+        </div>
+      </header>
 
       {/* ========== Organization (ALWAYS visible) ========== */}
-      <section className="mb-8 rounded-xl border bg-white p-4">
-        <h2 className="mb-1 text-lg font-medium">Organization</h2>
-        <p className="mb-3 text-sm text-gray-600">
+      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-neutral-900">Organization</h2>
+        <p className="mt-1 text-sm text-neutral-600">
           Manage org users and profile.
         </p>
 
-        {/* Users button goes to the unified Users & Roles page */}
-        <Link
-          href="/modules/settings/users"
-          className="mr-3 inline-flex h-9 items-center rounded-lg border bg-white px-3 text-sm shadow-sm hover:bg-gray-50"
-        >
-          Users &amp; Roles
-        </Link>
-
-        {/* Org profile link is owner-only */}
-        {canEditOrg && (
+        <div className="mt-4 flex flex-wrap gap-3">
+          {/* Users & Roles — appends ?orgId=... if present on current URL */}
           <Link
-            href="/modules/settings/org"
-            className="inline-flex h-9 items-center rounded-lg border bg-white px-3 text-sm shadow-sm hover:bg-gray-50"
+            href={`/modules/settings/users${orgQ}`}
+            className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
           >
-            Open organization profile →
+            Users &amp; Roles
           </Link>
-        )}
+
+          {/* Modes & access — mirrors the exact same ?orgId=... derivation */}
+          <Link
+            href={`/modules/settings/modes-access${orgQ}`}
+            className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+          >
+            Modes & access
+          </Link>
+          {/* Org profile link is owner-only */}
+          {canEditOrg && (
+            <Link
+              href="/modules/settings/org-profile"
+              className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+            >
+              Open organization profile →
+            </Link>
+          )}
+        </div>
       </section>
 
       {/* ========== Org Feature Toggles (autosave) ========== */}
-      <section className="mb-8 rounded-xl border bg-white p-4">
-        <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
-        <p className="mb-3 text-sm text-gray-600">
+      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-neutral-900">
+          Org Feature Toggles
+        </h2>
+        <p className="mt-1 text-sm text-neutral-600">
           Control which optional fields appear on the booking form.
         </p>
 
         {loading ? (
-          <div className="text-sm text-gray-600">Loading…</div>
+          <p className="mt-3 text-sm text-neutral-600">Loading…</p>
         ) : (
           <>
             {loadError && (
-              <Alert className="mb-3">
-                <span className="text-sm text-red-700">{loadError}</span>
-              </Alert>
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                {loadError}
+              </div>
             )}
 
-            <div className="space-y-3">
+            <div className="mt-2 space-y-3">
               <ToggleRow
                 label="Show program name"
-                description="Display program name in booking details."
+                description="Display the program name on booking forms."
                 checked={toggles.showProgramName}
                 onChange={(v) => saveToggle("showProgramName", v)}
               />
 
               <ToggleRow
                 label="Show host name"
-                description="Display host name in booking details."
+                description="Display the host name on booking forms."
                 checked={toggles.showHostName}
                 onChange={(v) => saveToggle("showHostName", v)}
               />
 
               <ToggleRow
                 label="Show talking points"
-                description="Display talking points section."
+                description="Display an area for talking points."
                 checked={toggles.showTalkingPoints}
                 onChange={(v) => saveToggle("showTalkingPoints", v)}
               />
-
-              <p className="mt-4 text-xs text-gray-500">
-                Tip: Changes apply immediately. The Booking form reads flags
-                from{" "}
-                <code className="rounded bg-gray-100 px-1">
-                  {"<body data-* >"}
-                </code>{" "}
-                on mount.
-              </p>
             </div>
+
+            <p className="mt-3 text-xs text-neutral-500">
+              Tip: Changes apply immediately. The Booking form reads flags from{" "}
+              <code>document.body.dataset</code> on mount.
+            </p>
           </>
         )}
       </section>
 
       {/* ========== Appearance Types (autosave) ========== */}
-      <section className="mb-8 rounded-xl border bg-white p-4">
-        <h2 className="mb-1 text-lg font-medium">Appearance Types</h2>
-        <p className="mb-3 text-sm text-gray-600">
+      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-neutral-900">
+          Appearance Types
+        </h2>
+        <p className="mt-1 text-sm text-neutral-600">
           Choose which appearance types are available to your team.
         </p>
 
-        <div className="space-y-3">
+        <div className="mt-3 space-y-3">
           <ToggleRow
             label="Allow in-person"
             checked={toggles.allowInPerson}
@@ -329,20 +342,22 @@ function SettingsInner() {
       </section>
 
       {/* ========== Theme (local) ========== */}
-      <section className="mb-8 rounded-xl border bg-white p-4">
-        <h2 className="mb-1 text-lg font-medium">Appearance</h2>
-        <p className="mb-3 text-sm text-gray-600">
+      <section className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-neutral-900">Appearance</h2>
+        <p className="mt-1 text-sm text-neutral-600">
           Choose your theme for this device.
         </p>
 
-        <div className="flex gap-3">
+        <div className="mt-3 flex gap-2">
           <button
+            type="button"
             onClick={() => chooseTheme("light")}
             className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
           >
             Light (default)
           </button>
           <button
+            type="button"
             onClick={() => chooseTheme("dark")}
             className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
           >
@@ -350,7 +365,7 @@ function SettingsInner() {
           </button>
         </div>
 
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs text-neutral-500">
           Stored locally. We can wire this to your global provider later.
         </p>
       </section>
@@ -362,7 +377,7 @@ function SettingsInner() {
             document.body
           )
         : null}
-    </main>
+    </>
   );
 }
 
@@ -378,20 +393,18 @@ function ToggleRow(props: {
   React.useEffect(() => setLocal(props.checked), [props.checked]);
 
   return (
-    <div className="flex items-start justify-between rounded-lg border p-3">
-      <div className="pr-3">
-        <label htmlFor={id} className="block text-sm font-medium text-gray-900">
+    <div className="flex items-start justify-between gap-6 rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+      <div>
+        <label htmlFor={id} className="text-sm font-medium text-neutral-900">
           {props.label}
         </label>
         {props.description && (
-          <p className="mt-0.5 text-xs text-gray-600">{props.description}</p>
+          <p className="mt-1 text-xs text-neutral-600">{props.description}</p>
         )}
       </div>
-
       <button
         id={id}
-        role="switch"
-        aria-checked={local ? "true" : "false"}
+        type="button"
         onClick={() => {
           const next = !local;
           setLocal(next);
@@ -400,9 +413,10 @@ function ToggleRow(props: {
         className={`h-6 w-11 rounded-full border transition ${
           local ? "bg-emerald-500" : "bg-gray-200"
         }`}
+        aria-pressed={local}
       >
         <span
-          className={`block h-5 w-5 translate-x-0.5 rounded-full bg-white shadow transition ${
+          className={`block h-5 w-5 translate-x-0 rounded-full bg-white transition ${
             local ? "translate-x-5" : ""
           }`}
         />

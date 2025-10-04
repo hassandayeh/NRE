@@ -1,37 +1,44 @@
 // app/modules/settings/modes-access/page.tsx
+
+import type { Metadata } from "next";
 import Link from "next/link";
 import { revalidatePath } from "next/cache";
-import { headers } from "next/headers";
+import { headers, cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { prisma } from "../../../../lib/prisma";
 
+/** ===================== Types ===================== */
 type ModeDto = {
   slot: number;
   active: boolean;
-  label?: string;
-  accessFieldLabel?: string;
+  label?: string | null;
+  accessFieldLabel?: string | null; // read-only join
   presets?: string[];
 };
 
-type AccessFieldDto = {
-  key: string;
+type ModesApiResponse = {
+  modes: ModeDto[];
+  access: { key: string; label: string; presets?: string[] }[];
+};
+
+type ModeAccessRow = {
+  id: string;
+  modeSlot: number;
+  modeLabel: string | null;
   label: string;
-  presets?: string[];
+  details: string;
 };
 
-type ModesApiResponse = { modes: ModeDto[]; access: AccessFieldDto[] };
-
-// ========== Helpers ==========
+/** ===================== Helpers ===================== */
 function toSlug(input: string): string {
-  // Normalize to kebab-case slug: letters/numbers/dash only
   return input
     .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
 }
 
-// Build absolute URL and fetch with orgId (no-store)
 async function loadModesAndAccess(orgId: string): Promise<ModesApiResponse> {
   if (!orgId) return { modes: [], access: [] };
 
@@ -39,158 +46,323 @@ async function loadModesAndAccess(orgId: string): Promise<ModesApiResponse> {
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
   const proto = h.get("x-forwarded-proto") ?? "http";
   const base = `${proto}://${host}`;
-  const url = new URL(
-    `/api/org/modes?orgId=${encodeURIComponent(orgId)}`,
-    base
-  ).toString();
+  const url = `${base}/api/org/modes?orgId=${encodeURIComponent(orgId)}`;
 
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) return { modes: [], access: [] };
+
   const data = (await res.json()) as ModesApiResponse;
   if (!data || !Array.isArray(data.modes) || !Array.isArray(data.access))
     return { modes: [], access: [] };
   return data;
 }
 
-// ========== Server actions ==========
+async function loadModeAccesses(orgId: string): Promise<ModeAccessRow[]> {
+  const rows = (await prisma.$queryRawUnsafe<
+    {
+      id: string;
+      modeSlot: number;
+      modeLabel: string | null;
+      label: string;
+      details: string;
+    }[]
+  >(
+    `
+    SELECT p."id" AS id,
+           m."slot" AS "modeSlot",
+           m."label" AS "modeLabel",
+           f."label" AS "label",
+           p."value" AS "details"
+    FROM "OrganizationAccessPreset" p
+    JOIN "OrganizationAccessField" f ON p."accessFieldId" = f."id"
+    JOIN "OrganizationMode" m ON p."modeId" = m."id"
+    WHERE m."orgId" = $1
+    ORDER BY m."slot", f."label", p."value"
+  `,
+    orgId
+  )) as ModeAccessRow[];
 
-// Create Access Field (+ optional presets)
-async function createAccessField(formData: FormData) {
+  return rows ?? [];
+}
+
+/** Resolve orgId (server-only). Try cookie first, then /api/org/profile. */
+async function resolveOrgIdServer(): Promise<string | null> {
+  // 1) common cookies used across org-aware pages
+  try {
+    const c = cookies();
+    const fromCookie =
+      c.get("orgId")?.value ??
+      c.get("org_id")?.value ??
+      c.get("org")?.value ??
+      c.get("oid")?.value ??
+      "";
+    if (fromCookie) return fromCookie;
+  } catch {
+    // no-op
+  }
+
+  // 2) fallback to profile endpoint with forwarded cookies
+  try {
+    const h = headers();
+    const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+    const proto = h.get("x-forwarded-proto") ?? "http";
+    const base = `${proto}://${host}`;
+
+    const res = await fetch(`${base}/api/org/profile`, {
+      cache: "no-store",
+      headers: { cookie: h.get("cookie") ?? "" },
+    });
+    if (!res.ok) return null;
+
+    const data = await res.json().catch(() => ({} as any));
+    const resolved =
+      (typeof data?.orgId === "string" && data.orgId) ||
+      (typeof data?.organizationId === "string" && data.organizationId) ||
+      (typeof data?.id === "string" && data.id) ||
+      (typeof data?.org?.id === "string" && data.org.id) ||
+      null;
+
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
+/** ===================== Server actions — Modes (active + label only) ===================== */
+async function saveMode(formData: FormData) {
   "use server";
   const orgId = String(formData.get("orgId") ?? "").trim();
-  const label = String(formData.get("label") ?? "").trim();
-  const keyRaw = String(formData.get("key") ?? "").trim();
-  const presetsCsv = String(formData.get("presets") ?? "").trim();
+  const slot = Number(formData.get("slot") ?? 0);
+  const active = formData.get("active") != null;
+  const labelRaw = String(formData.get("label") ?? "").trim();
+
+  if (!orgId || !slot || slot < 1 || slot > 10) {
+    revalidatePath("/modules/settings/modes-access");
+    return;
+  }
+
+  const label = labelRaw ? labelRaw.slice(0, 80) : null;
+
+  const updated = (await prisma.$executeRawUnsafe(
+    `
+      UPDATE "OrganizationMode"
+      SET "active" = $3, "label" = $4
+      WHERE "orgId" = $1 AND "slot" = $2
+    `,
+    orgId,
+    slot,
+    active,
+    label
+  )) as number;
+
+  if (!updated) {
+    await prisma.$executeRawUnsafe(
+      `
+        INSERT INTO "OrganizationMode" ("id","orgId","slot","active","label")
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      `om_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+      orgId,
+      slot,
+      active,
+      label
+    );
+  }
+
+  revalidatePath("/modules/settings/modes-access");
+}
+
+async function resetMode(formData: FormData) {
+  "use server";
+  const orgId = String(formData.get("orgId") ?? "").trim();
+  const slot = Number(formData.get("slot") ?? 0);
+
+  if (!orgId || !slot || slot < 1 || slot > 10) {
+    revalidatePath("/modules/settings/modes-access");
+    return;
+  }
+
+  const updated = (await prisma.$executeRawUnsafe(
+    `
+      UPDATE "OrganizationMode"
+      SET "active" = false, "label" = NULL
+      WHERE "orgId" = $1 AND "slot" = $2
+    `,
+    orgId,
+    slot
+  )) as number;
+
+  if (!updated) {
+    await prisma.$executeRawUnsafe(
+      `
+        INSERT INTO "OrganizationMode" ("id","orgId","slot","active","label")
+        VALUES ($1, $2, $3, false, NULL)
+      `,
+      `om_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+      orgId,
+      slot
+    );
+  }
+
+  revalidatePath("/modules/settings/modes-access");
+}
+
+/** ===================== Server actions — Access (Mode, Label, Details) ===================== */
+async function createModeAccess(formData: FormData) {
+  "use server";
+  const orgId = String(formData.get("orgId") ?? "").trim();
+  const modeSlot = Number(formData.get("modeSlot") ?? 0);
+  const labelRaw = String(formData.get("label") ?? "").trim();
+  const detailsRaw = String(formData.get("details") ?? "").trim();
 
   if (!orgId) throw new Error("Missing orgId.");
-  if (!label) throw new Error("Label is required.");
-  if (!keyRaw) throw new Error("Key is required.");
+  if (!modeSlot || modeSlot < 1 || modeSlot > 10)
+    throw new Error("Mode is required.");
+  if (!labelRaw) throw new Error("Label is required.");
+  if (!detailsRaw) throw new Error("Details are required.");
 
-  const key = toSlug(keyRaw).slice(0, 40); // enforce slug + length cap
-  if (!key) throw new Error("Key must contain letters/numbers.");
+  const modeRow = (await prisma.$queryRawUnsafe<
+    { id: string; active: boolean }[]
+  >(
+    `SELECT "id","active" FROM "OrganizationMode" WHERE "orgId" = $1 AND "slot" = $2 LIMIT 1`,
+    orgId,
+    modeSlot
+  )) as { id: string; active: boolean }[];
+  const modeId = modeRow?.[0]?.id;
+  if (!modeId) throw new Error("Mode not found. Save the Mode first.");
+
+  const baseKey = toSlug(labelRaw) || `access-${Date.now().toString(36)}`;
+  const key = baseKey.slice(0, 40);
+  const label = labelRaw.slice(0, 80);
+  const details = detailsRaw.slice(0, 240);
 
   await prisma.$executeRawUnsafe(
     `
-    INSERT INTO "OrganizationAccessField" ("id","orgId","key","label")
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT ("orgId","key")
-    DO UPDATE SET "label" = EXCLUDED."label"
-  `,
+      INSERT INTO "OrganizationAccessField" ("id","orgId","key","label")
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT ("orgId","key") DO UPDATE SET "label" = EXCLUDED."label"
+    `,
     `accf_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
     orgId,
     key,
-    label.slice(0, 80)
+    label
   );
 
-  // Fetch field id
   const fieldRow = (await prisma.$queryRawUnsafe<{ id: string }[]>(
     `SELECT "id" FROM "OrganizationAccessField" WHERE "orgId" = $1 AND "key" = $2 LIMIT 1`,
     orgId,
     key
   )) as { id: string }[];
-  const fieldId = fieldRow?.[0]?.id;
+  const accessFieldId = fieldRow?.[0]?.id;
+  if (!accessFieldId) throw new Error("Failed to create access field.");
 
-  // Insert presets (unique per field)
-  if (fieldId && presetsCsv) {
-    const values = presetsCsv
-      .split(",")
-      .map((s) => toSlug(s).replace(/-/g, " ").trim()) // store human-friendly but normalized
-      .filter(Boolean);
-    for (const v of values) {
-      await prisma.$executeRawUnsafe(
-        `
-        INSERT INTO "OrganizationAccessPreset" ("id","accessFieldId","value")
-        SELECT $1, $2, $3
-        WHERE NOT EXISTS (
-          SELECT 1 FROM "OrganizationAccessPreset"
-          WHERE "accessFieldId" = $2 AND "value" = $3
-        )
-      `,
-        `apre_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
-        fieldId,
-        v.slice(0, 120)
-      );
-    }
-  }
+  await prisma.$executeRawUnsafe(
+    `
+      INSERT INTO "OrganizationAccessPreset" ("id","accessFieldId","value","modeId")
+      SELECT $1, $2, $3, $4
+      WHERE NOT EXISTS (
+        SELECT 1 FROM "OrganizationAccessPreset"
+        WHERE "accessFieldId" = $2 AND "value" = $3 AND "modeId" = $4
+      )
+    `,
+    `apre_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+    accessFieldId,
+    details,
+    modeId
+  );
 
   revalidatePath("/modules/settings/modes-access");
 }
 
-// Delete Access Field (and its presets)
-async function deleteAccessField(formData: FormData) {
+async function deleteModeAccess(formData: FormData) {
   "use server";
-  const orgId = String(formData.get("orgId") ?? "").trim();
-  const key = String(formData.get("key") ?? "").trim(); // use exact stored key (no slug), so legacy rows can be removed
-
-  if (!orgId || !key) return;
-
-  // get field id
-  const row = (await prisma.$queryRawUnsafe<{ id: string }[]>(
-    `SELECT "id" FROM "OrganizationAccessField" WHERE "orgId" = $1 AND "key" = $2 LIMIT 1`,
-    orgId,
-    key
-  )) as { id: string }[];
-  const fieldId = row?.[0]?.id;
-  if (!fieldId) {
+  const id = String(formData.get("id") ?? "").trim();
+  if (!id) {
     revalidatePath("/modules/settings/modes-access");
     return;
   }
 
-  // delete presets first (no FK cascade in DB)
   await prisma.$executeRawUnsafe(
-    `DELETE FROM "OrganizationAccessPreset" WHERE "accessFieldId" = $1`,
-    fieldId
+    `DELETE FROM "OrganizationAccessPreset" WHERE "id" = $1`,
+    id
   );
-  // delete the field
-  await prisma.$executeRawUnsafe(
-    `DELETE FROM "OrganizationAccessField" WHERE "id" = $1`,
-    fieldId
-  );
+
+  await prisma.$executeRawUnsafe(`
+    DELETE FROM "OrganizationAccessField"
+    WHERE "id" IN (
+      SELECT f."id"
+      FROM "OrganizationAccessField" f
+      LEFT JOIN "OrganizationAccessPreset" p ON p."accessFieldId" = f."id"
+      WHERE p."id" IS NULL
+    )
+  `);
 
   revalidatePath("/modules/settings/modes-access");
 }
 
-// ========== Page ==========
+/** ===================== Page ===================== */
+export const metadata: Metadata = {
+  title: "Modes & access — Settings",
+};
 
 export default async function ModesAndAccessPage({
   searchParams,
 }: {
   searchParams: Record<string, string | string[] | undefined>;
 }) {
-  const orgId =
+  // 1) Read from query
+  const orgIdFromQuery =
     (Array.isArray(searchParams.orgId)
       ? searchParams.orgId[0]
       : searchParams.orgId) || "";
 
+  // 2) If missing, resolve server-side and redirect with ?orgId=...
+  if (!orgIdFromQuery) {
+    const resolved = await resolveOrgIdServer();
+    if (resolved) {
+      redirect(
+        `/modules/settings/modes-access?orgId=${encodeURIComponent(resolved)}`
+      );
+    }
+  }
+
+  const orgId = orgIdFromQuery;
+
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Modes &amp; Access
-        </h1>
-        <p className="mt-1 text-sm text-neutral-500">
-          Configure appearance modes and access fields for your organization.
-          This is the scalable “slot + label + presets” model (Mode 1…10; Access
-          fields with presets).
-        </p>
-
-        <div className="mt-4 flex items-center gap-3">
-          <Link
-            href="/modules/settings"
-            className="inline-flex items-center rounded-xl border px-3 py-2 text-sm hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-          >
-            ← Back to Settings
-          </Link>
-          <span className="text-xs text-neutral-500">
-            Org: <strong>{orgId || "—"}</strong>
-          </span>
+      <header className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Modes & access
+          </h1>
+          <p className="mt-1 text-sm text-neutral-600">
+            Create Modes (1..10), then add Access entries linked to a Mode with
+            just a Label and Details.
+          </p>
+          <p className="mt-2 text-xs text-neutral-500">
+            <span className="font-medium">Org:</span> {orgId || "—"}
+          </p>
         </div>
+        <Link
+          href={`/modules/settings${
+            orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""
+          }`}
+          className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+        >
+          Settings
+        </Link>
       </header>
 
       {!orgId ? (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-neutral-600">
-          No organization provided. Append <code>?orgId=YOUR_ORG_ID</code> to
-          the URL to manage Modes &amp; Access.
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+          <p className="font-medium">No organization provided.</p>
+          <p className="mt-1">
+            Append{" "}
+            <code className="rounded bg-amber-100 px-1 py-0.5">
+              ?orgId=YOUR_ORG_ID
+            </code>{" "}
+            to manage Modes &amp; Access.
+          </p>
         </div>
       ) : (
         <Content orgId={orgId} />
@@ -199,259 +371,299 @@ export default async function ModesAndAccessPage({
   );
 }
 
+/** ===================== Content ===================== */
 async function Content({ orgId }: { orgId: string }) {
-  const { modes, access } = await loadModesAndAccess(orgId);
-  const activeModes = modes.filter((m) => m.active);
-  const inactiveModes = modes.filter((m) => !m.active);
+  const { modes } = await loadModesAndAccess(orgId);
+  const bySlot = new Map<number, ModeDto>();
+  modes.forEach((m) => bySlot.set(m.slot, m));
 
   return (
-    <section className="space-y-4">
-      {/* MODES (read-only for now) */}
-      <details
-        className="group rounded-2xl border bg-white p-4 shadow-sm open:shadow-md"
-        open
-      >
-        <summary className="flex cursor-pointer list-none items-center justify-between">
-          <div>
-            <h2 className="text-lg font-medium">Modes</h2>
-            <p className="text-sm text-neutral-500">
-              Define Mode 1…10 (rename, toggle active, set associated access
-              field, manage presets).
-            </p>
-          </div>
-          <span className="ml-4 text-sm text-neutral-500 group-open:rotate-90 transition">
-            ▶
-          </span>
-        </summary>
+    <div className="space-y-8">
+      {/* Slot pills */}
+      <section className="mb-2">
+        <h2 className="mb-2 text-sm font-medium text-neutral-700">
+          Mode slots
+        </h2>
+        <SlotPills modes={modes} />
+      </section>
 
-        <div className="mt-4 space-y-6">
-          {activeModes.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-center">
-              <p className="text-sm text-neutral-600">
-                No active modes. Activate and label Mode 1…10 in settings.
-              </p>
-              <div className="mt-2 text-xs text-neutral-500">
-                Tip: Example labels — <em>Online</em>, <em>In-Person</em>,{" "}
-                <em>Phone</em>.
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {activeModes.map((m) => (
-                  <div
-                    key={m.slot}
-                    className="rounded-2xl border bg-white p-4 shadow-sm"
-                    role="region"
-                    aria-labelledby={`mode-${m.slot}-title`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div
-                          id={`mode-${m.slot}-title`}
-                          className="text-sm font-medium"
-                        >
-                          Mode {m.slot}: {m.label}
-                        </div>
-                        <p className="mt-1 text-xs text-neutral-500">
-                          Access field:{" "}
-                          <strong>{m.accessFieldLabel ?? "—"}</strong>
-                        </p>
-                      </div>
-                      <span className="ml-3 rounded-full border px-2 py-0.5 text-[11px] text-neutral-600">
-                        {m.presets && m.presets.length > 0
-                          ? `${m.presets.length} preset${
-                              m.presets.length > 1 ? "s" : ""
-                            }`
-                          : "No presets"}
-                      </span>
+      {/* MODES (activate + label) */}
+      <Section
+        title="Modes"
+        description="Activate a slot (1..10) and set its label."
+      >
+        <div className="overflow-hidden rounded-xl border border-neutral-200">
+          <div className="grid grid-cols-12 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-700">
+            <div className="col-span-3">Slot</div>
+            <div className="col-span-3">Active</div>
+            <div className="col-span-4">Label</div>
+            <div className="col-span-2">Actions</div>
+          </div>
+          <ul className="divide-y divide-neutral-200">
+            {Array.from({ length: 10 }, (_, i) => i + 1).map((slot) => {
+              const m = bySlot.get(slot);
+              const saveFormId = `save-mode-${slot}`;
+              const resetFormId = `reset-mode-${slot}`;
+
+              return (
+                <li
+                  key={slot}
+                  className="grid grid-cols-12 items-center px-4 py-3"
+                >
+                  <div className="col-span-3 text-sm text-neutral-800">
+                    Mode {slot}
+                  </div>
+
+                  {/* SAVE form uses "contents" to span columns */}
+                  <form id={saveFormId} action={saveMode} className="contents">
+                    <input type="hidden" name="orgId" value={orgId} />
+                    <input type="hidden" name="slot" value={slot} />
+
+                    <div className="col-span-3">
+                      <label className="inline-flex items-center gap-2 text-sm text-neutral-700">
+                        <input
+                          name="active"
+                          type="checkbox"
+                          defaultChecked={!!m?.active}
+                          className="peer relative h-5 w-9 cursor-pointer appearance-none rounded-full bg-neutral-300 outline-none transition-colors
+                                     before:absolute before:left-0.5 before:top-0.5 before:h-4 before:w-4 before:rounded-full before:bg-white before:transition-transform
+                                     checked:bg-neutral-900 checked:before:translate-x-4"
+                          role="switch"
+                          aria-checked={!!m?.active}
+                        />
+                        <span className="text-xs text-neutral-600 peer-checked:hidden">
+                          inactive
+                        </span>
+                        <span className="hidden text-xs text-neutral-600 peer-checked:inline">
+                          active
+                        </span>
+                      </label>
                     </div>
 
-                    {m.presets && m.presets.length > 0 && (
-                      <ul className="mt-3 list-disc pl-5 text-sm text-neutral-700">
-                        {m.presets.map((p, i) => (
-                          <li key={i}>{p}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ))}
-              </div>
+                    <div className="col-span-4">
+                      <input
+                        name="label"
+                        type="text"
+                        placeholder="Label"
+                        defaultValue={m?.label ?? ""}
+                        className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm"
+                      />
+                    </div>
 
-              {inactiveModes.length > 0 && (
-                <div>
-                  <div className="text-xs font-medium text-neutral-500 mb-2">
-                    Inactive slots
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {inactiveModes.map((m) => (
-                      <span
-                        key={m.slot}
-                        className="rounded-full border px-3 py-1 text-xs text-neutral-500"
-                        aria-label={`Mode ${m.slot} inactive`}
-                        title="Inactive"
-                      >
-                        Mode {m.slot}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
+                    <div className="col-span-2">
+                      <div className="flex items-center justify-start gap-2">
+                        <button
+                          type="submit"
+                          className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="submit"
+                          form={resetFormId}
+                          className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+
+                  {/* Hidden reset form */}
+                  <form id={resetFormId} action={resetMode} className="hidden">
+                    <input type="hidden" name="orgId" value={orgId} />
+                    <input type="hidden" name="slot" value={slot} />
+                  </form>
+                </li>
+              );
+            })}
+          </ul>
         </div>
-      </details>
+      </Section>
 
-      {/* ACCESS (create form + list with delete) */}
-      <details
-        className="group rounded-2xl border bg-white p-4 shadow-sm open:shadow-md"
-        open
+      {/* ACCESS (Mode + Label + Details) */}
+      <Section
+        title="Access"
+        description="Add Access entries by selecting a Mode, giving them a Label, and entering Details (e.g., address or call link)."
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between">
-          <div>
-            <h2 className="text-lg font-medium">Access</h2>
-            <p className="text-sm text-neutral-500">
-              Configure the access fields (e.g., “Link”, “Address”, “Dial-in”)
-              and optional presets usable on bookings.
-            </p>
+        <AddAccessForm orgId={orgId} />
+        <div className="mt-4 overflow-hidden rounded-xl border border-neutral-200">
+          <div className="grid grid-cols-12 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-700">
+            <div className="col-span-3">Mode</div>
+            <div className="col-span-4">Label</div>
+            <div className="col-span-3">Details</div>
+            <div className="col-span-2">Actions</div>
           </div>
-          <span className="ml-4 text-sm text-neutral-500 group-open:rotate-90 transition">
-            ▶
+          <AccessList orgId={orgId} />
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/** ===== Small UI helpers (unchanged visual design) ===== */
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="rounded-2xl border border-neutral-200 bg-white shadow-sm open:shadow-md">
+      <summary className="list-none cursor-pointer select-none rounded-2xl px-5 py-4 hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/10">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-neutral-900">
+              {title}
+            </h2>
+            {description ? (
+              <p className="mt-1 text-sm text-neutral-600">{description}</p>
+            ) : null}
+          </div>
+          <span aria-hidden className="ml-4 inline-block text-neutral-400">
+            ▾
           </span>
-        </summary>
+        </div>
+      </summary>
+      <div className="border-t border-neutral-200 px-5 py-5">{children}</div>
+    </details>
+  );
+}
 
-        {/* Create Access Field */}
-        <div className="mt-4 rounded-xl border border-dashed p-4">
-          <h3 className="text-sm font-medium">Add access field</h3>
-          <p className="mt-1 text-xs text-neutral-500">
-            Example: Label “Link”, Key “link”. Presets are optional
-            (comma-separated).
-          </p>
-
-          <form
-            action={createAccessField}
-            className="mt-3 grid gap-3 sm:grid-cols-3"
+function SlotPills({ modes }: { modes: ModeDto[] }) {
+  const activeSlots = new Set(modes.filter((m) => m.active).map((m) => m.slot));
+  return (
+    <div className="flex flex-wrap gap-2">
+      {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+        const isActive = activeSlots.has(n);
+        return (
+          <span
+            key={n}
+            className={[
+              "inline-flex items-center rounded-full px-3 py-1 text-sm",
+              isActive
+                ? "bg-neutral-900 text-white"
+                : "border border-dashed border-neutral-300 text-neutral-600",
+            ].join(" ")}
+            aria-label={`Mode slot ${n} (${isActive ? "active" : "inactive"})`}
+            title={`Mode slot ${n} (${isActive ? "active" : "inactive"})`}
           >
-            {/* Hidden orgId so the action doesn’t depend on auth helpers */}
-            <input type="hidden" name="orgId" value={orgId} />
-            <div className="sm:col-span-1">
-              <label
-                className="block text-xs text-neutral-600 mb-1"
-                htmlFor="label"
-              >
-                Label
-              </label>
-              <input
-                id="label"
-                name="label"
-                required
-                className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-                placeholder="Link"
-              />
-            </div>
-            <div className="sm:col-span-1">
-              <label
-                className="block text-xs text-neutral-600 mb-1"
-                htmlFor="key"
-              >
-                Key (kebab-case)
-              </label>
-              <input
-                id="key"
-                name="key"
-                required
-                className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-                placeholder="link"
-              />
-            </div>
-            <div className="sm:col-span-1">
-              <label
-                className="block text-xs text-neutral-600 mb-1"
-                htmlFor="presets"
-              >
-                Presets (comma-separated)
-              </label>
-              <input
-                id="presets"
-                name="presets"
-                className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-                placeholder="Zoom (Default), Teams"
-              />
-            </div>
+            {n}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
-            <div className="sm:col-span-3">
+async function AddAccessForm({ orgId }: { orgId: string }) {
+  const { modes } = await loadModesAndAccess(orgId);
+
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4">
+      <h3 className="text-sm font-medium text-neutral-900">Add access</h3>
+      <p className="mt-1 text-xs text-neutral-500">
+        Example: Mode “In-Person”, Label “HQ address”, Details “123 Queens
+        Street…”.
+      </p>
+
+      <form
+        action={createModeAccess}
+        className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-5"
+      >
+        <input type="hidden" name="orgId" value={orgId} />
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-neutral-700">Mode</span>
+          <select
+            name="modeSlot"
+            required
+            className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm"
+            defaultValue=""
+          >
+            <option value="" disabled>
+              Select mode
+            </option>
+            {modes
+              .filter((m) => m.active)
+              .map((m) => (
+                <option key={m.slot} value={m.slot}>
+                  {m.label || `Mode ${m.slot}`}
+                </option>
+              ))}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-neutral-700">Label</span>
+          <input
+            name="label"
+            required
+            placeholder="HQ address, Zoom, Teams…"
+            className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="md:col-span-2 flex flex-col gap-1">
+          <span className="text-xs text-neutral-700">Details</span>
+          <input
+            name="details"
+            required
+            placeholder="123 Queens Street…, https://…"
+            className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm"
+          />
+        </label>
+
+        <div className="flex items-end">
+          <button
+            type="submit"
+            className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50 disabled:opacity-50"
+            title="Create access"
+          >
+            Save access
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+async function AccessList({ orgId }: { orgId: string }) {
+  const accesses = await loadModeAccesses(orgId);
+  if (accesses.length === 0) {
+    return (
+      <div className="px-4 py-3 text-sm text-neutral-700">
+        No access entries yet.
+      </div>
+    );
+  }
+  return (
+    <ul className="divide-y divide-neutral-200">
+      {accesses.map((row) => (
+        <li key={row.id} className="grid grid-cols-12 items-center px-4 py-3">
+          <div className="col-span-3 text-sm text-neutral-800">
+            {row.modeLabel || `Mode ${row.modeSlot}`}
+          </div>
+          <div className="col-span-4 text-sm text-neutral-800">{row.label}</div>
+          <div className="col-span-3 text-sm text-neutral-800 truncate">
+            {row.details}
+          </div>
+          <div className="col-span-2">
+            <form action={deleteModeAccess} className="flex justify-end">
+              <input type="hidden" name="id" value={row.id} />
               <button
                 type="submit"
-                className="rounded-xl bg-black px-3 py-2 text-sm text-white hover:bg-black/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
+                className="inline-flex h-8 items-center rounded-lg border border-neutral-200 bg-white px-2 text-xs hover:bg-neutral-50"
               >
-                Save access field
+                Delete
               </button>
-            </div>
-          </form>
-        </div>
-
-        {/* Existing Access Fields */}
-        <div className="mt-4 space-y-4">
-          {access.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-center">
-              <p className="text-sm text-neutral-600">
-                No access fields configured yet. Create labels and presets to
-                speed up booking entry.
-              </p>
-            </div>
-          ) : (
-            <ul className="grid gap-3 sm:grid-cols-2">
-              {access.map((a) => (
-                <li
-                  key={a.key}
-                  className="rounded-2xl border bg-white p-4 shadow-sm"
-                  role="region"
-                  aria-labelledby={`access-${a.key}-title`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div
-                        id={`access-${a.key}-title`}
-                        className="text-sm font-medium"
-                      >
-                        {a.label}{" "}
-                        <span className="ml-2 text-xs text-neutral-500">
-                          ({a.key})
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-neutral-500">
-                        {a.presets && a.presets.length > 0
-                          ? "Presets available"
-                          : "No presets yet"}
-                      </p>
-                    </div>
-
-                    <form action={deleteAccessField} method="post">
-                      <input type="hidden" name="orgId" value={orgId} />
-                      <input type="hidden" name="key" value={a.key} />
-                      <button
-                        type="submit"
-                        className="rounded-xl border px-2 py-1 text-xs hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-                        title="Delete access field"
-                      >
-                        Delete
-                      </button>
-                    </form>
-                  </div>
-
-                  {a.presets && a.presets.length > 0 && (
-                    <ul className="mt-3 list-disc pl-5 text-sm text-neutral-700">
-                      {a.presets.map((p, i) => (
-                        <li key={i}>{p}</li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </details>
-    </section>
+            </form>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
