@@ -269,3 +269,56 @@ model BookingNote {
 
   @@index([bookingId, createdAt])
 }
+
+/// ========== Modes & Access (additive; safe) ==========
+
+model OrganizationMode {
+  id               String @id @default(cuid())
+  orgId            String
+  slot             Int
+  active           Boolean @default(false)
+  label            String?
+  accessFieldLabel String?
+
+  // children
+  presets OrganizationModePreset[]
+
+  // Indexes & guards
+  @@unique([orgId, slot])
+  @@index([orgId, active])
+}
+
+model OrganizationModePreset {
+  id         String @id @default(cuid())
+  orgModeId  String
+  value      String
+
+  // relation (kept scalar-safe; Prisma can infer without foreign keys in DB)
+  mode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
+
+  @@index([orgModeId])
+}
+
+model OrganizationAccessField {
+  id      String @id @default(cuid())
+  orgId   String
+  /// A short stable identifier within the org (e.g., "link", "address", "dial")
+  key     String
+  /// Human label shown in UI (e.g., "Link", "Address", "Dial-in number")
+  label   String
+
+  presets OrganizationAccessPreset[]
+
+  @@unique([orgId, key])
+  @@index([orgId])
+}
+
+model OrganizationAccessPreset {
+  id            String @id @default(cuid())
+  accessFieldId String
+  value         String
+
+  field OrganizationAccessField @relation(fields: [accessFieldId], references: [id], onDelete: Cascade)
+
+  @@index([accessFieldId])
+}
