@@ -6,31 +6,23 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 /** ------------------------------------------------------------------------
- * Types are intentionally loose to avoid regressions across API shapes.
+ * Types (kept loose to avoid regressions across API shapes)
  * ---------------------------------------------------------------------- */
 type OrgDirectoryItem = {
   id: string;
   displayName?: string | null;
   name?: string | null;
   email?: string | null;
-  kind?:
-    | "EXPERT"
-    | "REPORTER"
-    | "EDITOR"
-    | "PRODUCER"
-    | "ADMIN"
-    | string
-    | null;
   city?: string | null;
   countryCode?: string | null;
   tags?: string[] | null;
 
-  // Flags (will be derived from role later)
+  // Derived flags from role (set by API; we also tolerate nested flags)
   inviteable?: boolean;
   listed_internal?: boolean;
   flags?: { inviteable?: boolean; listed_internal?: boolean } | null;
 
-  // Availability (future)
+  // Optional availability (if provided)
   availability?:
     | { status?: "AVAILABLE" | "BUSY" | "UNKNOWN"; [k: string]: any }
     | "AVAILABLE"
@@ -38,7 +30,7 @@ type OrgDirectoryItem = {
     | "UNKNOWN"
     | null;
 
-  // New: role info from API (/api/directory/org)
+  // Role info (set by API)
   roleSlot?: number | null;
   roleLabel?: string | null;
 };
@@ -58,12 +50,12 @@ type GlobalExpert = {
 };
 
 type ApiOrgDirectory =
-  | { ok: true; items: OrgDirectoryItem[] }
+  | { ok: true; items: OrgDirectoryItem[]; [k: string]: any }
   | { ok: false; error: string }
   | { items?: OrgDirectoryItem[]; error?: string };
 
 type ApiExperts =
-  | { ok: true; items: GlobalExpert[] }
+  | { ok: true; items: GlobalExpert[]; [k: string]: any }
   | { ok: false; error: string }
   | { items?: GlobalExpert[]; error?: string };
 
@@ -78,12 +70,14 @@ function getInviteableFlag(x: OrgDirectoryItem): boolean | null {
     return x.flags.inviteable;
   return null;
 }
+
 function getListedInternalFlag(x: OrgDirectoryItem): boolean | null {
   if (typeof x.listed_internal === "boolean") return x.listed_internal;
   if (x.flags && typeof x.flags.listed_internal === "boolean")
     return x.flags.listed_internal;
   return null;
 }
+
 function getAvailabilityStatus(
   a: OrgDirectoryItem["availability"] | GlobalExpert["availability"]
 ): string | null {
@@ -93,6 +87,7 @@ function getAvailabilityStatus(
     return (a as any).status;
   return null;
 }
+
 function displayName(x: OrgDirectoryItem | GlobalExpert): string {
   return (
     ((x as OrgDirectoryItem).displayName as string) ||
@@ -102,53 +97,21 @@ function displayName(x: OrgDirectoryItem | GlobalExpert): string {
   );
 }
 
-/** Extract session roles robustly */
-function normalizeRole(r: unknown): string | null {
-  if (!r) return null;
-  const s = String(r).trim();
-  if (!s) return null;
-  return s.toUpperCase().replace(/\s+/g, "_");
-}
-function extractRoles(s: any): Set<string> {
-  const roles = new Set<string>();
-  const push = (val: unknown) => {
-    const nr = normalizeRole(val);
-    if (nr) roles.add(nr);
-  };
-  push(s?.user?.role);
-  (s?.user?.roles ?? []).forEach(push);
-  push(s?.role);
-  (s?.roles ?? []).forEach(push);
-  const mems =
-    s?.user?.orgMemberships ??
-    s?.user?.memberships ??
-    s?.orgMemberships ??
-    s?.memberships ??
-    [];
-  if (Array.isArray(mems)) mems.forEach((m: any) => push(m?.role));
-  return roles;
-}
-
 /** ------------------------------------------------------------------------
  * Page
  * ---------------------------------------------------------------------- */
 export default function DirectoryPage() {
   const qs = useSearchParams();
 
-  // UI state
+  // Tabs + search
   const [tab, setTab] = React.useState<"internal" | "global">("internal");
-  const [q, setQ] = React.useState<string>("");
-  const [sessionObj, setSessionObj] = React.useState<any | undefined>(
+  const [q, setQ] = React.useState("");
+
+  // Session (for org fallback)
+  const [sessionObj, setSessionObj] = React.useState<any | null | undefined>(
     undefined
-  );
+  ); // undefined=loading, null=failure, object=ok
   const sessionReady = sessionObj !== undefined;
-  const roles = React.useMemo(
-    () => (sessionReady ? extractRoles(sessionObj) : new Set<string>()),
-    [sessionReady, sessionObj]
-  );
-  const isAdminLike =
-    roles.has("OWNER") || roles.has("PRODUCER") || roles.has("ADMIN");
-  const isDev = process.env.NODE_ENV !== "production";
 
   // Effective org: URL override first (client), else session orgId
   const overrideOrgId = qs.get("orgId");
@@ -157,12 +120,11 @@ export default function DirectoryPage() {
     : null;
   const effectiveOrgId = overrideOrgId || sessionOrgId;
 
-  // Loading / error / data
-  const [loading, setLoading] = React.useState<boolean>(true);
+  // Data state
+  const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [orgItems, setOrgItems] = React.useState<OrgDirectoryItem[]>([]);
   const [globalItems, setGlobalItems] = React.useState<GlobalExpert[]>([]);
-  const [adminViewNotice, setAdminViewNotice] = React.useState(false);
 
   // Fetch session once
   React.useEffect(() => {
@@ -206,7 +168,7 @@ export default function DirectoryPage() {
     return () => clearTimeout(t);
   }, [q]);
 
-  // Fetch data when tab/org/search changes — wait for session
+  // Fetch when tab/org/search/session changes
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -215,22 +177,20 @@ export default function DirectoryPage() {
         setError(null);
         return;
       }
-
       setLoading(true);
       setError(null);
-      setAdminViewNotice(false);
 
       try {
         if (tab === "internal") {
-          // INTERNAL needs org context; if missing, just stop and show banner
+          // INTERNAL tab needs an org context
           if (!effectiveOrgId) {
             setOrgItems([]);
             setLoading(false);
             return;
           }
-
           const sp = new URLSearchParams();
           if (debouncedQ) sp.set("q", debouncedQ);
+
           const res = await fetch(
             withOrg(`/api/directory/org?${sp.toString()}`),
             {
@@ -240,20 +200,22 @@ export default function DirectoryPage() {
           );
           const json = (await res.json()) as ApiOrgDirectory;
           if (!alive) return;
-
           if (!res.ok)
             throw new Error(
               (json as any)?.error || "Failed to load directory."
             );
-          const raw =
-            (((json as any)?.items ?? []) as OrgDirectoryItem[]) || [];
 
-          let items: OrgDirectoryItem[] = raw;
+          let items: OrgDirectoryItem[] = ((json as any)?.items ??
+            []) as OrgDirectoryItem[];
 
-          // For now, admins/devs see everyone; later we'll hide for non-admins when flags are wired
-          if (isAdminLike || isDev) setAdminViewNotice(true);
+          // ✅ Show ONLY inviteable users (and never unlisted)
+          items = items.filter(
+            (x) =>
+              getInviteableFlag(x) === true &&
+              getListedInternalFlag(x) !== false
+          );
 
-          // Client-side search (backup if server ignores q)
+          // Backup client-side search if server ignored q
           const needle = debouncedQ.trim().toLowerCase();
           if (needle) {
             items = items.filter((x) =>
@@ -273,13 +235,12 @@ export default function DirectoryPage() {
 
           setOrgItems(items);
         } else {
-          // GLOBAL
+          // GLOBAL tab
           if (!effectiveOrgId) {
             setGlobalItems([]);
             setLoading(false);
             return;
           }
-
           const sp = new URLSearchParams({ visibility: "public", take: "30" });
           if (debouncedQ) sp.set("q", debouncedQ);
 
@@ -292,7 +253,6 @@ export default function DirectoryPage() {
           );
           const json = (await res.json()) as ApiExperts;
           if (!alive) return;
-
           if (!res.ok)
             throw new Error((json as any)?.error || "Failed to load experts.");
           setGlobalItems(((json as any)?.items ?? []) as GlobalExpert[]);
@@ -305,51 +265,28 @@ export default function DirectoryPage() {
         setLoading(false);
       }
     })();
+
     return () => {
       alive = false;
     };
-  }, [
-    tab,
-    debouncedQ,
-    effectiveOrgId,
-    sessionReady,
-    withOrg,
-    isAdminLike,
-    isDev,
-  ]);
+  }, [tab, debouncedQ, effectiveOrgId, sessionReady, withOrg]);
 
-  // Banner when no org (on either tab)
+  // Banner when no org (either tab)
   const showNoOrgBanner = sessionReady && !effectiveOrgId;
-
   const internalCount = orgItems.length;
   const globalCount = globalItems.length;
 
   return (
-    <>
+    <main className="mx-auto max-w-5xl px-4 py-8">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Directory</h1>
-        <div className="text-sm text-gray-600">
-          {tab === "internal" ? (
-            effectiveOrgId ? (
-              <span className="rounded-md border px-2 py-1">
-                Org: <code className="text-gray-800">{effectiveOrgId}</code>
-              </span>
-            ) : (
-              <span className="rounded-md border px-2 py-1">
-                No org selected
-              </span>
-            )
-          ) : (
-            <span className="rounded-md border px-2 py-1">Global Experts</span>
-          )}
-        </div>
-      </div>
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Directory</h1>
+        {/* orgId removed from UI per request */}
+      </header>
 
       {/* Tabs */}
       <div className="mb-4 flex items-center gap-2">
         <button
-          type="button"
           onClick={() => setTab("internal")}
           className={clsx(
             "rounded-md border px-3 py-1.5 text-sm",
@@ -360,7 +297,6 @@ export default function DirectoryPage() {
           Internal {internalCount ? `(${internalCount})` : ""}
         </button>
         <button
-          type="button"
           onClick={() => setTab("global")}
           className={clsx(
             "rounded-md border px-3 py-1.5 text-sm",
@@ -372,51 +308,36 @@ export default function DirectoryPage() {
         </button>
 
         {/* Search */}
-        <div className="ml-auto">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
-            placeholder={
-              tab === "internal" ? "Search your org…" : "Search global experts…"
-            }
-            className="w-[260px] rounded-md border px-3 py-2 text-sm"
-          />
-        </div>
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+          placeholder={
+            tab === "internal" ? "Search your org…" : "Search global experts…"
+          }
+          className="ml-auto w-[260px] rounded-md border px-3 py-2 text-sm"
+          aria-label="Search directory"
+        />
       </div>
 
       {/* No-org banner (both tabs) */}
       {showNoOrgBanner && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          <div className="flex items-center justify-between gap-3">
-            <span>No organization selected.</span>
-            <Link
-              href="/modules/settings"
-              className="shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100"
-            >
-              Choose org
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {/* Admin/Dev notice */}
-      {adminViewNotice && (
-        <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800">
-          Showing all org members (admin view). Once{" "}
-          <code>directory:listed_internal</code> is wired, non-listed members
-          will be hidden for non-admins.
+        <div className="mb-4 rounded-md border bg-amber-50 p-3 text-sm text-amber-900">
+          No organization selected.{" "}
+          <Link href="/modules/settings/org" className="underline">
+            Choose org
+          </Link>
         </div>
       )}
 
       {/* Loading / Error */}
       {loading && (
-        <div className="text-sm text-gray-600" role="status">
+        <div className="rounded-md border p-6 text-sm text-neutral-700">
           Loading…
         </div>
       )}
       {error && (
-        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+        <div className="rounded-md border p-6 text-sm text-red-700">
           {error}
         </div>
       )}
@@ -437,12 +358,15 @@ export default function DirectoryPage() {
         tab === "internal" &&
         effectiveOrgId &&
         orgItems.length === 0 && (
-          <div className="rounded-lg border bg-white px-4 py-8 text-center text-sm text-gray-600">
-            <p className="mb-2">No internal profiles to show.</p>
-            <p className="text-xs text-gray-500">
-              This tab will hide non-listed members for non-admins once listing
-              is wired per user/role.
-            </p>
+          <div className="mt-4 rounded-md border border-dashed p-8 text-center text-sm text-neutral-600">
+            No inviteable members to show.
+            <div className="mt-1 text-xs">
+              Toggle “Bookable Talent” in{" "}
+              <Link href="/modules/settings/users" className="underline">
+                Users &amp; Roles
+              </Link>
+              .
+            </div>
           </div>
         )}
       {!loading &&
@@ -450,11 +374,11 @@ export default function DirectoryPage() {
         tab === "global" &&
         effectiveOrgId &&
         globalItems.length === 0 && (
-          <div className="rounded-lg border bg-white px-4 py-8 text-center text-sm text-gray-600">
-            <p>No public experts match your search.</p>
+          <div className="mt-4 rounded-md border border-dashed p-8 text-center text-sm text-neutral-600">
+            No public experts match your search.
           </div>
         )}
-    </>
+    </main>
   );
 }
 
@@ -463,13 +387,11 @@ export default function DirectoryPage() {
  * ---------------------------------------------------------------------- */
 function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
   return (
-    <ul className="grid gap-3">
+    <ul className="divide-y rounded-md border">
       {items.map((p) => {
         const name = displayName(p);
-        const inviteable = getInviteableFlag(p);
-        const listed = getListedInternalFlag(p);
         const availability = getAvailabilityStatus(p.availability);
-        const roleBadgeClass = "bg-gray-100 text-gray-800";
+
         const availBadge =
           availability === "AVAILABLE"
             ? "bg-green-100 text-green-800"
@@ -478,51 +400,41 @@ function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
             : "bg-gray-100 text-gray-700";
 
         return (
-          <li key={p.id} className="rounded-xl border bg-white p-4">
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{name}</div>
-                <div className="text-xs text-gray-500">{p.email ?? p.id}</div>
+          <li key={p.id} className="grid grid-cols-12 items-center gap-2 p-3">
+            <div className="col-span-4">
+              <div className="font-medium">{name}</div>
+              <div className="mt-0.5 text-xs text-neutral-500">
+                {p.email ?? p.id}
               </div>
-              <div className="shrink-0 space-x-1">
-                {/* NEW: role label badge */}
+
+              {/* Role & status badges */}
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 {p.roleLabel && (
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-xs ${roleBadgeClass}`}
-                  >
+                  <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-800">
+                    {/* Hide role number; show label only */}
                     {p.roleLabel}
-                    {typeof p.roleSlot === "number" ? ` #${p.roleSlot}` : ""}
                   </span>
                 )}
                 {availability && (
                   <span
-                    className={`rounded px-1.5 py-0.5 text-xs ${availBadge}`}
+                    className={clsx(
+                      "inline-flex rounded-md px-2 py-0.5 text-xs",
+                      availBadge
+                    )}
                   >
                     {availability}
                   </span>
                 )}
-                {listed === false && (
-                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700">
-                    Hidden
-                  </span>
-                )}
-                {inviteable === true ? (
-                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-800">
-                    Inviteable
-                  </span>
-                ) : inviteable === false ? (
-                  <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-xs text-yellow-800">
-                    Not inviteable
-                  </span>
-                ) : null}
               </div>
             </div>
 
-            <div className="text-xs text-gray-600">
-              {p.city && <span className="mr-1">{p.city}</span>}
-              {p.countryCode && <span>({p.countryCode})</span>}
+            <div className="col-span-5 text-sm text-neutral-700">
+              {p.city && <span className="mr-2">{p.city}</span>}
+              {p.countryCode && (
+                <span className="text-neutral-500">({p.countryCode})</span>
+              )}
               {(p.tags || []).length > 0 && (
-                <span className="ml-2">
+                <span className="ml-2 text-xs text-neutral-500">
                   {(p.tags || []).slice(0, 3).map((t) => (
                     <span key={t} className="mr-1">
                       #{t}
@@ -530,6 +442,16 @@ function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
                   ))}
                 </span>
               )}
+            </div>
+
+            <div className="col-span-3 flex items-center justify-end">
+              {/* Invite button (now always enabled here; enforcement will be in booking picker) */}
+              <button
+                className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                title="Invite"
+              >
+                Invite
+              </button>
             </div>
           </li>
         );
@@ -540,7 +462,7 @@ function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
 
 function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
   return (
-    <ul className="grid gap-3">
+    <ul className="divide-y rounded-md border">
       {items.map((e) => {
         const name = displayName(e);
         const status = getAvailabilityStatus(e.availability);
@@ -552,28 +474,33 @@ function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
             : "bg-gray-100 text-gray-700";
 
         return (
-          <li key={e.id} className="rounded-xl border bg-white p-4">
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{name}</div>
-                <div className="text-xs text-gray-500">Expert • {e.id}</div>
+          <li key={e.id} className="grid grid-cols-12 items-center gap-2 p-3">
+            <div className="col-span-7">
+              <div className="font-medium">{name}</div>
+              <div className="mt-0.5 text-xs text-neutral-500">
+                Expert • {e.id}
               </div>
-              <div className="shrink-0">
-                {status && (
+              {status && (
+                <div className="mt-1">
                   <span
-                    className={`rounded px-1.5 py-0.5 text-xs ${availBadge}`}
+                    className={clsx(
+                      "inline-flex rounded-md px-2 py-0.5 text-xs",
+                      availBadge
+                    )}
                   >
                     {status}
                   </span>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
-            <div className="text-xs text-gray-600">
-              {e.city && <span className="mr-1">{e.city}</span>}
-              {e.countryCode && <span>({e.countryCode})</span>}
+            <div className="col-span-5 text-sm text-neutral-700">
+              {e.city && <span className="mr-2">{e.city}</span>}
+              {e.countryCode && (
+                <span className="text-neutral-500">({e.countryCode})</span>
+              )}
               {(e.tags || []).length > 0 && (
-                <span className="ml-2">
+                <span className="ml-2 text-xs text-neutral-500">
                   {(e.tags || []).slice(0, 3).map((t) => (
                     <span key={t} className="mr-1">
                       #{t}

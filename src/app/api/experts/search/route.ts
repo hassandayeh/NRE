@@ -11,15 +11,16 @@ export const revalidate = 0;
 /**
  * GET /api/experts/search
  * Query:
- *  - orgId (required)
- *  - q (optional)
- *  - languages, tags, online, inPerson, country, city
- *  - slots=4,5 (optional)
- *  - inviteableOnly=true|false (default true)
- *  - take (default 50), skip (default 0)
+ * - orgId (optional; defaults to session.orgId)
+ * - q (optional)
+ * - languages, tags, online, inPerson, country, city
+ * - slots=4,5 (optional)
+ * - inviteableOnly=true|false (default true)
+ * - take (default 50), skip (default 0)
  */
 export async function GET(req: NextRequest) {
   try {
+    // 1) Resolve signed-in viewer
     const viewer = await resolveViewerFromRequest(req);
     if (!viewer?.isSignedIn || !viewer.userId) {
       return NextResponse.json(
@@ -28,8 +29,35 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    // 2) Resolve orgId: URL param OR session fallback
     const { searchParams } = new URL(req.url);
-    const orgId = searchParams.get("orgId") ?? "";
+    let orgId = (searchParams.get("orgId") || "").trim();
+
+    if (!orgId) {
+      // Default to session.orgId using caller cookies
+      const cookie = req.headers.get("cookie") || "";
+      try {
+        const sessRes = await fetch(
+          new URL("/api/auth/session", req.url).toString(),
+          {
+            headers: { cookie },
+            cache: "no-store",
+          }
+        );
+        if (sessRes.ok) {
+          const sess = await sessRes.json().catch(() => null);
+          orgId =
+            (sess?.orgId as string) ||
+            (sess?.user?.orgId as string) ||
+            (sess?.user?.org?.id as string) ||
+            "";
+          orgId = orgId.trim();
+        }
+      } catch {
+        // ignore session fetch failure; we'll error below if orgId still empty
+      }
+    }
+
     if (!orgId) {
       return NextResponse.json(
         { ok: false, error: "orgId is required" },
@@ -37,6 +65,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    // 3) Authorization for this org (blocks non-admin cross-org overrides)
     const canView = await hasCan({
       userId: viewer.userId,
       orgId,
@@ -49,6 +78,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    // 4) Parse filters
     const q = (searchParams.get("q") || "").trim();
     const langs = splitCSV(searchParams.get("languages"));
     const tags = splitCSV(searchParams.get("tags"));
@@ -66,6 +96,7 @@ export async function GET(req: NextRequest) {
     );
     const skip = Math.max(parseInt(searchParams.get("skip") || "0", 10), 0);
 
+    // 5) Build Prisma query (org-scoped)
     const where: any = { orgId };
     if (slots) where.slot = { in: slots };
 
@@ -78,7 +109,6 @@ export async function GET(req: NextRequest) {
       );
     }
     if (orSearch.length) userWhere.OR = orSearch;
-
     if (langs.length) userWhere.languages = { hasSome: langs };
     if (tags.length) userWhere.tags = { hasSome: tags };
     if (online !== null) userWhere.supportsOnline = online;
@@ -87,6 +117,7 @@ export async function GET(req: NextRequest) {
     if (city) userWhere.city = { contains: city, mode: "insensitive" };
     if (Object.keys(userWhere).length) where.user = userWhere;
 
+    // 6) Fetch candidates by membership (UserRole) + basic user fields
     const rows = await prisma.userRole.findMany({
       where,
       take,
@@ -111,12 +142,17 @@ export async function GET(req: NextRequest) {
       },
     });
 
+    // 7) Derive Bookable flags from the effective role of each slot
+    // - listed := role has directory:listed_internal (and active)
+    // - inviteable := listed && role has booking:inviteable
     const people = await Promise.all(
       rows.map(async (r) => {
         const eff = await getEffectiveRole(orgId, r.slot);
         const listed =
           eff.isActive && eff.perms.has("directory:listed_internal");
         const inviteable = listed && eff.perms.has("booking:inviteable");
+
+        // Keep parity with prior behavior: only return listed members.
         if (!listed) return null;
         if (inviteableOnly && !inviteable) return null;
 

@@ -78,6 +78,18 @@ async function ensurePermissionKeyMap() {
   return map;
 }
 
+/** Unified manage check: allow if role has `settings:manage` OR `roles:manage` */
+async function canManageSettingsForOrg(userId: string, orgId: string) {
+  const ur = await prisma.userRole.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { slot: true },
+  });
+  if (!ur) return false;
+  const eff = await getEffectiveRole(orgId, ur.slot);
+  if (!eff.isActive) return false;
+  return eff.perms.has("settings:manage") || eff.perms.has("roles:manage");
+}
+
 // ---------- GET /api/org/roles?orgId=... ----------
 export async function GET(req: NextRequest) {
   try {
@@ -98,18 +110,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // Only admins can view/manage roles config
-    const canManage = await prisma.userRole
-      .findUnique({
-        where: { userId_orgId: { userId: viewer.userId, orgId } },
-        select: { slot: true },
-      })
-      .then(async (ur) => {
-        if (!ur) return false;
-        const eff = await getEffectiveRole(orgId, ur.slot);
-        return eff.isActive && eff.perms.has("roles:manage");
-      });
-
+    // Unified gate (settings:manage || roles:manage)
+    const canManage = await canManageSettingsForOrg(viewer.userId, orgId);
     if (!canManage) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
@@ -177,7 +179,6 @@ export async function PATCH(req: NextRequest) {
 
     const orgId = (body.orgId || "").trim();
     const updates = body.updates || {};
-
     if (!orgId) {
       return NextResponse.json(
         { ok: false, error: "orgId is required" },
@@ -185,18 +186,8 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    // Must be allowed to manage roles
-    const canManage = await prisma.userRole
-      .findUnique({
-        where: { userId_orgId: { userId: viewer.userId, orgId } },
-        select: { slot: true },
-      })
-      .then(async (ur) => {
-        if (!ur) return false;
-        const eff = await getEffectiveRole(orgId, ur.slot);
-        return eff.isActive && eff.perms.has("roles:manage");
-      });
-
+    // Unified gate (settings:manage || roles:manage)
+    const canManage = await canManageSettingsForOrg(viewer.userId, orgId);
     if (!canManage) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
@@ -214,6 +205,7 @@ export async function PATCH(req: NextRequest) {
       if (!isValidSlot(slotNum)) continue;
 
       const u = updates[rawSlot] as SlotUpdate;
+
       const updateData: { label?: string; isActive?: boolean } = {};
       if (typeof u.label === "string")
         updateData.label = u.label.trim().slice(0, 80);
@@ -232,9 +224,9 @@ export async function PATCH(req: NextRequest) {
         select: { id: true },
       });
 
-      // Overrides: replace-all strategy for simplicity & correctness
+      // Overrides: replace-all strategy
       if (Array.isArray(u.overrides)) {
-        // Filter to known keys and present in PermissionKey
+        // Filter to known keys
         const cleaned = u.overrides
           .filter((o) => o && typeof o.key === "string" && validKeys.has(o.key))
           .map((o) => ({ key: o.key, allowed: !!o.allowed }));

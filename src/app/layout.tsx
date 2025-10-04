@@ -43,7 +43,7 @@ export default async function RootLayout({
 
   const links = [
     { href: "/modules/booking", label: "Bookings" },
-    { href: "/modules/experts", label: "Directory" },
+    { href: "/modules/directory", label: "Directory" },
     { href: "/modules/settings", label: "Settings" },
     { href: "/modules/profile", label: "Profile" },
   ];

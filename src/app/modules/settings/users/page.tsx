@@ -13,9 +13,7 @@ type UserItem = {
   slot: number | null;
   roleLabel?: string | null;
   roleActive?: boolean | null;
-  // Old/alt field name from API (supported for robustness):
   invited?: boolean | null;
-  // New field name from API (what the server now returns):
   isInvited?: boolean | null;
 };
 
@@ -46,9 +44,14 @@ type RoleDraft = {
   slot: number;
   label: string;
   isActive: boolean;
-  // permission key -> tri-state
   permState: Record<string, PermState>;
 };
+
+/** Keys controlled by the Bookable Talent toggle */
+const BOOKABLE_KEYS = [
+  "directory:listed_internal",
+  "booking:inviteable",
+] as const;
 
 /** ─────────────────────────────────────────────────────────────────────────────
  * Utils
@@ -69,11 +72,11 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 function CopyField(props: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
   return (
-    <div className="flex items-center gap-2">
-      <div className="text-sm text-gray-600">{props.label}</div>
-      <div className="flex-1 truncate rounded-md border px-3 py-2 text-sm">
+    <div className="mt-1 flex items-center gap-2">
+      <div className="text-xs text-neutral-600">{props.label}</div>
+      <code className="rounded bg-neutral-100 px-2 py-1 text-xs">
         {props.value}
-      </div>
+      </code>
       <button
         onClick={async () => {
           await navigator.clipboard.writeText(props.value);
@@ -108,9 +111,12 @@ function useToast() {
     },
     node: msg ? (
       <div
+        role="status"
         className={classNames(
-          "fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm shadow",
-          variant === "ok" ? "bg-green-600 text-white" : "bg-red-600 text-white"
+          "fixed right-4 top-4 z-50 rounded-md px-3 py-2 text-sm shadow",
+          variant === "ok"
+            ? "bg-emerald-50 text-emerald-800"
+            : "bg-red-50 text-red-800"
         )}
       >
         {msg}
@@ -163,7 +169,7 @@ async function patchJSON<T>(url: string, body: unknown): Promise<T> {
 
 /** ── Robust orgId detection (org-only, no user ids) */
 function looksLikeId(v: unknown) {
-  return typeof v === "string" && v.length >= 18; // seeded ids look long (cmg…)
+  return typeof v === "string" && v.length >= 18;
 }
 function parseOrgFromPayload(obj: any): string | null {
   if (!obj || typeof obj !== "object") return null;
@@ -232,7 +238,7 @@ export default function UsersAndRolesPage() {
     !orgIdFromUrl
   );
 
-  // Resolve org automatically if not present in URL
+  // Resolve org automatically if not present in URL (kept)
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -278,6 +284,7 @@ export default function UsersAndRolesPage() {
   const [permissionKeys, setPermissionKeys] = React.useState<
     readonly string[] | null
   >(null);
+  const [rolesError, setRolesError] = React.useState<string | null>(null); // NEW: render-friendly error
   const [roleDrafts, setRoleDrafts] = React.useState<Map<number, RoleDraft>>(
     new Map()
   );
@@ -293,13 +300,13 @@ export default function UsersAndRolesPage() {
     let alive = true;
     (async () => {
       try {
+        setRolesError(null);
         const data = await getJSON<RolesResponse>(
           `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
         );
         if (!alive) return;
         setRolesRes(data);
         setPermissionKeys(data.permissionKeys);
-        // seed drafts for tri-state
         const map = new Map<number, RoleDraft>();
         for (const s of data.slots) {
           const permState: Record<string, PermState> = {};
@@ -315,11 +322,16 @@ export default function UsersAndRolesPage() {
         }
         setRoleDrafts(map);
         setRoleDirty({});
-      } catch {
+      } catch (e: any) {
         setRolesRes(null);
         setPermissionKeys(null);
         setRoleDrafts(new Map());
         setRoleDirty({});
+        setRolesError(
+          String(e?.message || "")
+            .replace(/^[0-9]+\s+/, "")
+            .trim() || "You don’t have permission to view roles."
+        );
       }
     })();
     return () => {
@@ -450,7 +462,6 @@ export default function UsersAndRolesPage() {
     const ok = window.confirm(`Remove "${userName}" from this organization?`);
     if (!ok) return;
     setPending((p) => ({ ...p, [userId]: true }));
-    // optimistic remove
     const prevItems = items ?? [];
     const nextItems = prevItems.filter((x) => x.id !== userId);
     const prevTotal = total;
@@ -495,8 +506,6 @@ export default function UsersAndRolesPage() {
         `/api/org/users/invite?orgId=${encodeURIComponent(orgId)}`,
         { email: inviteEmail.trim(), name: inviteName.trim() || undefined }
       );
-
-      // New server shape: { status, invitePath?, path? }
       const status: string | undefined = resp?.status;
       const link: string =
         typeof resp?.invitePath === "string"
@@ -518,7 +527,6 @@ export default function UsersAndRolesPage() {
       } else {
         toast.showErr("Invite created, but no link was returned.");
       }
-
       setPage(1);
     } catch (err: any) {
       toast.showErr(err?.message || "Failed to create invite.");
@@ -527,7 +535,6 @@ export default function UsersAndRolesPage() {
     }
   }
 
-  // Per-row Copy invite action
   async function onCopyInvite(email: string, userId: string) {
     if (!orgId || !email) return;
     setPending((p) => ({ ...p, [userId]: true }));
@@ -583,23 +590,36 @@ export default function UsersAndRolesPage() {
     return found;
   }
 
-  // HIDE/IGNORE specific controls for role #1 (Admin)
+  function isBookable(draft: RoleDraft): boolean {
+    return BOOKABLE_KEYS.every((k) => draft.permState[k] === "allow");
+  }
+
+  function setBookable(slotNum: number, on: boolean) {
+    const draft = draftFor(slotNum);
+    const nextPerm: Record<string, PermState> = { ...draft.permState };
+    for (const k of BOOKABLE_KEYS) {
+      nextPerm[k] = on ? "allow" : "inherit";
+    }
+    setRoleDrafts((m) =>
+      new Map(m).set(slotNum, { ...draft, permState: nextPerm })
+    );
+    setRoleDirty((d) => ({ ...d, [slotNum]: true }));
+  }
+
   function isDirty(slotNum: number): boolean {
     const draft = draftFor(slotNum);
     const orig = originalFor(slotNum);
     if (!orig) return false;
-
-    // For role #1: only the label is editable (always active, all permissions)
     if (slotNum === 1) {
       return draft.label.trim() !== orig.label;
     }
-
     if (draft.label.trim() !== orig.label) return true;
     if (draft.isActive !== orig.isActive) return true;
 
     const curOverrides = Object.entries(draft.permState)
       .filter(([, v]) => v !== "inherit")
       .map(([key, v]) => ({ key, allowed: v === "allow" }));
+
     const origMap = new Map(orig.overrides.map((o) => [o.key, o.allowed]));
     if (curOverrides.length !== orig.overrides.length) return true;
     for (const o of curOverrides) {
@@ -610,12 +630,10 @@ export default function UsersAndRolesPage() {
 
   async function saveRole(slotNum: number) {
     if (!orgId) return;
-
     const draft = draftFor(slotNum);
     const orig = originalFor(slotNum);
     if (!orig) return;
 
-    // For role #1, only send label updates
     if (slotNum === 1) {
       const labelChanged = draft.label.trim() !== orig.label;
       if (!labelChanged) {
@@ -629,7 +647,6 @@ export default function UsersAndRolesPage() {
           updates: { [String(slotNum)]: { label: draft.label.trim() } },
         });
         toast.showOk("Role saved.");
-
         const data = await getJSON<RolesResponse>(
           `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
         );
@@ -658,22 +675,25 @@ export default function UsersAndRolesPage() {
       return;
     }
 
-    // Slots 2..10: full payload
     const overrides = Object.entries(draft.permState)
       .filter(([, v]) => v !== "inherit")
       .map(([key, v]) => ({ key, allowed: v === "allow" }));
+
     const update: {
       label?: string;
       isActive?: boolean;
       overrides?: { key: string; allowed: boolean }[];
     } = {};
+
     if (draft.label.trim() !== orig.label) update.label = draft.label.trim();
     if (draft.isActive !== orig.isActive) update.isActive = draft.isActive;
+
     const origMap = new Map(orig.overrides.map((o) => [o.key, o.allowed]));
     const changed =
       overrides.length !== orig.overrides.length ||
       overrides.some((o) => origMap.get(o.key) !== o.allowed);
     if (changed) update.overrides = overrides;
+
     if (!Object.keys(update).length) {
       toast.showOk("Already saved.");
       return;
@@ -686,8 +706,6 @@ export default function UsersAndRolesPage() {
         updates: { [String(slotNum)]: update },
       });
       toast.showOk("Role saved.");
-
-      // refresh roles to stay canonical
       const data = await getJSON<RolesResponse>(
         `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
       );
@@ -715,16 +733,46 @@ export default function UsersAndRolesPage() {
     }
   }
 
-  // ── Rendering ────────────────────────────────────────────────────────────────
-  if (!orgId) {
-    return (
-      <div className="mx-auto max-w-5xl px-6 py-8">
-        {toast.node}
-        {/* Header */}
-        <h1 className="mb-6 text-2xl font-semibold">Users &amp; Roles</h1>
+  const canShowBookable =
+    !!permissionKeys &&
+    BOOKABLE_KEYS.every((k) =>
+      (permissionKeys as readonly string[]).includes(k)
+    );
 
-        <div className="rounded-lg border p-4">
-          <p className="text-sm text-gray-600">
+  // ── Rendering (single return; no early returns)
+  return (
+    <main className="mx-auto max-w-5xl px-4 py-8">
+      {toast.node}
+
+      {/* Header */}
+      <header className="mb-8 flex items-start justify-between gap-4">
+        <h1 className="text-2xl font-semibold tracking-tight">Users & Roles</h1>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              if (typeof window !== "undefined")
+                window.localStorage.removeItem("orgId");
+              location.reload();
+            }}
+            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+            title="Clear cached org and re-detect"
+          >
+            Reset org
+          </button>
+
+          <button
+            onClick={() => setShowInvite((v) => !v)}
+            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+          >
+            {showInvite ? "Close" : "Create User"}
+          </button>
+        </div>
+      </header>
+
+      {/* If no org yet, show guided state but keep hook order intact */}
+      {!orgId ? (
+        <>
+          <p className="text-sm text-neutral-700">
             {resolvingOrg
               ? "Resolving your organization…"
               : "We couldn’t determine your organization automatically."}
@@ -750,73 +798,39 @@ export default function UsersAndRolesPage() {
               Try again
             </button>
           )}
-        </div>
-      </div>
-    );
-  }
+        </>
+      ) : (
+        <>
+          {/* Users section */}
+          <section className="mb-10">
+            <h2 className="mb-3 text-lg font-medium">Users</h2>
 
-  return (
-    <div className="mx-auto max-w-5xl px-6 py-8">
-      {toast.node}
-      {/* Header */}
-      <div className="mb-4 flex items-center gap-2">
-        <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            onClick={() => {
-              if (typeof window !== "undefined")
-                window.localStorage.removeItem("orgId");
-              location.reload();
-            }}
-            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-            title="Clear cached org and re-detect"
-          >
-            Reset org
-          </button>
-          <button
-            onClick={() => setShowInvite((v) => !v)}
-            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-          >
-            {showInvite ? "Close" : "Create User"}
-          </button>
-        </div>
-      </div>
+            {/* Invite panel */}
+            {showInvite && (
+              <form onSubmit={onInvite} className="mb-4 rounded-md border p-4">
+                <h3 className="mb-3 text-base font-medium">
+                  Invite a new user
+                </h3>
 
-      {/* Users section (collapsible open by default) */}
-      <details open className="rounded-lg border">
-        <summary className="cursor-pointer list-none px-4 py-3 text-base font-medium">
-          Users
-        </summary>
+                <label className="mb-2 block text-sm">Email</label>
+                <input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                />
 
-        <div className="border-t p-4">
-          {/* Invite panel */}
-          {showInvite && (
-            <div className="mb-6 rounded-lg border p-4">
-              <h2 className="mb-3 text-lg font-semibold">Invite a new user</h2>
-
-              <form
-                onSubmit={onInvite}
-                className="grid grid-cols-1 gap-3 md:grid-cols-3"
-              >
-                <label className="text-sm">
-                  <div>Email</div>
-                  <input
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                <label className="mt-4 mb-2 block text-sm">
+                  Name (optional)
                 </label>
+                <input
+                  type="text"
+                  value={inviteName}
+                  onChange={(e) => setInviteName(e.target.value)}
+                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                />
 
-                <label className="text-sm">
-                  <div>Name (optional)</div>
-                  <input
-                    value={inviteName}
-                    onChange={(e) => setInviteName(e.target.value)}
-                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
-
-                <div className="flex items-end">
+                <div className="mt-4 flex items-center gap-2">
                   <button
                     type="submit"
                     disabled={inviting}
@@ -829,219 +843,203 @@ export default function UsersAndRolesPage() {
                   >
                     {inviting ? "Creating…" : "Create invite"}
                   </button>
+
+                  {inviteLink && (
+                    <CopyField label="Invite link" value={inviteLink} />
+                  )}
                 </div>
               </form>
+            )}
 
-              {inviteLink && (
-                <div className="mt-3">
-                  <CopyField label="Invite link" value={inviteLink} />
+            {/* Filters */}
+            <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div>
+                <label className="mb-1 block text-sm">
+                  Search (name or email)
+                </label>
+                <input
+                  value={q}
+                  onChange={(e) => {
+                    setPage(1);
+                    setQ(e.target.value);
+                  }}
+                  className="h-9 w-72 rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                  aria-describedby="search-hint"
+                  placeholder="e.g. alice or @demo.test"
+                />
+                <div id="search-hint" className="mt-1 text-xs text-neutral-500">
+                  Type to filter by name or email
                 </div>
-              )}
-            </div>
-          )}
-
-          {/* Filters */}
-          <div className="mb-4 flex flex-wrap items-center gap-3">
-            <label className="text-sm">
-              <div>Search (name or email)</div>
-              <input
-                value={q}
-                onChange={(e) => {
-                  setPage(1);
-                  setQ(e.target.value);
-                }}
-                className="h-9 w-72 rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                aria-describedby="search-hint"
-                placeholder="e.g. alice or @demo.test"
-              />
-              <div id="search-hint" className="mt-1 text-xs text-gray-500">
-                Type to filter by name or email
               </div>
-            </label>
 
-            <label className="text-sm">
-              <div>Role slot</div>
-              <select
-                value={slot}
-                onChange={(e) => {
-                  setPage(1);
-                  setSlot(e.target.value);
-                }}
-                className="h-9 w-56 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="">All roles</option>
-                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                  const label = roleLabelBySlot.get(n)?.label ?? `Role ${n}`;
-                  return (
-                    <option key={n} value={n}>
-                      {label} (#{n})
+              <div>
+                <label className="mb-1 block text-sm">Role slot</label>
+                <select
+                  value={slot}
+                  onChange={(e) => {
+                    setPage(1);
+                    setSlot(e.target.value);
+                  }}
+                  className="h-9 w-56 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">All roles</option>
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                    const label = roleLabelBySlot.get(n)?.label ?? `Role ${n}`;
+                    return (
+                      <option key={n} value={String(n)}>
+                        {label} (#{n})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Page size</label>
+                <select
+                  value={String(pageSize)}
+                  onChange={(e) => {
+                    const v = Number(e.target.value) || 20;
+                    setPage(1);
+                    setPageSize(v);
+                  }}
+                  className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {[10, 20, 50].map((n) => (
+                    <option key={n} value={String(n)}>
+                      {n}
                     </option>
-                  );
-                })}
-              </select>
-            </label>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-            <label className="text-sm">
-              <div>Page size</div>
-              <select
-                value={pageSize}
-                onChange={(e) => {
-                  const v = Number(e.target.value) || 20;
-                  setPage(1);
-                  setPageSize(v);
-                }}
-                className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {[10, 20, 50].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="ml-auto text-sm text-gray-600">
+            <div className="mb-3 text-sm">
               {loading ? (
                 <span>Loading…</span>
               ) : error ? (
-                <span className="text-red-600">{error}</span>
+                <span className="text-red-700">{error}</span>
               ) : (
                 <span>{total} results</span>
               )}
             </div>
-          </div>
 
-          {/* Table */}
-          <div className="overflow-hidden rounded-lg border">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50">
-                <tr className="text-left">
-                  <th className="px-4 py-2 font-medium">Name</th>
-                  <th className="px-4 py-2 font-medium">Email</th>
-                  <th className="px-4 py-2 font-medium">Role</th>
-                  <th className="px-4 py-2 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {!loading && !error && (items?.length ?? 0) === 0 && (
-                  <tr>
-                    <td
-                      colSpan={4}
-                      className="px-4 py-6 text-center text-gray-500"
-                    >
-                      No members found. Try clearing filters.
-                    </td>
-                  </tr>
-                )}
+            {!loading && !error && (items?.length ?? 0) === 0 && (
+              <div className="rounded-md border border-dashed p-8 text-center text-sm text-neutral-600">
+                No members found. Try clearing filters.
+              </div>
+            )}
 
-                {(items ?? []).map((r) => {
-                  const isBusy = !!pending[r.id];
-                  const currentSlot = r.slot ?? undefined;
-                  const label =
-                    r.roleLabel ?? getLabelForSlot(r.slot ?? undefined);
-                  const active =
-                    typeof r.roleActive === "boolean"
-                      ? r.roleActive
-                      : currentSlot
-                      ? roleLabelBySlot.get(currentSlot)?.isActive ?? true
-                      : true;
+            <div className="divide-y rounded-md border">
+              {(items ?? []).map((r) => {
+                const isBusy = !!pending[r.id];
+                const currentSlot = r.slot ?? undefined;
+                const label =
+                  r.roleLabel ?? getLabelForSlot(r.slot ?? undefined);
+                const active =
+                  typeof r.roleActive === "boolean"
+                    ? r.roleActive
+                    : currentSlot
+                    ? roleLabelBySlot.get(currentSlot)?.isActive ?? true
+                    : true;
+                const invited = (r.isInvited ?? r.invited) === true;
 
-                  const invited = (r.isInvited ?? r.invited) === true;
+                return (
+                  <div
+                    key={r.id}
+                    className="grid grid-cols-12 items-center gap-2 p-3"
+                  >
+                    <div className="col-span-3">
+                      <div className="font-medium">{r.name || "—"}</div>
+                      <div className="mt-0.5 text-xs text-neutral-500">
+                        ID: {r.id}
+                      </div>
+                      {invited && (
+                        <span className="mt-1 inline-flex items-center rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-800">
+                          Invited
+                        </span>
+                      )}
+                    </div>
 
-                  return (
-                    <tr key={r.id}>
-                      <td className="px-4 py-2 align-top">
-                        <div className="font-medium">{r.name || "—"}</div>
-                        <div className="mt-0.5 text-xs text-gray-500">
-                          ID: {r.id}
-                        </div>
-                        {invited && (
-                          <span className="mt-1 inline-block rounded-full border px-2 py-0.5 text-xs text-gray-700">
-                            Invited
-                          </span>
+                    <div className="col-span-3">
+                      <a
+                        href={`mailto:${r.email}`}
+                        className="text-sm underline"
+                      >
+                        {r.email}
+                      </a>
+                    </div>
+
+                    <div className="col-span-3">
+                      <div className="text-sm">
+                        {label}{" "}
+                        {typeof r.slot === "number" && (
+                          <span className="text-neutral-500"> (#{r.slot})</span>
                         )}
-                      </td>
-                      <td className="px-4 py-2 align-top">
-                        <a
-                          href={`mailto:${r.email}`}
-                          className="text-blue-600 underline"
+                      </div>
+                      <div className="mt-1">
+                        <label className="sr-only" htmlFor={`role-${r.id}`}>
+                          Change role
+                        </label>
+                        <select
+                          id={`role-${r.id}`}
+                          onChange={(e) => onChangeSlot(r.id, e.target.value)}
+                          className={classNames(
+                            "h-9 w-40 rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
+                            isBusy && "cursor-not-allowed opacity-50"
+                          )}
+                          defaultValue=""
+                          aria-label="Change role"
                         >
-                          {r.email}
-                        </a>
-                      </td>
-                      <td className="px-4 py-2 align-top">
-                        <div>
-                          <span className="inline-block rounded-full border px-2 py-0.5 text-xs text-gray-700">
-                            {label}{" "}
-                            {typeof r.slot === "number" && (
-                              <span className="text-gray-500">#{r.slot}</span>
-                            )}
-                          </span>
-                        </div>
-                        <div className="mt-2">
-                          <label className="sr-only" htmlFor={`slot-${r.id}`}>
-                            Change role
-                          </label>
-                          <select
-                            id={`slot-${r.id}`}
-                            onChange={(e) => onChangeSlot(r.id, e.target.value)}
-                            className={classNames(
-                              "h-9 w-40 rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
-                              isBusy && "cursor-not-allowed opacity-50"
-                            )}
-                            defaultValue=""
-                          >
-                            <option value="" disabled>
-                              Select role…
-                            </option>
-                            {Array.from({ length: 10 }, (_, i) => i + 1).map(
-                              (s) => (
-                                <option key={s} value={s}>
-                                  {getLabelForSlot(s)} (#{s})
-                                </option>
-                              )
-                            )}
-                          </select>
-                        </div>
-                      </td>
-                      <td className="px-4 py-2 align-top">
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => onCopyInvite(r.email, r.id)}
-                            disabled={isBusy}
-                            className={classNames(
-                              "h-9 rounded-md border px-3 text-sm",
-                              isBusy
-                                ? "cursor-not-allowed opacity-50"
-                                : "hover:bg-gray-50"
-                            )}
-                            title="Create an invite link for this email and copy it"
-                          >
-                            Copy invite
-                          </button>
-                          <button
-                            onClick={() => onRemove(r.id, r.name || r.email)}
-                            disabled={isBusy}
-                            className={classNames(
-                              "h-9 rounded-md border px-3 text-sm",
-                              isBusy
-                                ? "cursor-not-allowed opacity-50"
-                                : "hover:bg-gray-50"
-                            )}
-                            aria-label={`Remove ${r.name || r.email} from org`}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                          <option value="" disabled>
+                            Select role…
+                          </option>
+                          {Array.from({ length: 10 }, (_, i) => i + 1).map(
+                            (s) => (
+                              <option key={s} value={String(s)}>
+                                {getLabelForSlot(s)} (#{s})
+                              </option>
+                            )
+                          )}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="col-span-3 flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => onCopyInvite(r.email, r.id)}
+                        disabled={isBusy}
+                        className={classNames(
+                          "h-9 rounded-md border px-3 text-sm",
+                          isBusy
+                            ? "cursor-not-allowed opacity-50"
+                            : "hover:bg-gray-50"
+                        )}
+                        title="Create an invite link for this email and copy it"
+                      >
+                        Copy invite
+                      </button>
+                      <button
+                        onClick={() => onRemove(r.id, r.name || r.email)}
+                        disabled={isBusy}
+                        className={classNames(
+                          "h-9 rounded-md border px-3 text-sm",
+                          isBusy
+                            ? "cursor-not-allowed opacity-50"
+                            : "hover:bg-gray-50"
+                        )}
+                        aria-label={`Remove ${r.name || r.email} from org`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
             {/* Pagination */}
-            <div className="flex items-center justify-between px-4 py-3">
+            <div className="mt-3 flex items-center justify-between">
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page <= 1 || loading}
@@ -1054,9 +1052,11 @@ export default function UsersAndRolesPage() {
               >
                 Previous
               </button>
+
               <div className="text-sm">
                 Page {page} of {totalPages}
               </div>
+
               <button
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages || loading}
@@ -1070,176 +1070,217 @@ export default function UsersAndRolesPage() {
                 Next
               </button>
             </div>
-          </div>
-        </div>
-      </details>
+          </section>
 
-      {/* Roles section with tri-state permissions (slot #1 hides Active + Edit permissions) */}
-      <details className="mt-6 rounded-lg border">
-        <summary className="cursor-pointer list-none px-4 py-3 text-base font-medium">
-          Roles management
-        </summary>
+          {/* Roles section */}
+          <section aria-labelledby="roles-heading">
+            <h2 id="roles-heading" className="mb-3 text-lg font-medium">
+              Roles management
+            </h2>
 
-        {!rolesRes || !permissionKeys ? (
-          <div className="border-t p-4 text-sm text-gray-600">
-            Loading roles…
-          </div>
-        ) : (
-          <div className="border-t p-4">
-            {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
-              const orig = originalFor(slotNum) || {
-                slot: slotNum,
-                label: `Role ${slotNum}`,
-                isActive: true,
-                overrides: [],
-              };
-              const draft = draftFor(slotNum);
-              const dirty = isDirty(slotNum);
-              const busy = !!roleSaving[slotNum];
-              const isAdmin = slotNum === 1;
+            {!rolesRes || !permissionKeys ? (
+              <div className="rounded-md border p-4 text-sm">
+                {rolesError ? (
+                  <span className="text-red-700">{rolesError}</span>
+                ) : (
+                  <span className="text-neutral-600">Loading roles…</span>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
+                  const orig = originalFor(slotNum) || {
+                    slot: slotNum,
+                    label: `Role ${slotNum}`,
+                    isActive: true,
+                    overrides: [],
+                  };
+                  const draft = draftFor(slotNum);
+                  const dirty = isDirty(slotNum);
+                  const busy = !!roleSaving[slotNum];
+                  const isAdmin = slotNum === 1;
+                  const bookableOn = isBookable(draft);
 
-              return (
-                <div key={slotNum} className="mb-6 rounded-md border p-4">
-                  <div className="mb-3 flex items-center gap-2">
-                    <div className="text-sm font-medium">#{slotNum}</div>
-
-                    <label className="flex-1 text-sm">
-                      <div>Label for role #{slotNum}</div>
-                      <input
-                        value={draft.label}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setRoleDrafts((m) =>
-                            new Map(m).set(slotNum, { ...draft, label: v })
-                          );
-                          setRoleDirty((d) => ({ ...d, [slotNum]: true }));
-                        }}
-                        className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </label>
-
-                    {/* For slot #1 (Admin), hide Active + Edit permissions */}
-                    {!isAdmin && (
-                      <>
-                        <label className="flex items-center gap-2 text-sm">
+                  return (
+                    <div key={slotNum} className="rounded-md border p-4">
+                      <div className="mb-3 flex items-center gap-3">
+                        <div className="text-sm font-medium">#{slotNum}</div>
+                        <label className="flex-1">
+                          <span className="mb-1 block text-sm">
+                            Label for role #{slotNum}
+                          </span>
                           <input
-                            type="checkbox"
-                            checked={draft.isActive}
+                            value={draft.label}
                             onChange={(e) => {
-                              const v = e.target.checked;
+                              const v = e.target.value;
                               setRoleDrafts((m) =>
-                                new Map(m).set(slotNum, {
-                                  ...draft,
-                                  isActive: v,
-                                })
+                                new Map(m).set(slotNum, { ...draft, label: v })
                               );
                               setRoleDirty((d) => ({ ...d, [slotNum]: true }));
                             }}
-                            className="h-5 w-5"
+                            className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                           />
-                          Active
                         </label>
 
-                        <button
-                          onClick={() =>
-                            setPermOpen((o) => ({
-                              ...o,
-                              [slotNum]: !o[slotNum],
-                            }))
-                          }
-                          className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                        >
-                          {permOpen[slotNum]
-                            ? "Hide permissions"
-                            : "Edit permissions"}
-                        </button>
-                      </>
-                    )}
-
-                    <button
-                      onClick={() => saveRole(slotNum)}
-                      disabled={busy || !dirty}
-                      className={classNames(
-                        "ml-auto h-9 rounded-md border px-3 text-sm",
-                        busy
-                          ? "cursor-not-allowed opacity-50"
-                          : dirty
-                          ? "hover:bg-gray-50"
-                          : "opacity-50"
-                      )}
-                    >
-                      {busy ? "Saving…" : dirty ? "Save" : "Saved"}
-                    </button>
-                  </div>
-
-                  {/* Permissions editor (hidden for Admin/slot #1) */}
-                  {!isAdmin && permOpen[slotNum] && (
-                    <div className="mt-3 rounded-md border p-3">
-                      <p className="mb-3 text-sm text-gray-600">
-                        Choose <strong>Allow</strong> to add a permission,{" "}
-                        <strong>Deny</strong> to explicitly remove it.{" "}
-                        <strong>Inherit</strong> uses the slot’s template.
-                      </p>
-                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                        {permissionKeys.map((k) => {
-                          const value = draft.permState[k] || "inherit";
-                          const name = `perm-${slotNum}-${k}`;
-                          return (
-                            <label
-                              key={k}
-                              className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"
-                            >
-                              <span className="truncate">{k}</span>
-                              <span className="flex items-center gap-2">
-                                {(["inherit", "allow", "deny"] as const).map(
-                                  (opt) => (
-                                    <label
-                                      key={opt}
-                                      className="flex items-center gap-1"
-                                    >
-                                      <input
-                                        type="radio"
-                                        name={name}
-                                        checked={value === opt}
-                                        onChange={() => {
-                                          setRoleDrafts((m) =>
-                                            new Map(m).set(slotNum, {
-                                              ...draft,
-                                              permState: {
-                                                ...draft.permState,
-                                                [k]: opt,
-                                              },
-                                            })
-                                          );
-                                          setRoleDirty((d) => ({
-                                            ...d,
-                                            [slotNum]: true,
-                                          }));
-                                        }}
-                                      />
-                                      {opt}
-                                    </label>
-                                  )
-                                )}
-                              </span>
+                        {!isAdmin && (
+                          <>
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={draft.isActive}
+                                onChange={(e) => {
+                                  const v = e.target.checked;
+                                  setRoleDrafts((m) =>
+                                    new Map(m).set(slotNum, {
+                                      ...draft,
+                                      isActive: v,
+                                    })
+                                  );
+                                  setRoleDirty((d) => ({
+                                    ...d,
+                                    [slotNum]: true,
+                                  }));
+                                }}
+                                className="h-5 w-5"
+                              />
+                              <span className="text-sm">Active</span>
                             </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
 
-            <p className="text-xs text-gray-600">
-              Role #1 (Admin) is always active and has all permissions. You can
-              rename it, but you can’t disable it or change its permissions.
-              Changes to other roles take effect immediately after save.
-            </p>
-          </div>
-        )}
-      </details>
-    </div>
+                            <label
+                              className={classNames(
+                                "inline-flex items-center gap-2",
+                                !canShowBookable && "opacity-60"
+                              )}
+                              title={
+                                canShowBookable
+                                  ? "When ON, this role is listed internally and inviteable to bookings."
+                                  : "Bookable toggle unavailable: required permission keys are missing in this org."
+                              }
+                            >
+                              <input
+                                type="checkbox"
+                                disabled={!canShowBookable}
+                                checked={canShowBookable ? bookableOn : false}
+                                onChange={(e) =>
+                                  setBookable(slotNum, e.target.checked)
+                                }
+                                className="h-5 w-5"
+                                aria-describedby={`bookable-hint-${slotNum}`}
+                              />
+                              <span className="text-sm">Bookable Talent</span>
+                            </label>
+
+                            <button
+                              onClick={() =>
+                                setPermOpen((o) => ({
+                                  ...o,
+                                  [slotNum]: !o[slotNum],
+                                }))
+                              }
+                              className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                            >
+                              {permOpen[slotNum]
+                                ? "Hide permissions"
+                                : "Edit permissions"}
+                            </button>
+                          </>
+                        )}
+
+                        <button
+                          onClick={() => saveRole(slotNum)}
+                          disabled={busy || !dirty}
+                          className={classNames(
+                            "ml-auto h-9 rounded-md border px-3 text-sm",
+                            busy
+                              ? "cursor-not-allowed opacity-50"
+                              : dirty
+                              ? "hover:bg-gray-50"
+                              : "opacity-50"
+                          )}
+                        >
+                          {busy ? "Saving…" : dirty ? "Save" : "Saved"}
+                        </button>
+                      </div>
+
+                      {!isAdmin && permOpen[slotNum] && (
+                        <div className="rounded-md border p-3">
+                          <p className="mb-2 text-xs text-neutral-600">
+                            Choose <strong>Allow</strong> to add a permission,{" "}
+                            <strong>Deny</strong> to explicitly remove it.{" "}
+                            <strong>Inherit</strong> uses the slot’s template.
+                          </p>
+
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            {permissionKeys.map((k) => {
+                              const value = draft.permState[k] || "inherit";
+                              const name = `perm-${slotNum}-${k}`;
+                              return (
+                                <div
+                                  key={k}
+                                  className="flex items-center gap-3"
+                                >
+                                  <div
+                                    className="w-56 truncate text-sm"
+                                    title={k}
+                                  >
+                                    {k}
+                                  </div>
+
+                                  <div role="radiogroup" aria-labelledby={name}>
+                                    {(
+                                      ["inherit", "allow", "deny"] as const
+                                    ).map((opt) => (
+                                      <label
+                                        key={opt}
+                                        className="mr-3 inline-flex items-center gap-1 text-sm"
+                                      >
+                                        <input
+                                          type="radio"
+                                          name={name}
+                                          checked={value === opt}
+                                          onChange={() => {
+                                            setRoleDrafts((m) =>
+                                              new Map(m).set(slotNum, {
+                                                ...draft,
+                                                permState: {
+                                                  ...draft.permState,
+                                                  [k]: opt,
+                                                },
+                                              })
+                                            );
+                                            setRoleDirty((d) => ({
+                                              ...d,
+                                              [slotNum]: true,
+                                            }));
+                                          }}
+                                        />
+                                        <span className="capitalize">
+                                          {opt}
+                                        </span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <p className="text-xs text-neutral-600">
+                  <strong>Role #1 (Admin)</strong> is always active and has all
+                  permissions. You can rename it, but you can’t disable it or
+                  change its permissions. Changes to other roles take effect
+                  immediately after save.
+                </p>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+    </main>
   );
 }
