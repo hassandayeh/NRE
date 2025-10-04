@@ -90,7 +90,7 @@ async function canManageSettingsForOrg(userId: string, orgId: string) {
   return eff.perms.has("settings:manage") || eff.perms.has("roles:manage");
 }
 
-// ---------- GET /api/org/roles?orgId=... ----------
+// ---------- GET /api/org/roles?orgId=... [&probe=1] ----------
 export async function GET(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -103,6 +103,8 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const orgId = (searchParams.get("orgId") || "").trim();
+    const probe = (searchParams.get("probe") || "").trim();
+
     if (!orgId) {
       return NextResponse.json(
         { ok: false, error: "orgId is required" },
@@ -112,6 +114,23 @@ export async function GET(req: NextRequest) {
 
     // Unified gate (settings:manage || roles:manage)
     const canManage = await canManageSettingsForOrg(viewer.userId, orgId);
+
+    // --- FAST PATH: probe mode (used by /modules/settings to decide show/hide) ---
+    // Returns immediately with a tiny payload; avoids the heavy 10-slot load.
+    if (probe === "1" || probe.toLowerCase() === "true") {
+      if (!canManage) {
+        return NextResponse.json(
+          { ok: false, error: "Forbidden" },
+          { status: 403 }
+        );
+      }
+      return NextResponse.json(
+        { ok: true, orgId, canManageSettings: true },
+        { status: 200 }
+      );
+    }
+
+    // --- FULL PAYLOAD (unchanged behavior) ---
     if (!canManage) {
       return NextResponse.json(
         { ok: false, error: "Forbidden" },

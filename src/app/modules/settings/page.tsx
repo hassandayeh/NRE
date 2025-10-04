@@ -2,12 +2,11 @@
 
 /**
  * Settings (autosave)
- * - FIX: derive ?orgId=... synchronously from the current URL using useSearchParams()
- *   and append it to BOTH:
- *     • Users & Roles
- *     • Modes & access
- * - No effects/refs/profile calls are used to build these hrefs.
- * - Everything else is unchanged.
+ * - Fast load for Organization section:
+ *   * prefers localStorage.orgId → URL ?orgId → /api/auth/session (in that order)
+ *   * probes /api/org/roles?orgId=...&probe=1 to decide show/hide
+ * - Always shows the "Organization profile →" link when the section is visible
+ * - Feature toggles / appearance remain unchanged
  */
 
 import * as React from "react";
@@ -28,13 +27,12 @@ type PartialTogglesFromApi = Partial<Toggles> & { [k: string]: unknown };
 /* ---------- Toast ---------- */
 function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
   return (
-    <div className="fixed right-4 top-4 z-50 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 shadow-sm">
+    <div className="fixed right-4 top-4 z-50 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800 shadow">
       {props.children}
       {props.onClose && (
         <button
-          type="button"
           onClick={props.onClose}
-          className="ml-3 inline-flex rounded-md px-1 text-emerald-900/70 hover:text-emerald-900"
+          className="ml-3 rounded border px-2 py-0.5 text-xs text-emerald-900 hover:bg-emerald-100"
           aria-label="Dismiss"
         >
           ✕
@@ -59,11 +57,7 @@ function toBool(v: unknown, fallback: boolean): boolean {
  * Page
  * =======================================================*/
 export default function SettingsPage() {
-  return (
-    <main className="mx-auto max-w-5xl px-4 py-10">
-      <SettingsInner />
-    </main>
-  );
+  return <SettingsInner />;
 }
 
 /* ----------
@@ -81,23 +75,91 @@ function SettingsInner() {
     allowOnline: true,
   });
 
-  // Show one green toast for any successful change
+  // Green toast for successful change
   const [toast, setToast] = React.useState<string | null>(null);
 
   // Prevent double-submit per key
   const savingRef = React.useRef<Set<keyof Toggles>>(new Set());
 
-  // Owner check → only controls "Organization profile" link visibility
-  const [canEditOrg, setCanEditOrg] = React.useState(false);
-
-  // ========== Synchronous orgId passthrough for links ==========
+  // ========== OrgId discovery (fast) ==========
   const searchParams = useSearchParams();
-  const orgQ = React.useMemo(() => {
-    const id = searchParams.get("orgId");
-    return id ? `?orgId=${encodeURIComponent(id)}` : "";
-  }, [searchParams]);
-  // ============================================================
+  const orgIdFromUrl = searchParams.get("orgId");
+  const [orgIdForProbe, setOrgIdForProbe] = React.useState<string | null>(
+    () => {
+      // Prefer localStorage first (sync, fastest)
+      if (typeof window !== "undefined") {
+        const cached = window.localStorage.getItem("orgId");
+        if (cached && cached.length >= 18) return cached;
+      }
+      // Fall back to URL if present
+      return orgIdFromUrl || null;
+    }
+  );
 
+  // If we still don't have orgId (no LS & no URL), probe session once.
+  React.useEffect(() => {
+    if (orgIdForProbe) return;
+    let disposed = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/auth/session", { cache: "no-store" });
+        if (!r.ok) throw new Error("no session");
+        const s: any = await r.json().catch(() => ({}));
+        const id: string =
+          (s?.orgId as string) ||
+          (s?.user?.orgId as string) ||
+          (s?.user?.org?.id as string) ||
+          "";
+        if (!disposed) setOrgIdForProbe(id || null);
+      } catch {
+        if (!disposed) setOrgIdForProbe(null);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [orgIdForProbe]);
+
+  // Build ?orgId= for links synchronously (URL wins here so deep-links keep working)
+  const orgQ = React.useMemo(() => {
+    const id = orgIdFromUrl || orgIdForProbe || "";
+    return id ? `?orgId=${encodeURIComponent(id)}` : "";
+  }, [orgIdFromUrl, orgIdForProbe]);
+
+  // ========== Fast permission probe ==========
+  // null = probing, true = show section, false = hide
+  const [canManageSettings, setCanManageSettings] = React.useState<
+    boolean | null
+  >(null);
+
+  React.useEffect(() => {
+    let disposed = false;
+    (async () => {
+      // If we have no orgId at all, hide quickly (no spinner)
+      if (!orgIdForProbe) {
+        setCanManageSettings(false);
+        return;
+      }
+      try {
+        // Fast path probe (no heavy role-slot loads)
+        const res = await fetch(
+          `/api/org/roles?orgId=${encodeURIComponent(orgIdForProbe)}&probe=1`,
+          { cache: "no-store" }
+        );
+        if (disposed) return;
+        if (res.status === 200) setCanManageSettings(true);
+        else if (res.status === 403) setCanManageSettings(false);
+        else setCanManageSettings(false);
+      } catch {
+        if (!disposed) setCanManageSettings(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [orgIdForProbe]);
+
+  // ============================================================
   // Load toggles (accepts flat or { toggles } shapes)
   React.useEffect(() => {
     let ignore = false;
@@ -134,23 +196,6 @@ function SettingsInner() {
     };
   }, []);
 
-  // Owner capability probe (silent): if GET /api/org/profile is 200 → show org-profile link
-  React.useEffect(() => {
-    let disposed = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/org/profile", { cache: "no-store" });
-        if (disposed) return;
-        setCanEditOrg(res.ok);
-      } catch {
-        if (!disposed) setCanEditOrg(false);
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, []);
-
   // Sync after a successful save
   function applyBodyDatasets(next: Toggles) {
     if (typeof document === "undefined") return;
@@ -162,7 +207,7 @@ function SettingsInner() {
     ds.allowOnline = String(next.allowOnline);
   }
 
-  // Local theme switch without relying on a provider
+  // Local theme switch without a provider
   function chooseTheme(next: "light" | "dark") {
     if (typeof document !== "undefined") {
       const root = document.documentElement;
@@ -221,113 +266,99 @@ function SettingsInner() {
   return (
     <>
       {/* Title + Back */}
-      <header className="mb-6">
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <div className="mt-2">
-          <Link
-            href="/modules/bookings"
-            className="text-sm text-neutral-600 underline underline-offset-4 hover:text-neutral-800"
-          >
-            ← Back to bookings
-          </Link>
-        </div>
-      </header>
+      <main className="mx-auto max-w-5xl px-4 py-8">
+        <h1 className="mb-6 text-2xl font-semibold tracking-tight">Settings</h1>
+        <Link
+          href="/modules/bookings"
+          className="mb-6 inline-block text-sm underline"
+        >
+          &larr; Back to bookings
+        </Link>
 
-      {/* ========== Organization (ALWAYS visible) ========== */}
-      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900">Organization</h2>
-        <p className="mt-1 text-sm text-neutral-600">
-          Manage org users and profile.
-        </p>
+        {/* ========== Organization (fast gated by probe) ========== */}
+        {canManageSettings ? (
+          <section className="mb-6 rounded-lg border bg-white p-4 shadow-sm">
+            <h2 className="mb-1 text-lg font-medium">Organization</h2>
+            <p className="mb-3 text-sm text-neutral-600">
+              Manage org users and profile.
+            </p>
 
-        <div className="mt-4 flex flex-wrap gap-3">
-          {/* Users & Roles — appends ?orgId=... if present on current URL */}
-          <Link
-            href={`/modules/settings/users${orgQ}`}
-            className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
-          >
-            Users &amp; Roles
-          </Link>
-
-          {/* Modes & access — mirrors the exact same ?orgId=... derivation */}
-          <Link
-            href={`/modules/settings/modes-access${orgQ}`}
-            className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
-          >
-            Modes & access
-          </Link>
-          {/* Org profile link is owner-only */}
-          {canEditOrg && (
             <Link
-              href="/modules/settings/org-profile"
-              className="inline-flex h-9 items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm hover:bg-neutral-50"
+              href={`/modules/settings/users${orgQ}`}
+              className="mr-2 inline-flex h-9 items-center rounded-md border px-3 text-sm hover:bg-gray-50"
             >
-              Open organization profile →
+              Users &amp; Roles
             </Link>
-          )}
-        </div>
-      </section>
 
-      {/* ========== Org Feature Toggles (autosave) ========== */}
-      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900">
-          Org Feature Toggles
-        </h2>
-        <p className="mt-1 text-sm text-neutral-600">
-          Control which optional fields appear on the booking form.
-        </p>
+            <Link
+              href={`/modules/settings/modes-access${orgQ}`}
+              className="mr-2 inline-flex h-9 items-center rounded-md border px-3 text-sm hover:bg-gray-50"
+            >
+              Modes &amp; access
+            </Link>
 
-        {loading ? (
-          <p className="mt-3 text-sm text-neutral-600">Loading…</p>
-        ) : (
-          <>
-            {loadError && (
-              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                {loadError}
-              </div>
-            )}
+            <div className="mt-3">
+              <Link
+                href={`/modules/settings/org-profile${orgQ}`}
+                className="text-sm underline"
+              >
+                Organization profile &rarr;
+              </Link>
+            </div>
+          </section>
+        ) : null}
 
-            <div className="mt-2 space-y-3">
+        {/* ========== Org Feature Toggles (autosave) ========== */}
+        <section className="mb-6 rounded-lg border bg-white p-4 shadow-sm">
+          <h2 className="mb-1 text-lg font-medium">Org Feature Toggles</h2>
+          <p className="mb-3 text-sm text-neutral-600">
+            Control which optional fields appear on the booking form.
+          </p>
+
+          {loading ? (
+            <div className="rounded-md border p-4 text-sm">Loading…</div>
+          ) : (
+            <>
+              {loadError && (
+                <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  {loadError}
+                </div>
+              )}
+
               <ToggleRow
                 label="Show program name"
                 description="Display the program name on booking forms."
                 checked={toggles.showProgramName}
                 onChange={(v) => saveToggle("showProgramName", v)}
               />
-
               <ToggleRow
                 label="Show host name"
                 description="Display the host name on booking forms."
                 checked={toggles.showHostName}
                 onChange={(v) => saveToggle("showHostName", v)}
               />
-
               <ToggleRow
                 label="Show talking points"
                 description="Display an area for talking points."
                 checked={toggles.showTalkingPoints}
                 onChange={(v) => saveToggle("showTalkingPoints", v)}
               />
-            </div>
 
-            <p className="mt-3 text-xs text-neutral-500">
-              Tip: Changes apply immediately. The Booking form reads flags from{" "}
-              <code>document.body.dataset</code> on mount.
-            </p>
-          </>
-        )}
-      </section>
+              <p className="mt-2 text-xs text-neutral-500">
+                Tip: Changes apply immediately. The Booking form reads flags
+                from <code>document.body.dataset</code> on mount.
+              </p>
+            </>
+          )}
+        </section>
 
-      {/* ========== Appearance Types (autosave) ========== */}
-      <section className="mb-6 rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900">
-          Appearance Types
-        </h2>
-        <p className="mt-1 text-sm text-neutral-600">
-          Choose which appearance types are available to your team.
-        </p>
+        {/* ========== Appearance Types (autosave) ========== */}
+        <section className="mb-6 rounded-lg border bg-white p-4 shadow-sm">
+          <h2 className="mb-2 text-lg font-medium">Appearance Types</h2>
+          <p className="mb-3 text-sm text-neutral-600">
+            Choose which appearance types are available to your team.
+          </p>
 
-        <div className="mt-3 space-y-3">
           <ToggleRow
             label="Allow in-person"
             checked={toggles.allowInPerson}
@@ -338,37 +369,35 @@ function SettingsInner() {
             checked={toggles.allowOnline}
             onChange={(v) => saveToggle("allowOnline", v)}
           />
-        </div>
-      </section>
+        </section>
 
-      {/* ========== Theme (local) ========== */}
-      <section className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900">Appearance</h2>
-        <p className="mt-1 text-sm text-neutral-600">
-          Choose your theme for this device.
-        </p>
+        {/* ========== Theme (local) ========== */}
+        <section className="rounded-lg border bg-white p-4 shadow-sm">
+          <h2 className="mb-2 text-lg font-medium">Appearance</h2>
+          <p className="mb-3 text-sm text-neutral-600">
+            Choose your theme for this device.
+          </p>
 
-        <div className="mt-3 flex gap-2">
-          <button
-            type="button"
-            onClick={() => chooseTheme("light")}
-            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
-          >
-            Light (default)
-          </button>
-          <button
-            type="button"
-            onClick={() => chooseTheme("dark")}
-            className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
-          >
-            Dark
-          </button>
-        </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => chooseTheme("light")}
+              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+            >
+              Light (default)
+            </button>
+            <button
+              onClick={() => chooseTheme("dark")}
+              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+            >
+              Dark
+            </button>
+          </div>
 
-        <p className="mt-2 text-xs text-neutral-500">
-          Stored locally. We can wire this to your global provider later.
-        </p>
-      </section>
+          <p className="mt-2 text-xs text-neutral-500">
+            Stored locally. We can wire this to your global provider later.
+          </p>
+        </section>
+      </main>
 
       {/* Green toast only */}
       {portalReady && toast
@@ -393,18 +422,18 @@ function ToggleRow(props: {
   React.useEffect(() => setLocal(props.checked), [props.checked]);
 
   return (
-    <div className="flex items-start justify-between gap-6 rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
-      <div>
-        <label htmlFor={id} className="text-sm font-medium text-neutral-900">
+    <div className="mb-3 flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+      <div className="min-w-0">
+        <label htmlFor={id} className="block text-sm font-medium">
           {props.label}
         </label>
         {props.description && (
-          <p className="mt-1 text-xs text-neutral-600">{props.description}</p>
+          <p className="mt-0.5 text-xs text-neutral-600">{props.description}</p>
         )}
       </div>
+
       <button
         id={id}
-        type="button"
         onClick={() => {
           const next = !local;
           setLocal(next);
@@ -416,7 +445,7 @@ function ToggleRow(props: {
         aria-pressed={local}
       >
         <span
-          className={`block h-5 w-5 translate-x-0 rounded-full bg-white transition ${
+          className={`block h-5 w-5 translate-x-0.5 rounded-full bg-white transition ${
             local ? "translate-x-5" : ""
           }`}
         />
