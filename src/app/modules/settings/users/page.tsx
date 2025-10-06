@@ -16,6 +16,7 @@ type UserItem = {
   invited?: boolean | null; // legacy
   isInvited?: boolean | null; // newer
 };
+
 type UsersResponse = {
   items: UserItem[];
   page: number;
@@ -29,6 +30,7 @@ type RoleSlot = {
   isActive: boolean;
   overrides: { key: string; allowed: boolean }[];
 };
+
 type RolesResponse = {
   ok?: boolean;
   orgId: string;
@@ -36,19 +38,19 @@ type RolesResponse = {
   slots: RoleSlot[];
 };
 
-/** What the invite API might return (supporting old/new keys) */
+/** Invite API may vary across routes; normalize defensively */
 type InviteApiResponse = {
   // new
-  inviteUrl?: string; // <— what our route returns now
+  inviteUrl?: string;
+  // legacy / alternates
   acceptUrl?: string;
-  // legacy / alternate
   invitePath?: string;
   url?: string;
   path?: string;
   link?: string;
   token?: string;
   status?: "ok" | "already_member" | string;
-  member?: any;
+  member?: UserItem;
   [k: string]: unknown;
 };
 
@@ -71,24 +73,20 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 /** Copyable, single-line, truncated field */
 function CopyField(props: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
-
   return (
-    <div className="flex items-center gap-2">
-      <span className="truncate text-sm text-neutral-700">{props.label}</span>
-      <code className="max-w-[560px] grow truncate rounded border bg-gray-50 px-2 py-1 text-xs">
+    <div className="mt-3 flex basis-full items-center gap-2 overflow-hidden">
+      <span className="shrink-0 text-sm text-neutral-700">{props.label}</span>
+      <code className="block flex-1 min-w-0 max-w-full truncate rounded bg-neutral-50 px-2 py-1 text-xs text-neutral-700">
         {props.value}
       </code>
       <button
-        type="button" // ← critical: prevent form submit/regeneration
         onClick={async (e) => {
           e.preventDefault();
           try {
             await navigator.clipboard.writeText(props.value);
             setCopied(true);
             setTimeout(() => setCopied(false), 1200);
-          } catch {
-            // ignore clipboard failures (non-https etc.)
-          }
+          } catch {}
         }}
         className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
       >
@@ -101,13 +99,11 @@ function CopyField(props: { label: string; value: string }) {
 function useToast() {
   const [msg, setMsg] = React.useState<string | null>(null);
   const [variant, setVariant] = React.useState<"ok" | "err">("ok");
-
   React.useEffect(() => {
     if (!msg) return;
     const t = setTimeout(() => setMsg(null), 2500);
     return () => clearTimeout(t);
   }, [msg]);
-
   return {
     showOk: (m: string) => {
       setVariant("ok");
@@ -122,7 +118,9 @@ function useToast() {
         role="status"
         className={cx(
           "fixed right-4 top-4 z-50 rounded-md px-3 py-2 text-sm shadow",
-          variant === "ok" ? "bg-green-600 text-white" : "bg-red-600 text-white"
+          variant === "ok"
+            ? "bg-emerald-50 text-emerald-700"
+            : "bg-rose-50 text-rose-700"
         )}
       >
         {msg}
@@ -237,7 +235,7 @@ const BOOKABLE_KEYS = [
   "booking:inviteable",
 ] as const;
 /** Widened to string to avoid TS error when checking arbitrary permission keys */
-const HIDDEN_PERMISSION_KEYS: ReadonlySet<string> = new Set<string>(
+const HIDDEN_PERMISSION_KEYS: ReadonlySet<string> = new Set(
   BOOKABLE_KEYS as readonly string[]
 );
 
@@ -309,7 +307,7 @@ export default function UsersAndRolesPage() {
   const [roleDrafts, setRoleDrafts] = React.useState<Map<number, RoleDraft>>(
     new Map()
   );
-  const [roleDirty, setRoleDirty] = React.useState<Record<number, boolean>>({});
+  const [roleDirty, setRoleDirty] = React.useState<Record<number, boolean>>();
   const [roleSaving, setRoleSaving] = React.useState<Record<number, boolean>>(
     {}
   );
@@ -376,45 +374,47 @@ export default function UsersAndRolesPage() {
   }, [router, orgId, q, slot, page, pageSize]);
 
   const retried403 = React.useRef(false);
+  const refreshUsers = React.useCallback(async () => {
+    if (!orgId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getJSON<UsersResponse>(apiUrl);
+      setItems(data.items ?? []);
+      setTotal(Number(data.total ?? 0));
+    } catch (err: any) {
+      const msg = err instanceof Error ? err.message : "Failed to load users.";
+      if (
+        !retried403.current &&
+        (msg.startsWith("403") || msg.startsWith("401"))
+      ) {
+        retried403.current = true;
+        if (typeof window !== "undefined")
+          window.localStorage.removeItem("orgId");
+        const re = await detectOrgId();
+        if (re && re !== orgId) {
+          setOrgId(re);
+          return;
+        }
+      }
+      setError(msg);
+      setItems([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiUrl, orgId]);
+
   React.useEffect(() => {
     if (!orgId) return;
     let alive = true;
-    setLoading(true);
-    setError(null);
     (async () => {
-      try {
-        const data = await getJSON<UsersResponse>(apiUrl);
-        if (!alive) return;
-        setItems(data.items ?? []);
-        setTotal(Number(data.total ?? 0));
-      } catch (err: any) {
-        if (!alive) return;
-        const msg =
-          err instanceof Error ? err.message : "Failed to load users.";
-        if (
-          !retried403.current &&
-          (msg.startsWith("403") || msg.startsWith("401"))
-        ) {
-          retried403.current = true;
-          if (typeof window !== "undefined")
-            window.localStorage.removeItem("orgId");
-          const re = await detectOrgId();
-          if (re && re !== orgId) {
-            setOrgId(re);
-            return;
-          }
-        }
-        setError(msg);
-        setItems([]);
-        setTotal(0);
-      } finally {
-        if (alive) setLoading(false);
-      }
+      await refreshUsers();
     })();
     return () => {
       alive = false;
     };
-  }, [orgId, apiUrl]);
+  }, [orgId, apiUrl, refreshUsers]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -460,15 +460,12 @@ export default function UsersAndRolesPage() {
     if (!orgId) return;
     const ok = window.confirm(`Remove "${userName}" from this organization?`);
     if (!ok) return;
-
     setPending((p) => ({ ...p, [userId]: true }));
     const prevItems = items ?? [];
     const nextItems = prevItems.filter((x) => x.id !== userId);
     const prevTotal = total;
-
     setItems(nextItems);
     setTotal(Math.max(0, prevTotal - 1));
-
     try {
       await patchJSON<{ removed: true }>(
         `/api/org/users/${encodeURIComponent(
@@ -491,8 +488,43 @@ export default function UsersAndRolesPage() {
   const [showInvite, setShowInvite] = React.useState(false);
   const [inviteEmail, setInviteEmail] = React.useState("");
   const [inviteName, setInviteName] = React.useState("");
+  const [inviteSlot, setInviteSlot] = React.useState<number>(() => {
+    const maybeFromFilter = Number(searchParams.get("slot") || "");
+    return Number.isInteger(maybeFromFilter) &&
+      maybeFromFilter >= 1 &&
+      maybeFromFilter <= 10
+      ? maybeFromFilter
+      : 6; // server default
+  });
   const [inviteLink, setInviteLink] = React.useState<string | null>(null);
   const [inviting, setInviting] = React.useState(false);
+
+  // live-refresh while any invited users exist
+  const hasPendingInvites = React.useMemo(
+    () => (items ?? []).some((u) => !!(u.isInvited ?? u.invited)),
+    [items]
+  );
+
+  React.useEffect(() => {
+    if (!hasPendingInvites) return;
+    const iv = setInterval(() => {
+      refreshUsers();
+    }, 10_000);
+    return () => clearInterval(iv);
+  }, [hasPendingInvites, refreshUsers]);
+
+  React.useEffect(() => {
+    const onFocus = () => refreshUsers();
+    const onVis = () => {
+      if (document.visibilityState === "visible") refreshUsers();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [refreshUsers]);
 
   async function onInvite(e: React.FormEvent) {
     e.preventDefault();
@@ -504,13 +536,36 @@ export default function UsersAndRolesPage() {
 
     setInviting(true);
     setInviteLink(null);
-    try {
-      const resp = await postJSON<InviteApiResponse>(
-        `/api/org/users/invite?orgId=${encodeURIComponent(orgId)}`,
-        { email: inviteEmail.trim(), name: inviteName.trim() || undefined }
-      );
 
+    const body = {
+      email: inviteEmail.trim(),
+      name: inviteName.trim() || undefined,
+      slot: inviteSlot,
+    };
+
+    // Try the existing endpoint first (no regression), then fall back.
+    const orgIdStrict = orgId as string; // guaranteed by: if (!orgId) return; above
+
+    async function postInvite(): Promise<InviteApiResponse> {
+      const baseQs = `?orgId=${encodeURIComponent(orgIdStrict)}`;
+      try {
+        return await postJSON<InviteApiResponse>(
+          `/api/org/users/invite${baseQs}`,
+          body
+        );
+      } catch (err: any) {
+        return await postJSON<InviteApiResponse>(
+          `/api/org/users${baseQs}`,
+          body
+        );
+      }
+    }
+
+    try {
+      const resp = await postInvite();
       const status = resp?.status;
+
+      // pick a link if available
       const candidates = [
         resp?.inviteUrl,
         resp?.invitePath,
@@ -519,13 +574,43 @@ export default function UsersAndRolesPage() {
         resp?.path,
         resp?.link,
       ].filter((v): v is string => typeof v === "string" && v.length > 0);
-
       const tokenLink =
         typeof resp?.token === "string" && resp.token.length > 0
           ? `/auth/invite/accept?token=${resp.token}`
           : "";
-
       const link = candidates[0] || tokenLink;
+
+      // optimistic insert using returned member (preferred) or a minimal placeholder
+      const returnedMember: UserItem | null =
+        (resp as any)?.member && typeof (resp as any).member === "object"
+          ? ((resp as any).member as UserItem)
+          : null;
+
+      if (returnedMember) {
+        setItems((list) => {
+          const exists = (list ?? []).some((u) => u.id === returnedMember.id);
+          const next = exists
+            ? (list ?? []).map((u) =>
+                u.id === returnedMember.id ? returnedMember : u
+              )
+            : [returnedMember, ...(list ?? [])];
+          return next;
+        });
+        setTotal((t) => t + (returnedMember ? 1 : 0));
+      } else {
+        // fallback optimistic row (rare)
+        setItems((list) => [
+          {
+            id: `temp-${Date.now()}`,
+            name: inviteName || inviteEmail,
+            email: inviteEmail,
+            slot: inviteSlot,
+            isInvited: true,
+          },
+          ...(list ?? []),
+        ]);
+        setTotal((t) => t + 1);
+      }
 
       if (status === "already_member") {
         setInviteLink(null);
@@ -537,7 +622,7 @@ export default function UsersAndRolesPage() {
         toast.showErr("Invite created, but no link was returned.");
       }
 
-      // refresh list to show the invited user
+      // keep UI on first page where the new row appears
       setPage(1);
     } catch (err: any) {
       const msg = String(err?.message || "");
@@ -566,11 +651,9 @@ export default function UsersAndRolesPage() {
       }
     );
   }
-
   function originalFor(slotNum: number): RoleSlot | null {
     return rolesRes?.slots.find((s) => s.slot === slotNum) ?? null;
   }
-
   function isBookable(slotNum: number): boolean {
     const d = draftFor(slotNum);
     return BOOKABLE_KEYS.every((k) => d.allow[k] === true);
@@ -586,18 +669,15 @@ export default function UsersAndRolesPage() {
       },
     };
     setRoleDrafts((m) => new Map(m).set(slotNum, next));
-    setRoleDirty((dd) => ({ ...dd, [slotNum]: true }));
+    setRoleDirty((dd) => ({ ...(dd || {}), [slotNum]: true }));
   }
-
   function isDirty(slotNum: number): boolean {
     const d = draftFor(slotNum);
     const o = originalFor(slotNum);
     if (!o) return false;
-
     if (slotNum === 1) return d.label.trim() !== o.label;
     if (d.label.trim() !== o.label) return true;
     if (d.isActive !== o.isActive) return true;
-
     // Compare sets of allowed keys (deny = false)
     const origAllowed = new Set(
       o.overrides.filter((x) => x.allowed).map((x) => x.key)
@@ -607,12 +687,10 @@ export default function UsersAndRolesPage() {
         .filter(([, v]) => v)
         .map(([k]) => k)
     );
-
     if (origAllowed.size !== draftAllowed.size) return true;
     for (const k of draftAllowed) if (!origAllowed.has(k)) return true;
     return false;
   }
-
   async function saveRole(slotNum: number) {
     if (!orgId) return;
     const d = draftFor(slotNum);
@@ -633,14 +711,12 @@ export default function UsersAndRolesPage() {
           updates: { [String(slotNum)]: { label: d.label.trim() } },
         });
         toast.showOk("Role saved.");
-
         // refresh
         const data = await getJSON<RolesResponse>(
           `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
         );
         setRolesRes(data);
         setPermissionKeys(data.permissionKeys);
-
         const map = new Map<number, RoleDraft>();
         for (const s of data.slots) {
           const allow: Record<string, boolean> = {};
@@ -654,7 +730,7 @@ export default function UsersAndRolesPage() {
           });
         }
         setRoleDrafts(map);
-        setRoleDirty((d0) => ({ ...d0, [slotNum]: false }));
+        setRoleDirty((d0) => ({ ...(d0 || {}), [slotNum]: false }));
       } catch (e: any) {
         toast.showErr(e?.message || "Failed to save role.");
       } finally {
@@ -663,36 +739,29 @@ export default function UsersAndRolesPage() {
       return;
     }
 
-    // Build overrides with only "allowed = true" keys (deny is implicit)
-    const allowedKeys = Object.entries(d.allow)
-      .filter(([_, v]) => v === true)
-      .map(([k]) => k);
-
+    // Build overrides as DIFFS (send allowed:true AND allowed:false where changed)
     const update: {
       label?: string;
       isActive?: boolean;
       overrides?: { key: string; allowed: boolean }[];
     } = {};
-
     if (d.label.trim() !== o.label) update.label = d.label.trim();
     if (d.isActive !== o.isActive) update.isActive = d.isActive;
 
     const origAllowed = new Set(
       o.overrides.filter((x) => x.allowed).map((x) => x.key)
     );
-    const changedAllowed =
-      allowedKeys.length !== origAllowed.size ||
-      allowedKeys.some((k) => !origAllowed.has(k)) ||
-      Array.from(origAllowed).some((k) => !allowedKeys.includes(k));
 
-    if (changedAllowed) {
-      update.overrides = allowedKeys.map((k) => ({ key: k, allowed: true }));
-      // keep Bookable keys in sync (already included if true)
-      for (const k of BOOKABLE_KEYS) {
-        if (d.allow[k] && !allowedKeys.includes(k)) {
-          update.overrides.push({ key: k, allowed: true });
-        }
+    const changedOverrides: { key: string; allowed: boolean }[] = [];
+    for (const k of permissionKeys ?? []) {
+      const nextAllowed = !!d.allow[k]; // checkbox state now
+      const prevAllowed = origAllowed.has(k); // server state before
+      if (nextAllowed !== prevAllowed) {
+        changedOverrides.push({ key: k, allowed: nextAllowed });
       }
+    }
+    if (changedOverrides.length) {
+      update.overrides = changedOverrides;
     }
 
     if (!Object.keys(update).length) {
@@ -707,14 +776,12 @@ export default function UsersAndRolesPage() {
         updates: { [String(slotNum)]: update },
       });
       toast.showOk("Role saved.");
-
       // refresh
       const data = await getJSON<RolesResponse>(
         `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
       );
       setRolesRes(data);
       setPermissionKeys(data.permissionKeys);
-
       const map = new Map<number, RoleDraft>();
       for (const s of data.slots) {
         const allow: Record<string, boolean> = {};
@@ -728,7 +795,7 @@ export default function UsersAndRolesPage() {
         });
       }
       setRoleDrafts(map);
-      setRoleDirty((d0) => ({ ...d0, [slotNum]: false }));
+      setRoleDirty((d0) => ({ ...(d0 || {}), [slotNum]: false }));
     } catch (e: any) {
       toast.showErr(e?.message || "Failed to save role.");
     } finally {
@@ -747,12 +814,15 @@ export default function UsersAndRolesPage() {
       <>
         {toast.node}
         <main className="mx-auto max-w-5xl px-4 py-8">
-          <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
-          <p className="mt-2 text-sm">
+          <h1 className="mb-2 text-2xl font-semibold tracking-tight">
+            Users & Roles
+          </h1>
+          <p className="text-sm text-neutral-600">
             {resolvingOrg
               ? "Resolving your organization…"
               : "We couldn’t determine your organization automatically."}
           </p>
+
           {!resolvingOrg && (
             <button
               onClick={async () => {
@@ -782,42 +852,50 @@ export default function UsersAndRolesPage() {
     <>
       {toast.node}
       {/* Header */}
-      <main className="mx-auto max-w-6xl px-4 py-8">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
+      <main className="mx-auto max-w-5xl px-4 py-8">
+        <header className="mb-6 flex items-start justify-between gap-4">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Users & Roles
+          </h1>
           <button
             onClick={() => setShowInvite((v) => !v)}
             className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
           >
             {showInvite ? "Close" : "Create user"}
           </button>
-        </div>
+        </header>
 
         {/* Users */}
-        <section className="mt-6">
-          <h2 className="text-lg font-semibold">Users</h2>
+        <section aria-labelledby="users-heading" className="mb-10">
+          <h2 id="users-heading" className="mb-3 text-lg font-medium">
+            Users
+          </h2>
 
           {/* Create user (collapsible, above filters) */}
           {showInvite && (
-            <div className="mt-4 rounded-md border p-4">
-              <h3 className="text-sm font-medium">Invite a new user</h3>
-              <form
-                onSubmit={onInvite}
-                className="mt-3 grid gap-3 md:grid-cols-3"
-              >
-                <label className="text-sm">
-                  Email*
-                  <input
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    type="email"
-                    required
-                    placeholder="alex@company.com"
-                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
-                <label className="text-sm">
-                  Name (optional)
+            <form
+              onSubmit={onInvite}
+              className="mb-5 grid gap-3 rounded-md border p-4"
+            >
+              <h3 className="text-base font-medium">Invite a new user</h3>
+
+              <label className="block">
+                <span className="text-sm text-neutral-700">Email*</span>
+                <input
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  type="email"
+                  required
+                  placeholder="alex@company.com"
+                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </label>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm text-neutral-700">
+                    Name (optional)
+                  </span>
                   <input
                     value={inviteName}
                     onChange={(e) => setInviteName(e.target.value)}
@@ -825,34 +903,75 @@ export default function UsersAndRolesPage() {
                     className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </label>
-                <div className="flex items-end">
-                  <button
-                    type="submit"
-                    disabled={inviting}
-                    className={cx(
-                      "h-9 w-full rounded-md border px-3 text-sm",
-                      inviting
-                        ? "cursor-not-allowed opacity-50"
-                        : "hover:bg-gray-50"
-                    )}
-                  >
-                    {inviting ? "Creating…" : "Create user"}
-                  </button>
-                </div>
 
-                {inviteLink && (
-                  <div className="md:col-span-3">
-                    <CopyField label="Invite link" value={inviteLink} />
+                <label className="block">
+                  <span className="text-sm text-neutral-700">Role</span>
+                  <select
+                    value={String(inviteSlot)}
+                    onChange={(e) => setInviteSlot(Number(e.target.value))}
+                    className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                      const label = roleMeta.get(n)?.label ?? `Role ${n}`;
+                      return (
+                        <option key={n} value={n}>
+                          {label}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+              </div>
+
+              {/* Footer: button on first line; invite link wraps to its own full-width line */}
+              <div className="mt-1 flex w-full flex-wrap items-center gap-3 min-w-0">
+                <button
+                  type="submit"
+                  disabled={inviting}
+                  className={
+                    inviting
+                      ? "h-9 rounded-md border px-3 text-sm cursor-not-allowed opacity-50"
+                      : "h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                  }
+                >
+                  {inviting ? "Creating…" : "Create user"}
+                </button>
+
+                {inviteLink ? (
+                  <div className="mt-3 flex basis-full items-center gap-2 overflow-hidden">
+                    <span className="shrink-0 text-sm text-neutral-700">
+                      Invite link
+                    </span>
+                    <code className="block flex-1 min-w-0 max-w-full truncate rounded bg-neutral-50 px-2 py-1 text-xs text-neutral-700">
+                      {inviteLink}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        e.preventDefault();
+                        try {
+                          await navigator.clipboard.writeText(inviteLink!);
+                          toast.showOk("Invite link copied");
+                        } catch {
+                          /* ignore clipboard failures */
+                        }
+                      }}
+                      className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
+                    >
+                      Copy
+                    </button>
                   </div>
-                )}
-              </form>
-            </div>
+                ) : null}
+              </div>
+            </form>
           )}
 
           {/* Filters */}
-          <div className="mt-4 grid gap-3 md:grid-cols-[1fr,180px,120px]">
-            <label className="text-sm">
-              Search (name or email)
+          <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <label className="block">
+              <span className="text-sm text-neutral-700">
+                Search (name or email)
+              </span>
               <input
                 value={q}
                 onChange={(e) => {
@@ -868,8 +987,8 @@ export default function UsersAndRolesPage() {
               </span>
             </label>
 
-            <label className="text-sm">
-              Role
+            <label className="block">
+              <span className="text-sm text-neutral-700">Role</span>
               <select
                 value={slot}
                 onChange={(e) => {
@@ -890,8 +1009,8 @@ export default function UsersAndRolesPage() {
               </select>
             </label>
 
-            <label className="text-sm">
-              Page size
+            <label className="block">
+              <span className="text-sm text-neutral-700">Page size</span>
               <select
                 value={String(pageSize)}
                 onChange={(e) => {
@@ -911,65 +1030,86 @@ export default function UsersAndRolesPage() {
           </div>
 
           {/* Meta */}
-          <div className="mt-3 text-sm text-neutral-600">
+          <div className="mb-2 text-sm text-neutral-600">
             {loading ? (
               <>Loading…</>
             ) : error ? (
-              <span className="text-red-600">{error}</span>
+              <span className="text-rose-700">{error}</span>
             ) : (
               <>{total} results</>
             )}
           </div>
 
           {/* Table */}
-          <div className="mt-4 space-y-2">
-            {!loading && !error && (items?.length ?? 0) === 0 && (
-              <div className="rounded-md border p-6 text-sm text-neutral-600">
-                No members found. Try clearing filters.
-              </div>
-            )}
+          {!loading && !error && (items?.length ?? 0) === 0 && (
+            <div className="rounded-md border p-6 text-sm text-neutral-600">
+              No members found. Try clearing filters.
+            </div>
+          )}
 
-            {(items ?? []).map((r) => {
-              const isBusy = !!pending[r.id];
-              const selectValue =
-                typeof r.slot === "number" ? String(r.slot) : "";
-
-              return (
-                <div
-                  key={r.id}
-                  className="grid grid-cols-[minmax(0,2fr),minmax(0,1fr),auto,auto] items-center gap-3 rounded-md border p-3 text-sm md:grid-cols-[2fr,1fr,120px,auto,auto]"
-                >
-                  {/* Name + email */}
-                  <div className="min-w-0">
-                    <div className="truncate font-medium">{r.name || "—"}</div>
-                    <div className="truncate text-neutral-600">{r.email}</div>
+          {(items ?? []).map((r) => {
+            const isBusy = !!pending[r.id];
+            const selectValue =
+              typeof r.slot === "number" ? String(r.slot) : "";
+            const isPending = !!(r.isInvited ?? r.invited);
+            return (
+              <div
+                key={r.id}
+                className="grid grid-cols-[1fr_1fr_minmax(220px,260px)_minmax(160px,200px)] items-center gap-3 border-b py-3 last:border-b-0"
+              >
+                {/* Name + email */}
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-neutral-900">
+                    {r.name || "—"}
                   </div>
+                  <div className="flex items-center gap-2">
+                    <div className="truncate text-xs text-neutral-600">
+                      {r.email}
+                    </div>
+                    {isPending && (
+                      <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                        Pending
+                      </span>
+                    )}
+                  </div>
+                </div>
 
-                  {/* Role */}
-                  <label className="flex items-center gap-2">
-                    <span className="sr-only">Role</span>
-                    <select
-                      value={selectValue}
-                      onChange={(e) => onChangeSlot(r.id, e.target.value)}
-                      className={cx(
-                        "h-9 w-full rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
-                        isBusy && "cursor-not-allowed opacity-50"
-                      )}
-                      disabled={isBusy}
-                    >
-                      <option value="">Select role…</option>
-                      {Array.from({ length: 10 }, (_, i) => i + 1).map((s) => {
-                        const label = roleMeta.get(s)?.label ?? `Role ${s}`;
-                        return (
-                          <option key={s} value={String(s)}>
-                            {label}
-                          </option>
-                        );
-                      })}
-                    </select>
+                {/* Role label (readable) */}
+                <div className="min-w-0 text-sm text-neutral-700">
+                  {typeof r.slot === "number"
+                    ? roleMeta.get(r.slot)?.label ?? `Role ${r.slot}`
+                    : "—"}
+                </div>
+
+                {/* Role selector */}
+                <div className="min-w-0">
+                  <label className="sr-only" htmlFor={`role-${r.id}`}>
+                    Role
                   </label>
+                  <select
+                    id={`role-${r.id}`}
+                    value={selectValue}
+                    onChange={(e) => onChangeSlot(r.id, e.target.value)}
+                    className={cx(
+                      "h-9 w-full rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
+                      isBusy && "cursor-not-allowed opacity-50"
+                    )}
+                    disabled={isBusy}
+                  >
+                    <option value="">Select role…</option>
+                    {Array.from({ length: 10 }, (_, i) => i + 1).map((s) => {
+                      const label = roleMeta.get(s)?.label ?? `Role ${s}`;
+                      return (
+                        <option key={s} value={String(s)}>
+                          {label}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
 
-                  {/* Actions */}
+                {/* Actions */}
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <button
                     onClick={() => setViewing(r)}
                     className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
@@ -990,12 +1130,12 @@ export default function UsersAndRolesPage() {
                     Remove
                   </button>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+            );
+          })}
 
           {/* Pagination */}
-          <div className="mt-4 flex items-center gap-3">
+          <div className="mt-4 flex items-center justify-between">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page <= 1 || loading}
@@ -1008,7 +1148,7 @@ export default function UsersAndRolesPage() {
             >
               Previous
             </button>
-            <div className="text-sm text-neutral-700">
+            <div className="text-sm">
               Page {page} of {totalPages}
             </div>
             <button
@@ -1027,15 +1167,17 @@ export default function UsersAndRolesPage() {
         </section>
 
         {/* Roles management */}
-        <section className="mt-10">
-          <h2 className="text-lg font-semibold">Roles management</h2>
+        <section aria-labelledby="roles-heading" className="mb-16">
+          <h2 id="roles-heading" className="mb-3 text-lg font-medium">
+            Roles management
+          </h2>
 
           {!rolesRes || !permissionKeys ? (
-            <div className="mt-3 rounded-md border p-4 text-sm">
+            <div className="rounded-md border p-6 text-sm text-neutral-600">
               Loading roles…
             </div>
           ) : (
-            <div className="mt-3 space-y-4">
+            <div className="space-y-3">
               {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
                 const orig = originalFor(slotNum) || {
                   slot: slotNum,
@@ -1050,33 +1192,33 @@ export default function UsersAndRolesPage() {
                 const bookable = isBookable(slotNum);
 
                 return (
-                  <div key={slotNum} className="rounded-md border p-4">
+                  <div
+                    key={slotNum}
+                    className="rounded-md border p-4"
+                    role="group"
+                    aria-label={`Role ${slotNum}`}
+                  >
                     {/* Header row */}
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-3">
                       <div className="text-sm font-medium">Role {slotNum}</div>
-                      <label className="grow text-sm md:max-w-[520px]">
-                        <span className="sr-only">
-                          Label for role #{slotNum}
-                        </span>
-                        <input
-                          value={draft.label}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setRoleDrafts((m) =>
-                              new Map(m).set(slotNum, { ...draft, label: v })
-                            );
-                            setRoleDirty((d) => ({ ...d, [slotNum]: true }));
-                          }}
-                          className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                      </label>
 
-                      {/* Status indicator on LEFT */}
-                      <div className="text-xs text-neutral-600">
-                        {busy ? "Saving…" : dirty ? "Unsaved" : "Saved"}
-                      </div>
+                      <input
+                        value={draft.label}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setRoleDrafts((m) =>
+                            new Map(m).set(slotNum, { ...draft, label: v })
+                          );
+                          setRoleDirty((d) => ({
+                            ...(d || {}),
+                            [slotNum]: true,
+                          }));
+                        }}
+                        className="h-9 w-full min-w-[240px] max-w-[360px] flex-1 rounded-md border border-gray-300 px-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label={`Label for role #${slotNum}`}
+                        placeholder={`Role ${slotNum}`}
+                      />
 
-                      {/* Right-side controls */}
                       {!isAdmin && (
                         <>
                           <label className="ml-2 inline-flex items-center gap-2 text-sm">
@@ -1092,7 +1234,7 @@ export default function UsersAndRolesPage() {
                                   })
                                 );
                                 setRoleDirty((d) => ({
-                                  ...d,
+                                  ...(d || {}),
                                   [slotNum]: true,
                                 }));
                               }}
@@ -1101,7 +1243,7 @@ export default function UsersAndRolesPage() {
                             Active
                           </label>
 
-                          <label className="ml-3 inline-flex items-center gap-2 text-sm">
+                          <label className="inline-flex items-center gap-2 text-sm">
                             <input
                               type="checkbox"
                               checked={bookable}
@@ -1129,12 +1271,27 @@ export default function UsersAndRolesPage() {
                         </>
                       )}
 
-                      {/* Constant Save button (no shifting) */}
+                      {/* Right edge: pill just left of Save; Save stays on the far right */}
+                      {(busy || dirty) && (
+                        <span
+                          className={cx(
+                            "ml-auto rounded-full border px-2 py-0.5 text-xs",
+                            busy
+                              ? "border-neutral-300 bg-neutral-50 text-neutral-600"
+                              : "border-amber-300 bg-amber-50 text-amber-700"
+                          )}
+                        >
+                          {busy ? "Saving…" : "Unsaved"}
+                        </span>
+                      )}
+
                       <button
                         onClick={() => saveRole(slotNum)}
                         disabled={busy || !dirty}
                         className={cx(
-                          "ml-auto h-9 rounded-md border px-3 text-sm",
+                          // when pill is hidden, push Save to the right
+                          busy || dirty ? "" : "ml-auto",
+                          "h-9 rounded-md border px-3 text-sm",
                           busy || !dirty
                             ? "cursor-not-allowed opacity-50"
                             : "hover:bg-gray-50"
@@ -1147,7 +1304,7 @@ export default function UsersAndRolesPage() {
 
                     {/* Permissions: single checkbox per key (no inherit) */}
                     {!isAdmin && permOpen[slotNum] && (
-                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-3">
+                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                         {permissionKeys
                           .filter((k) => !HIDDEN_PERMISSION_KEYS.has(k))
                           .map((k) => {
@@ -1155,7 +1312,7 @@ export default function UsersAndRolesPage() {
                             return (
                               <label
                                 key={k}
-                                className="inline-flex items-center gap-2 text-sm"
+                                className="flex items-center gap-2 text-sm"
                               >
                                 <input
                                   type="checkbox"
@@ -1169,7 +1326,7 @@ export default function UsersAndRolesPage() {
                                       })
                                     );
                                     setRoleDirty((d) => ({
-                                      ...d,
+                                      ...(d || {}),
                                       [slotNum]: true,
                                     }));
                                   }}
@@ -1185,7 +1342,7 @@ export default function UsersAndRolesPage() {
                 );
               })}
 
-              <p className="mt-2 text-xs text-neutral-600">
+              <p className="text-xs text-neutral-600">
                 Role #1 (Admin) is always active and has all permissions. You
                 can rename it, but you can’t disable it or change its
                 permissions.
@@ -1199,15 +1356,34 @@ export default function UsersAndRolesPage() {
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4"
+            className="fixed inset-0 z-40 flex items-center justify-center bg-black/20 p-4"
             onClick={() => setViewing(null)}
           >
             <div
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-lg rounded-md bg-white p-4 shadow"
             >
-              <div className="flex items-center justify-between">
-                <h3 className="text-base font-semibold">User profile</h3>
+              <h3 className="mb-2 text-base font-medium">User profile</h3>
+              <div className="mb-4 grid gap-2 text-sm">
+                <div>
+                  <div className="text-neutral-700">Name</div>
+                  <div className="text-neutral-900">{viewing.name || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-neutral-700">Email</div>
+                  <div className="text-neutral-900">{viewing.email}</div>
+                </div>
+                <div>
+                  <div className="text-neutral-700">Role</div>
+                  <div className="text-neutral-900">
+                    {typeof viewing.slot === "number"
+                      ? roleMeta.get(viewing.slot)?.label ??
+                        `Role ${viewing.slot}`
+                      : "—"}
+                  </div>
+                </div>
+              </div>
+              <div className="flex justify-end">
                 <button
                   onClick={() => setViewing(null)}
                   className="h-8 rounded-md border px-2 text-sm hover:bg-gray-50"
@@ -1215,26 +1391,6 @@ export default function UsersAndRolesPage() {
                 >
                   Close
                 </button>
-              </div>
-
-              <div className="mt-3 space-y-2 text-sm">
-                <div>
-                  <div className="text-neutral-500">Name</div>
-                  <div>{viewing.name || "—"}</div>
-                </div>
-                <div>
-                  <div className="text-neutral-500">Email</div>
-                  <div>{viewing.email}</div>
-                </div>
-                <div>
-                  <div className="text-neutral-500">Role</div>
-                  <div>
-                    {typeof viewing.slot === "number"
-                      ? roleMeta.get(viewing.slot)?.label ??
-                        `Role ${viewing.slot}`
-                      : "—"}
-                  </div>
-                </div>
               </div>
             </div>
           </div>
