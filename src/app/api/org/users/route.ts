@@ -10,15 +10,16 @@ export const dynamic = "force-dynamic";
 
 type JsonErr = { error: string; code?: string };
 
-function badRequest(msg: string, code?: string) {
+function json400(msg: string, code?: string) {
   return NextResponse.json({ error: msg, code } as JsonErr, { status: 400 });
 }
-function unauthorized(msg = "Unauthorized") {
+function json401(msg = "Unauthorized") {
   return NextResponse.json({ error: msg } as JsonErr, { status: 401 });
 }
-function forbidden(msg = "Forbidden") {
+function json403(msg = "Forbidden") {
   return NextResponse.json({ error: msg } as JsonErr, { status: 403 });
 }
+
 function parseIntParam(
   value: string | null,
   def: number,
@@ -30,11 +31,10 @@ function parseIntParam(
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-/** ------------------------------------------------------------------------
- * Permission & org helpers
- * ---------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* Org / permission helpers                                                   */
+/* -------------------------------------------------------------------------- */
 
-/** Check org-scoped permission (settings:manage umbrella) */
 async function hasPermission(
   orgId: string,
   userId: string,
@@ -59,6 +59,7 @@ async function hasPermission(
     },
   });
   if (!orgRole || !orgRole.isActive) return false;
+
   const override = orgRole.permissions[0];
   if (override) return !!override.allowed;
 
@@ -72,10 +73,10 @@ async function hasPermission(
       },
     },
   });
+
   return !!template?.permissions?.length;
 }
 
-/** Resolve org to act on (robust to missing/wrong orgId) */
 async function resolveOrgForUser(
   requestedOrgId: string | null,
   userId: string
@@ -96,10 +97,10 @@ async function resolveOrgForUser(
   return null;
 }
 
-/** ------------------------------------------------------------------------
- * Tiny JWT (HS256) for invite links — no external deps
- * Matches /auth/invite/accept which expects a 3-part JWT-like token.
- * ---------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* HS256 helpers (shared shape for invites)                                   */
+/* -------------------------------------------------------------------------- */
+
 function b64url(buf: Buffer | string) {
   const b = Buffer.isBuffer(buf)
     ? buf.toString("base64")
@@ -113,45 +114,50 @@ function signHS256(header: any, payload: any, secret: string): string {
   const sig = createHmac("sha256", secret).update(data).digest();
   return `${data}.${b64url(sig)}`;
 }
+
 type InvitePayload = {
+  // Include both keys to be compatible with any historical checks.
+  type: "invite";
   typ: "invite";
   orgId: string;
   userId: string;
   email: string;
-  iat: number;
-  exp: number;
+  iat: number; // seconds
+  exp: number; // seconds
 };
-function makeInviteToken(origin: string, payload: InvitePayload) {
+
+function signInviteToken(payload: InvitePayload) {
   const secret = process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET;
   if (!secret) {
-    // In dev, fail loudly so we notice
     throw new Error(
-      "Missing NEXTAUTH_SECRET/AUTH_SECRET: required to sign invite tokens for /auth/invite/accept"
+      "Missing NEXTAUTH_SECRET/AUTH_SECRET for generating invite tokens"
     );
   }
   return signHS256({ alg: "HS256", typ: "JWT" }, payload, secret);
 }
 
-/** ------------------------------------------------------------------------
- * GET: list members
- * ---------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* GET: list members                                                          */
+/* -------------------------------------------------------------------------- */
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
   const session = await getServerSession(authOptions);
   const userId = (session?.user as any)?.id as string | undefined;
-  if (!userId) return unauthorized();
+  if (!userId) return json401();
 
   const orgId = await resolveOrgForUser(requestedOrgId, userId);
-  if (!orgId) return badRequest("Missing or invalid orgId");
+  if (!orgId) return json400("Missing or invalid orgId");
 
   const ok = await hasPermission(orgId, userId, "settings:manage");
-  if (!ok) return forbidden();
+  if (!ok) return json403();
 
   const q = (searchParams.get("q") || "").trim();
   const slotParam = searchParams.get("slot");
   const slot = slotParam ? Number(slotParam) : undefined;
+
   const page = parseIntParam(searchParams.get("page"), 1, 1, 10_000);
   const pageSize = parseIntParam(searchParams.get("pageSize"), 20, 1, 100);
 
@@ -210,28 +216,29 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ items, page, pageSize, total });
 }
 
-/** ------------------------------------------------------------------------
- * POST: create/add user; returns member + inviteUrl (if invited)
- * ---------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* POST: add user by email/userId; returns member + inviteUrl (if invited)    */
+/* -------------------------------------------------------------------------- */
+
 export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const requestedOrgId = (searchParams.get("orgId") || "").trim() || null;
 
   const session = await getServerSession(authOptions);
   const actingUserId = (session?.user as any)?.id as string | undefined;
-  if (!actingUserId) return unauthorized();
+  if (!actingUserId) return json401();
 
   const orgId = await resolveOrgForUser(requestedOrgId, actingUserId);
-  if (!orgId) return badRequest("Missing or invalid orgId");
+  if (!orgId) return json400("Missing or invalid orgId");
 
   const ok = await hasPermission(orgId, actingUserId, "settings:manage");
-  if (!ok) return forbidden();
+  if (!ok) return json403();
 
   let body: any;
   try {
     body = await req.json();
   } catch {
-    return badRequest("Invalid JSON body");
+    return json400("Invalid JSON body");
   }
 
   const rawEmail = (body?.email ?? "").trim();
@@ -240,7 +247,7 @@ export async function POST(req: NextRequest) {
     typeof body?.name === "string" ? body.name.trim() : undefined;
 
   if ((!rawEmail && !rawUserId) || (rawEmail && rawUserId)) {
-    return badRequest("Provide exactly one of 'email' or 'userId'");
+    return json400("Provide exactly one of 'email' or 'userId'");
   }
 
   // Resolve slot
@@ -251,13 +258,13 @@ export async function POST(req: NextRequest) {
     const m = /^role(10|[1-9])$/i.exec(body.orgRoleKey);
     if (m) slot = Number(m[1]);
   }
-  if (!slot) slot = 6; // safe default
+  if (!slot) slot = 6;
   if (!Number.isFinite(slot) || slot < 1 || slot > 10) {
-    return badRequest("Invalid 'slot' (must be 1..10)");
+    return json400("Invalid 'slot' (must be 1..10)");
   }
 
   // Find or create the user
-  let targetUser = rawUserId
+  let user = rawUserId
     ? await prisma.user.findUnique({
         where: { id: rawUserId },
         select: {
@@ -277,13 +284,27 @@ export async function POST(req: NextRequest) {
         },
       });
 
-  if (!targetUser) {
+  // Rule: DO NOT invite existing users by email (any org)
+  if (rawEmail && user) {
+    const isInvited =
+      typeof user.hashedPassword === "string" &&
+      user.hashedPassword.startsWith("invited:");
+    if (!isInvited) {
+      return NextResponse.json(
+        { error: "User already exists", code: "user_exists" } as JsonErr,
+        { status: 409 }
+      );
+    }
+  }
+
+  // Create placeholder record if truly new
+  if (!user) {
     const placeholderHash = `invited:${randomBytes(48).toString("hex")}`;
-    targetUser = await prisma.user.create({
+    user = await prisma.user.create({
       data: {
         email: rawEmail,
         displayName: displayName || null,
-        hashedPassword: placeholderHash, // not a real password
+        hashedPassword: placeholderHash,
       },
       select: {
         id: true,
@@ -294,9 +315,9 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // If already a member, return immediately (idempotent)
+  // Idempotent membership
   const existing = await prisma.userRole.findUnique({
-    where: { userId_orgId: { userId: targetUser.id, orgId } },
+    where: { userId_orgId: { userId: user.id, orgId } },
     include: {
       user: {
         select: {
@@ -310,7 +331,6 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const origin = req.nextUrl.origin;
   const inviteUrlFor = (u: {
     id: string;
     email: string;
@@ -323,7 +343,8 @@ export async function POST(req: NextRequest) {
 
     const now = Math.floor(Date.now() / 1000);
     const exp = now + 60 * 60 * 24 * 7; // 7 days
-    const token = makeInviteToken(origin, {
+    const token = signInviteToken({
+      type: "invite",
       typ: "invite",
       orgId,
       userId: u.id,
@@ -331,7 +352,10 @@ export async function POST(req: NextRequest) {
       iat: now,
       exp,
     });
-    return `${origin}/auth/invite/accept?token=${encodeURIComponent(token)}`;
+
+    return `${req.nextUrl.origin}/auth/invite/accept?token=${encodeURIComponent(
+      token
+    )}`;
   };
 
   if (existing) {
@@ -353,7 +377,7 @@ export async function POST(req: NextRequest) {
 
   // Create membership
   const created = await prisma.userRole.create({
-    data: { orgId, userId: targetUser.id, slot },
+    data: { orgId, userId: user.id, slot },
     include: {
       user: {
         select: {

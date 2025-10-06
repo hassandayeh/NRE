@@ -16,7 +16,6 @@ type UserItem = {
   invited?: boolean | null; // legacy
   isInvited?: boolean | null; // newer
 };
-
 type UsersResponse = {
   items: UserItem[];
   page: number;
@@ -30,12 +29,27 @@ type RoleSlot = {
   isActive: boolean;
   overrides: { key: string; allowed: boolean }[];
 };
-
 type RolesResponse = {
   ok?: boolean;
   orgId: string;
   permissionKeys: readonly string[];
   slots: RoleSlot[];
+};
+
+/** What the invite API might return (supporting old/new keys) */
+type InviteApiResponse = {
+  // new
+  inviteUrl?: string; // <— what our route returns now
+  acceptUrl?: string;
+  // legacy / alternate
+  invitePath?: string;
+  url?: string;
+  path?: string;
+  link?: string;
+  token?: string;
+  status?: "ok" | "already_member" | string;
+  member?: any;
+  [k: string]: unknown;
 };
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -57,17 +71,24 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 /** Copyable, single-line, truncated field */
 function CopyField(props: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
+
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="shrink-0 text-sm text-neutral-600">{props.label}</span>
-      <code className="flex-1 truncate rounded-md border bg-neutral-50 px-2 py-1 text-xs">
+    <div className="flex items-center gap-2">
+      <span className="truncate text-sm text-neutral-700">{props.label}</span>
+      <code className="max-w-[560px] grow truncate rounded border bg-gray-50 px-2 py-1 text-xs">
         {props.value}
       </code>
       <button
-        onClick={async () => {
-          await navigator.clipboard.writeText(props.value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
+        type="button" // ← critical: prevent form submit/regeneration
+        onClick={async (e) => {
+          e.preventDefault();
+          try {
+            await navigator.clipboard.writeText(props.value);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          } catch {
+            // ignore clipboard failures (non-https etc.)
+          }
         }}
         className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
       >
@@ -80,11 +101,13 @@ function CopyField(props: { label: string; value: string }) {
 function useToast() {
   const [msg, setMsg] = React.useState<string | null>(null);
   const [variant, setVariant] = React.useState<"ok" | "err">("ok");
+
   React.useEffect(() => {
     if (!msg) return;
     const t = setTimeout(() => setMsg(null), 2500);
     return () => clearTimeout(t);
   }, [msg]);
+
   return {
     showOk: (m: string) => {
       setVariant("ok");
@@ -96,11 +119,10 @@ function useToast() {
     },
     node: msg ? (
       <div
+        role="status"
         className={cx(
-          "fixed right-4 top-4 z-50 rounded-md border px-3 py-2 text-sm shadow",
-          variant === "ok"
-            ? "border-green-300 bg-green-50"
-            : "border-red-300 bg-red-50"
+          "fixed right-4 top-4 z-50 rounded-md px-3 py-2 text-sm shadow",
+          variant === "ok" ? "bg-green-600 text-white" : "bg-red-600 text-white"
         )}
       >
         {msg}
@@ -120,6 +142,7 @@ async function getJSON<T>(url: string): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -134,6 +157,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
 async function patchJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "PATCH",
@@ -208,12 +232,14 @@ async function detectOrgId(): Promise<string | null> {
 /* ─────────────────────────────────────────────────────────────────────────────
  * Page state
  * ────────────────────────────────────────────────────────────────────────────*/
-
 const BOOKABLE_KEYS = [
   "directory:listed_internal",
   "booking:inviteable",
 ] as const;
-const HIDDEN_PERMISSION_KEYS = new Set<string>(BOOKABLE_KEYS);
+/** Widened to string to avoid TS error when checking arbitrary permission keys */
+const HIDDEN_PERMISSION_KEYS: ReadonlySet<string> = new Set<string>(
+  BOOKABLE_KEYS as readonly string[]
+);
 
 export default function UsersAndRolesPage() {
   const router = useRouter();
@@ -226,6 +252,7 @@ export default function UsersAndRolesPage() {
   const [resolvingOrg, setResolvingOrg] = React.useState<boolean>(
     !orgIdFromUrl
   );
+
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -428,16 +455,20 @@ export default function UsersAndRolesPage() {
       setPending((p) => ({ ...p, [userId]: false }));
     }
   }
+
   async function onRemove(userId: string, userName: string) {
     if (!orgId) return;
     const ok = window.confirm(`Remove "${userName}" from this organization?`);
     if (!ok) return;
+
     setPending((p) => ({ ...p, [userId]: true }));
     const prevItems = items ?? [];
     const nextItems = prevItems.filter((x) => x.id !== userId);
     const prevTotal = total;
+
     setItems(nextItems);
     setTotal(Math.max(0, prevTotal - 1));
+
     try {
       await patchJSON<{ removed: true }>(
         `/api/org/users/${encodeURIComponent(
@@ -470,24 +501,32 @@ export default function UsersAndRolesPage() {
       toast.showErr("Email is required.");
       return;
     }
+
     setInviting(true);
     setInviteLink(null);
     try {
-      const resp = await postJSON<any>(
+      const resp = await postJSON<InviteApiResponse>(
         `/api/org/users/invite?orgId=${encodeURIComponent(orgId)}`,
         { email: inviteEmail.trim(), name: inviteName.trim() || undefined }
       );
-      const status: string | undefined = resp?.status;
-      const link: string =
-        typeof resp?.invitePath === "string"
-          ? resp.invitePath
-          : typeof resp?.path === "string"
-          ? resp.path
-          : typeof resp?.link === "string"
-          ? resp.link
-          : typeof resp?.token === "string"
+
+      const status = resp?.status;
+      const candidates = [
+        resp?.inviteUrl,
+        resp?.invitePath,
+        resp?.acceptUrl,
+        resp?.url,
+        resp?.path,
+        resp?.link,
+      ].filter((v): v is string => typeof v === "string" && v.length > 0);
+
+      const tokenLink =
+        typeof resp?.token === "string" && resp.token.length > 0
           ? `/auth/invite/accept?token=${resp.token}`
           : "";
+
+      const link = candidates[0] || tokenLink;
+
       if (status === "already_member") {
         setInviteLink(null);
         toast.showOk("This user is already in your org.");
@@ -497,9 +536,16 @@ export default function UsersAndRolesPage() {
       } else {
         toast.showErr("Invite created, but no link was returned.");
       }
+
+      // refresh list to show the invited user
       setPage(1);
     } catch (err: any) {
-      toast.showErr(err?.message || "Failed to create invite.");
+      const msg = String(err?.message || "");
+      if (msg.startsWith("409")) {
+        toast.showErr("User already exists.");
+      } else {
+        toast.showErr(msg || "Failed to create invite.");
+      }
     } finally {
       setInviting(false);
     }
@@ -520,9 +566,11 @@ export default function UsersAndRolesPage() {
       }
     );
   }
+
   function originalFor(slotNum: number): RoleSlot | null {
     return rolesRes?.slots.find((s) => s.slot === slotNum) ?? null;
   }
+
   function isBookable(slotNum: number): boolean {
     const d = draftFor(slotNum);
     return BOOKABLE_KEYS.every((k) => d.allow[k] === true);
@@ -540,12 +588,13 @@ export default function UsersAndRolesPage() {
     setRoleDrafts((m) => new Map(m).set(slotNum, next));
     setRoleDirty((dd) => ({ ...dd, [slotNum]: true }));
   }
+
   function isDirty(slotNum: number): boolean {
     const d = draftFor(slotNum);
     const o = originalFor(slotNum);
     if (!o) return false;
-    if (slotNum === 1) return d.label.trim() !== o.label;
 
+    if (slotNum === 1) return d.label.trim() !== o.label;
     if (d.label.trim() !== o.label) return true;
     if (d.isActive !== o.isActive) return true;
 
@@ -558,10 +607,12 @@ export default function UsersAndRolesPage() {
         .filter(([, v]) => v)
         .map(([k]) => k)
     );
+
     if (origAllowed.size !== draftAllowed.size) return true;
     for (const k of draftAllowed) if (!origAllowed.has(k)) return true;
     return false;
   }
+
   async function saveRole(slotNum: number) {
     if (!orgId) return;
     const d = draftFor(slotNum);
@@ -582,12 +633,14 @@ export default function UsersAndRolesPage() {
           updates: { [String(slotNum)]: { label: d.label.trim() } },
         });
         toast.showOk("Role saved.");
+
         // refresh
         const data = await getJSON<RolesResponse>(
           `/api/org/roles?orgId=${encodeURIComponent(orgId)}`
         );
         setRolesRes(data);
         setPermissionKeys(data.permissionKeys);
+
         const map = new Map<number, RoleDraft>();
         for (const s of data.slots) {
           const allow: Record<string, boolean> = {};
@@ -612,7 +665,7 @@ export default function UsersAndRolesPage() {
 
     // Build overrides with only "allowed = true" keys (deny is implicit)
     const allowedKeys = Object.entries(d.allow)
-      .filter(([k, v]) => v === true)
+      .filter(([_, v]) => v === true)
       .map(([k]) => k);
 
     const update: {
@@ -661,6 +714,7 @@ export default function UsersAndRolesPage() {
       );
       setRolesRes(data);
       setPermissionKeys(data.permissionKeys);
+
       const map = new Map<number, RoleDraft>();
       for (const s of data.slots) {
         const allow: Record<string, boolean> = {};
@@ -690,17 +744,15 @@ export default function UsersAndRolesPage() {
    * ───────────────────────────────────────────────────────────────────────────*/
   if (!orgId) {
     return (
-      <main className="mx-auto max-w-5xl px-4 py-8">
+      <>
         {toast.node}
-        <header className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Users &amp; Roles
-          </h1>
-        </header>
-        <div className="rounded-md border p-4 text-sm">
-          {resolvingOrg
-            ? "Resolving your organization…"
-            : "We couldn’t determine your organization automatically."}
+        <main className="mx-auto max-w-5xl px-4 py-8">
+          <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
+          <p className="mt-2 text-sm">
+            {resolvingOrg
+              ? "Resolving your organization…"
+              : "We couldn’t determine your organization automatically."}
+          </p>
           {!resolvingOrg && (
             <button
               onClick={async () => {
@@ -721,21 +773,18 @@ export default function UsersAndRolesPage() {
               Try again
             </button>
           )}
-        </div>
-      </main>
+        </main>
+      </>
     );
   }
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
+    <>
       {toast.node}
-
       {/* Header */}
-      <header className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Users &amp; Roles
-        </h1>
-        <div className="flex items-center gap-2">
+      <main className="mx-auto max-w-6xl px-4 py-8">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">Users &amp; Roles</h1>
           <button
             onClick={() => setShowInvite((v) => !v)}
             className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
@@ -743,147 +792,143 @@ export default function UsersAndRolesPage() {
             {showInvite ? "Close" : "Create user"}
           </button>
         </div>
-      </header>
 
-      {/* Users */}
-      <section className="mb-10 rounded-lg border bg-white">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-base font-medium">Users</h2>
-        </div>
+        {/* Users */}
+        <section className="mt-6">
+          <h2 className="text-lg font-semibold">Users</h2>
 
-        {/* Create user (collapsible, above filters) */}
-        {showInvite && (
-          <div className="mx-4 mt-4 rounded-md border border-dashed bg-neutral-50 p-4">
-            <h3 className="mb-3 text-sm font-medium">Invite a new user</h3>
-            <form
-              onSubmit={onInvite}
-              className="grid grid-cols-1 gap-3 md:grid-cols-3"
-            >
-              <label className="text-sm">
-                Email*
-                <input
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  type="email"
-                  required
-                  placeholder="alex@company.com"
-                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </label>
-              <label className="text-sm">
-                Name (optional)
-                <input
-                  value={inviteName}
-                  onChange={(e) => setInviteName(e.target.value)}
-                  placeholder="Alex Example"
-                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </label>
-              <div className="flex items-end gap-2">
-                <button
-                  type="submit"
-                  disabled={inviting}
-                  className={cx(
-                    "h-9 rounded-md border px-3 text-sm",
-                    inviting
-                      ? "cursor-not-allowed opacity-50"
-                      : "hover:bg-gray-50"
-                  )}
-                >
-                  {inviting ? "Creating…" : "Create user"}
-                </button>
-              </div>
-
-              {inviteLink && (
-                <div className="col-span-full mt-2 min-w-0">
-                  <CopyField label="Invite link:" value={inviteLink} />
+          {/* Create user (collapsible, above filters) */}
+          {showInvite && (
+            <div className="mt-4 rounded-md border p-4">
+              <h3 className="text-sm font-medium">Invite a new user</h3>
+              <form
+                onSubmit={onInvite}
+                className="mt-3 grid gap-3 md:grid-cols-3"
+              >
+                <label className="text-sm">
+                  Email*
+                  <input
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    type="email"
+                    required
+                    placeholder="alex@company.com"
+                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </label>
+                <label className="text-sm">
+                  Name (optional)
+                  <input
+                    value={inviteName}
+                    onChange={(e) => setInviteName(e.target.value)}
+                    placeholder="Alex Example"
+                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </label>
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    disabled={inviting}
+                    className={cx(
+                      "h-9 w-full rounded-md border px-3 text-sm",
+                      inviting
+                        ? "cursor-not-allowed opacity-50"
+                        : "hover:bg-gray-50"
+                    )}
+                  >
+                    {inviting ? "Creating…" : "Create user"}
+                  </button>
                 </div>
-              )}
-            </form>
-          </div>
-        )}
 
-        {/* Filters */}
-        <div className="mt-4 grid grid-cols-1 gap-3 px-4 pb-3 sm:grid-cols-2 md:grid-cols-[1fr_auto_auto] md:items-center">
-          <div className="flex flex-col">
-            <label className="text-sm">Search (name or email)</label>
-            <input
-              value={q}
-              onChange={(e) => {
-                setPage(1);
-                setQ(e.target.value);
-              }}
-              className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-              aria-describedby="search-hint"
-              placeholder="e.g. alex or @demo.test"
-            />
-            <span id="search-hint" className="mt-1 text-xs text-neutral-500">
-              Type to filter by name or email
-            </span>
-          </div>
-
-          <label className="flex flex-col text-sm md:justify-self-end">
-            Role
-            <select
-              value={slot}
-              onChange={(e) => {
-                setPage(1);
-                setSlot(e.target.value);
-              }}
-              className="h-9 w-56 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">All</option>
-              {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                const label = roleMeta.get(n)?.label ?? `Role ${n}`;
-                return (
-                  <option key={n} value={String(n)}>
-                    {label}
-                  </option>
-                );
-              })}
-            </select>
-          </label>
-
-          <label className="flex flex-col text-sm md:justify-self-end">
-            Page size
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                const v = Number(e.target.value) || 20;
-                setPage(1);
-                setPageSize(v);
-              }}
-              className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {[10, 20, 50].map((n) => (
-                <option key={n} value={String(n)}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        {/* Meta */}
-        <div className="flex items-center justify-between px-4 pb-3 text-sm text-neutral-600">
-          {loading ? (
-            <span>Loading…</span>
-          ) : error ? (
-            <span className="text-red-600">{error}</span>
-          ) : (
-            <span>{total} results</span>
-          )}
-        </div>
-
-        {/* Table */}
-        <div className="px-4 pb-4">
-          {!loading && !error && (items?.length ?? 0) === 0 && (
-            <div className="rounded-md border p-4 text-sm text-neutral-600">
-              No members found. Try clearing filters.
+                {inviteLink && (
+                  <div className="md:col-span-3">
+                    <CopyField label="Invite link" value={inviteLink} />
+                  </div>
+                )}
+              </form>
             </div>
           )}
 
-          <div className="space-y-3">
+          {/* Filters */}
+          <div className="mt-4 grid gap-3 md:grid-cols-[1fr,180px,120px]">
+            <label className="text-sm">
+              Search (name or email)
+              <input
+                value={q}
+                onChange={(e) => {
+                  setPage(1);
+                  setQ(e.target.value);
+                }}
+                className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                aria-describedby="search-hint"
+                placeholder="e.g. alex or @demo.test"
+              />
+              <span id="search-hint" className="sr-only">
+                Type to filter by name or email
+              </span>
+            </label>
+
+            <label className="text-sm">
+              Role
+              <select
+                value={slot}
+                onChange={(e) => {
+                  setPage(1);
+                  setSlot(e.target.value);
+                }}
+                className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All</option>
+                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                  const label = roleMeta.get(n)?.label ?? `Role ${n}`;
+                  return (
+                    <option key={n} value={String(n)}>
+                      {label}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            <label className="text-sm">
+              Page size
+              <select
+                value={String(pageSize)}
+                onChange={(e) => {
+                  const v = Number(e.target.value) || 20;
+                  setPage(1);
+                  setPageSize(v);
+                }}
+                className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {[10, 20, 50].map((n) => (
+                  <option key={n} value={String(n)}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {/* Meta */}
+          <div className="mt-3 text-sm text-neutral-600">
+            {loading ? (
+              <>Loading…</>
+            ) : error ? (
+              <span className="text-red-600">{error}</span>
+            ) : (
+              <>{total} results</>
+            )}
+          </div>
+
+          {/* Table */}
+          <div className="mt-4 space-y-2">
+            {!loading && !error && (items?.length ?? 0) === 0 && (
+              <div className="rounded-md border p-6 text-sm text-neutral-600">
+                No members found. Try clearing filters.
+              </div>
+            )}
+
             {(items ?? []).map((r) => {
               const isBusy = !!pending[r.id];
               const selectValue =
@@ -892,79 +937,65 @@ export default function UsersAndRolesPage() {
               return (
                 <div
                   key={r.id}
-                  className="grid grid-cols-1 gap-3 rounded-md border p-3 md:grid-cols-[1fr_18rem_auto]"
+                  className="grid grid-cols-[minmax(0,2fr),minmax(0,1fr),auto,auto] items-center gap-3 rounded-md border p-3 text-sm md:grid-cols-[2fr,1fr,120px,auto,auto]"
                 >
-                  {/* Name + email (clean — no invited badge, no ID) */}
-                  <div>
-                    <div className="font-medium">{r.name || "—"}</div>
-                    <div className="text-sm text-neutral-600">
-                      <a href={`mailto:${r.email}`} className="underline">
-                        {r.email}
-                      </a>
-                    </div>
+                  {/* Name + email */}
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{r.name || "—"}</div>
+                    <div className="truncate text-neutral-600">{r.email}</div>
                   </div>
 
-                  {/* Role (aligned; option text = label only) */}
-                  <div className="min-w-0 md:justify-self-start">
-                    <div className="flex items-center gap-2">
-                      <span className="shrink-0 text-sm text-neutral-600">
-                        Role
-                      </span>
-                      <select
-                        value={selectValue}
-                        onChange={(e) => onChangeSlot(r.id, e.target.value)}
-                        className={cx(
-                          "h-9 w-full rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
-                          isBusy && "cursor-not-allowed opacity-50"
-                        )}
-                        disabled={isBusy}
-                      >
-                        <option value="" disabled>
-                          Select role…
-                        </option>
-                        {Array.from({ length: 10 }, (_, i) => i + 1).map(
-                          (s) => {
-                            const label = roleMeta.get(s)?.label ?? `Role ${s}`;
-                            return (
-                              <option key={s} value={String(s)}>
-                                {label}
-                              </option>
-                            );
-                          }
-                        )}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Actions (View + Remove only) */}
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      onClick={() => setViewing(r)}
-                      className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                    >
-                      View
-                    </button>
-                    <button
-                      onClick={() => onRemove(r.id, r.name || r.email)}
-                      disabled={isBusy}
+                  {/* Role */}
+                  <label className="flex items-center gap-2">
+                    <span className="sr-only">Role</span>
+                    <select
+                      value={selectValue}
+                      onChange={(e) => onChangeSlot(r.id, e.target.value)}
                       className={cx(
-                        "h-9 rounded-md border px-3 text-sm",
-                        isBusy
-                          ? "cursor-not-allowed opacity-50"
-                          : "hover:bg-gray-50"
+                        "h-9 w-full rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
+                        isBusy && "cursor-not-allowed opacity-50"
                       )}
-                      aria-label={`Remove ${r.name || r.email} from org`}
+                      disabled={isBusy}
                     >
-                      Remove
-                    </button>
-                  </div>
+                      <option value="">Select role…</option>
+                      {Array.from({ length: 10 }, (_, i) => i + 1).map((s) => {
+                        const label = roleMeta.get(s)?.label ?? `Role ${s}`;
+                        return (
+                          <option key={s} value={String(s)}>
+                            {label}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </label>
+
+                  {/* Actions */}
+                  <button
+                    onClick={() => setViewing(r)}
+                    className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                  >
+                    View
+                  </button>
+                  <button
+                    onClick={() => onRemove(r.id, r.name || r.email)}
+                    disabled={isBusy}
+                    className={cx(
+                      "h-9 rounded-md border px-3 text-sm",
+                      isBusy
+                        ? "cursor-not-allowed opacity-50"
+                        : "hover:bg-gray-50"
+                    )}
+                    aria-label={`Remove ${r.name || r.email} from org`}
+                  >
+                    Remove
+                  </button>
                 </div>
               );
             })}
           </div>
 
           {/* Pagination */}
-          <div className="mt-4 flex items-center justify-between">
+          <div className="mt-4 flex items-center gap-3">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page <= 1 || loading}
@@ -977,7 +1008,7 @@ export default function UsersAndRolesPage() {
             >
               Previous
             </button>
-            <div className="text-sm text-neutral-600">
+            <div className="text-sm text-neutral-700">
               Page {page} of {totalPages}
             </div>
             <button
@@ -993,41 +1024,37 @@ export default function UsersAndRolesPage() {
               Next
             </button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* Roles management */}
-      <section className="rounded-lg border bg-white">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-base font-medium">Roles management</h2>
-        </div>
+        {/* Roles management */}
+        <section className="mt-10">
+          <h2 className="text-lg font-semibold">Roles management</h2>
 
-        {!rolesRes || !permissionKeys ? (
-          <div className="p-4 text-sm text-neutral-600">Loading roles…</div>
-        ) : (
-          <div className="divide-y">
-            {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
-              const orig = originalFor(slotNum) || {
-                slot: slotNum,
-                label: `Role ${slotNum}`,
-                isActive: true,
-                overrides: [],
-              };
-              const draft = draftFor(slotNum);
-              const dirty = isDirty(slotNum);
-              const busy = !!roleSaving[slotNum];
-              const isAdmin = slotNum === 1;
-              const bookable = isBookable(slotNum);
+          {!rolesRes || !permissionKeys ? (
+            <div className="mt-3 rounded-md border p-4 text-sm">
+              Loading roles…
+            </div>
+          ) : (
+            <div className="mt-3 space-y-4">
+              {Array.from({ length: 10 }, (_, i) => i + 1).map((slotNum) => {
+                const orig = originalFor(slotNum) || {
+                  slot: slotNum,
+                  label: `Role ${slotNum}`,
+                  isActive: true,
+                  overrides: [],
+                };
+                const draft = draftFor(slotNum);
+                const dirty = isDirty(slotNum);
+                const busy = !!roleSaving[slotNum];
+                const isAdmin = slotNum === 1;
+                const bookable = isBookable(slotNum);
 
-              return (
-                <div key={slotNum} className="p-4">
-                  {/* Header row */}
-                  <div className="flex items-center gap-3">
-                    <div className="flex min-w-0 flex-1 items-center gap-3">
-                      <div className="w-20 shrink-0 text-sm text-neutral-600">
-                        Role {slotNum}
-                      </div>
-                      <label className="flex-1 text-sm">
+                return (
+                  <div key={slotNum} className="rounded-md border p-4">
+                    {/* Header row */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="text-sm font-medium">Role {slotNum}</div>
+                      <label className="grow text-sm md:max-w-[520px]">
                         <span className="sr-only">
                           Label for role #{slotNum}
                         </span>
@@ -1045,91 +1072,82 @@ export default function UsersAndRolesPage() {
                       </label>
 
                       {/* Status indicator on LEFT */}
-                      <span
-                        className={cx(
-                          "text-xs",
-                          busy
-                            ? "text-blue-600"
-                            : dirty
-                            ? "text-amber-600"
-                            : "text-neutral-500"
-                        )}
-                        aria-live="polite"
-                      >
+                      <div className="text-xs text-neutral-600">
                         {busy ? "Saving…" : dirty ? "Unsaved" : "Saved"}
-                      </span>
+                      </div>
+
+                      {/* Right-side controls */}
+                      {!isAdmin && (
+                        <>
+                          <label className="ml-2 inline-flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={draft.isActive}
+                              onChange={(e) => {
+                                const v = e.target.checked;
+                                setRoleDrafts((m) =>
+                                  new Map(m).set(slotNum, {
+                                    ...draft,
+                                    isActive: v,
+                                  })
+                                );
+                                setRoleDirty((d) => ({
+                                  ...d,
+                                  [slotNum]: true,
+                                }));
+                              }}
+                              className="h-5 w-5"
+                            />
+                            Active
+                          </label>
+
+                          <label className="ml-3 inline-flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={bookable}
+                              onChange={(e) =>
+                                setBookable(slotNum, e.target.checked)
+                              }
+                              className="h-5 w-5"
+                            />
+                            Bookable
+                          </label>
+
+                          <button
+                            onClick={() =>
+                              setPermOpen((o) => ({
+                                ...o,
+                                [slotNum]: !o[slotNum],
+                              }))
+                            }
+                            className="ml-2 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                          >
+                            {permOpen[slotNum]
+                              ? "Hide permissions"
+                              : "Permissions"}
+                          </button>
+                        </>
+                      )}
+
+                      {/* Constant Save button (no shifting) */}
+                      <button
+                        onClick={() => saveRole(slotNum)}
+                        disabled={busy || !dirty}
+                        className={cx(
+                          "ml-auto h-9 rounded-md border px-3 text-sm",
+                          busy || !dirty
+                            ? "cursor-not-allowed opacity-50"
+                            : "hover:bg-gray-50"
+                        )}
+                        aria-disabled={busy || !dirty}
+                      >
+                        Save
+                      </button>
                     </div>
 
-                    {/* Right-side controls */}
-                    {!isAdmin && (
-                      <>
-                        <label className="inline-flex items-center gap-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={draft.isActive}
-                            onChange={(e) => {
-                              const v = e.target.checked;
-                              setRoleDrafts((m) =>
-                                new Map(m).set(slotNum, {
-                                  ...draft,
-                                  isActive: v,
-                                })
-                              );
-                              setRoleDirty((d) => ({ ...d, [slotNum]: true }));
-                            }}
-                            className="h-5 w-5"
-                          />
-                          Active
-                        </label>
-
-                        <label className="ml-2 inline-flex items-center gap-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={bookable}
-                            onChange={(e) =>
-                              setBookable(slotNum, e.target.checked)
-                            }
-                            className="h-5 w-5"
-                          />
-                          Bookable
-                        </label>
-
-                        <button
-                          onClick={() =>
-                            setPermOpen((o) => ({
-                              ...o,
-                              [slotNum]: !o[slotNum],
-                            }))
-                          }
-                          className="ml-2 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                        >
-                          {permOpen[slotNum]
-                            ? "Hide permissions"
-                            : "Permissions"}
-                        </button>
-                      </>
-                    )}
-
-                    {/* Constant Save button (no shifting) */}
-                    <button
-                      onClick={() => saveRole(slotNum)}
-                      disabled={busy || !dirty}
-                      className={cx(
-                        "ml-auto h-9 rounded-md border px-3 text-sm",
-                        busy || !dirty
-                          ? "cursor-not-allowed opacity-50"
-                          : "hover:bg-gray-50"
-                      )}
-                      aria-disabled={busy || !dirty}
-                    >
-                      Save
-                    </button>
-                  </div>
-
-                  {/* Permissions: single checkbox per key (no inherit) */}
-                  {!isAdmin && permOpen[slotNum] && (
-                    <div className="mt-3 rounded-md border bg-neutral-50 p-3">
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {/* Permissions: single checkbox per key (no inherit) */}
+                    {!isAdmin && permOpen[slotNum] && (
+                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-3">
                         {permissionKeys
                           .filter((k) => !HIDDEN_PERMISSION_KEYS.has(k))
                           .map((k) => {
@@ -1137,9 +1155,8 @@ export default function UsersAndRolesPage() {
                             return (
                               <label
                                 key={k}
-                                className="flex items-center justify-between rounded-md border bg-white px-3 py-2 text-sm"
+                                className="inline-flex items-center gap-2 text-sm"
                               >
-                                <span className="mr-3 truncate">{k}</span>
                                 <input
                                   type="checkbox"
                                   checked={checked}
@@ -1158,74 +1175,71 @@ export default function UsersAndRolesPage() {
                                   }}
                                   className="h-5 w-5"
                                 />
+                                {k}
                               </label>
                             );
                           })}
                       </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                    )}
+                  </div>
+                );
+              })}
 
-            <div className="px-4 pb-4 text-xs text-neutral-600">
-              Role #1 (Admin) is always active and has all permissions. You can
-              rename it, but you can’t disable it or change its permissions.
+              <p className="mt-2 text-xs text-neutral-600">
+                Role #1 (Admin) is always active and has all permissions. You
+                can rename it, but you can’t disable it or change its
+                permissions.
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* Profile viewer modal (basics only) */}
+        {viewing && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4"
+            onClick={() => setViewing(null)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-lg rounded-md bg-white p-4 shadow"
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">User profile</h3>
+                <button
+                  onClick={() => setViewing(null)}
+                  className="h-8 rounded-md border px-2 text-sm hover:bg-gray-50"
+                  aria-label="Close profile"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-3 space-y-2 text-sm">
+                <div>
+                  <div className="text-neutral-500">Name</div>
+                  <div>{viewing.name || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-neutral-500">Email</div>
+                  <div>{viewing.email}</div>
+                </div>
+                <div>
+                  <div className="text-neutral-500">Role</div>
+                  <div>
+                    {typeof viewing.slot === "number"
+                      ? roleMeta.get(viewing.slot)?.label ??
+                        `Role ${viewing.slot}`
+                      : "—"}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
-      </section>
-
-      {/* Profile viewer modal (basics only: no invited, no ID) */}
-      {viewing && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-          onClick={() => setViewing(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-lg bg-white p-4 shadow"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">User profile</h3>
-              <button
-                onClick={() => setViewing(null)}
-                className="h-8 rounded-md border px-2 text-sm hover:bg-gray-50"
-                aria-label="Close profile"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="space-y-2 text-sm">
-              <div>
-                <span className="block text-neutral-500">Name</span>
-                <span className="font-medium">{viewing.name || "—"}</span>
-              </div>
-              <div>
-                <span className="block text-neutral-500">Email</span>
-                <a
-                  className="font-medium underline"
-                  href={`mailto:${viewing.email}`}
-                >
-                  {viewing.email}
-                </a>
-              </div>
-              <div>
-                <span className="block text-neutral-500">Role</span>
-                <span className="font-medium">
-                  {typeof viewing.slot === "number"
-                    ? roleMeta.get(viewing.slot)?.label ??
-                      `Role ${viewing.slot}`
-                    : "—"}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </main>
+      </main>
+    </>
   );
 }
