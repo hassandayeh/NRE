@@ -13,8 +13,9 @@ type UserItem = {
   slot: number | null;
   roleLabel?: string | null;
   roleActive?: boolean | null;
-  invited?: boolean | null; // legacy
-  isInvited?: boolean | null; // newer
+  /** legacy/new flags that mean "not yet accepted the invite" */
+  invited?: boolean | null;
+  isInvited?: boolean | null;
 };
 
 type UsersResponse = {
@@ -40,7 +41,7 @@ type RolesResponse = {
 
 /** Invite API may vary across routes; normalize defensively */
 type InviteApiResponse = {
-  // new
+  // newest
   inviteUrl?: string;
   // legacy / alternates
   acceptUrl?: string;
@@ -74,24 +75,33 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 function CopyField(props: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
   return (
-    <div className="mt-3 flex basis-full items-center gap-2 overflow-hidden">
-      <span className="shrink-0 text-sm text-neutral-700">{props.label}</span>
-      <code className="block flex-1 min-w-0 max-w-full truncate rounded bg-neutral-50 px-2 py-1 text-xs text-neutral-700">
-        {props.value}
-      </code>
-      <button
-        onClick={async (e) => {
-          e.preventDefault();
-          try {
-            await navigator.clipboard.writeText(props.value);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          } catch {}
-        }}
-        className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
-      >
-        {copied ? "Copied" : "Copy"}
-      </button>
+    <div className="flex w-full items-center gap-3">
+      <div className="min-w-24 shrink-0 text-sm text-neutral-600">
+        {props.label}
+      </div>
+      {/* ensure the row itself doesn’t overflow */}
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+        {/* make the value take full width and truncate */}
+        <div
+          title={props.value}
+          className="w-full max-w-full truncate rounded-md border px-3 py-1 text-sm"
+        >
+          {props.value}
+        </div>
+        <button
+          onClick={async (e) => {
+            e.preventDefault();
+            try {
+              await navigator.clipboard.writeText(props.value);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1200);
+            } catch {}
+          }}
+          className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -115,12 +125,11 @@ function useToast() {
     },
     node: msg ? (
       <div
-        role="status"
         className={cx(
           "fixed right-4 top-4 z-50 rounded-md px-3 py-2 text-sm shadow",
           variant === "ok"
-            ? "bg-emerald-50 text-emerald-700"
-            : "bg-rose-50 text-rose-700"
+            ? "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200"
+            : "bg-rose-50 text-rose-800 ring-1 ring-rose-200"
         )}
       >
         {msg}
@@ -230,6 +239,7 @@ async function detectOrgId(): Promise<string | null> {
 /* ─────────────────────────────────────────────────────────────────────────────
  * Page state
  * ────────────────────────────────────────────────────────────────────────────*/
+
 const BOOKABLE_KEYS = [
   "directory:listed_internal",
   "booking:inviteable",
@@ -247,10 +257,7 @@ export default function UsersAndRolesPage() {
   // org
   const orgIdFromUrl = (searchParams.get("orgId") || "").trim() || null;
   const [orgId, setOrgId] = React.useState<string | null>(orgIdFromUrl);
-  const [resolvingOrg, setResolvingOrg] = React.useState<boolean>(
-    !orgIdFromUrl
-  );
-
+  const [resolvingOrg, setResolvingOrg] = React.useState(!orgIdFromUrl);
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -302,7 +309,7 @@ export default function UsersAndRolesPage() {
     slot: number;
     label: string;
     isActive: boolean;
-    allow: Record<string, boolean>; // true=allow, false=deny
+    allow: Record<string, boolean>;
   };
   const [roleDrafts, setRoleDrafts] = React.useState<Map<number, RoleDraft>>(
     new Map()
@@ -324,7 +331,6 @@ export default function UsersAndRolesPage() {
         if (!alive) return;
         setRolesRes(data);
         setPermissionKeys(data.permissionKeys);
-
         // seed drafts: default deny, apply overrides
         const map = new Map<number, RoleDraft>();
         for (const s of data.slots) {
@@ -374,6 +380,7 @@ export default function UsersAndRolesPage() {
   }, [router, orgId, q, slot, page, pageSize]);
 
   const retried403 = React.useRef(false);
+
   const refreshUsers = React.useCallback(async () => {
     if (!orgId) return;
     setLoading(true);
@@ -407,14 +414,11 @@ export default function UsersAndRolesPage() {
 
   React.useEffect(() => {
     if (!orgId) return;
-    let alive = true;
-    (async () => {
-      await refreshUsers();
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [orgId, apiUrl, refreshUsers]);
+    refreshUsers();
+    // do NOT include refreshUsers in deps
+  }, [orgId, apiUrl]);
+  // if your linter complains, keep the comment to silence it:
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -484,11 +488,11 @@ export default function UsersAndRolesPage() {
     }
   }
 
-  // invite card
+  // invite card (create new user)
   const [showInvite, setShowInvite] = React.useState(false);
   const [inviteEmail, setInviteEmail] = React.useState("");
   const [inviteName, setInviteName] = React.useState("");
-  const [inviteSlot, setInviteSlot] = React.useState<number>(() => {
+  const [inviteSlot, setInviteSlot] = React.useState(() => {
     const maybeFromFilter = Number(searchParams.get("slot") || "");
     return Number.isInteger(maybeFromFilter) &&
       maybeFromFilter >= 1 &&
@@ -499,33 +503,6 @@ export default function UsersAndRolesPage() {
   const [inviteLink, setInviteLink] = React.useState<string | null>(null);
   const [inviting, setInviting] = React.useState(false);
 
-  // live-refresh while any invited users exist
-  const hasPendingInvites = React.useMemo(
-    () => (items ?? []).some((u) => !!(u.isInvited ?? u.invited)),
-    [items]
-  );
-
-  React.useEffect(() => {
-    if (!hasPendingInvites) return;
-    const iv = setInterval(() => {
-      refreshUsers();
-    }, 10_000);
-    return () => clearInterval(iv);
-  }, [hasPendingInvites, refreshUsers]);
-
-  React.useEffect(() => {
-    const onFocus = () => refreshUsers();
-    const onVis = () => {
-      if (document.visibilityState === "visible") refreshUsers();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [refreshUsers]);
-
   async function onInvite(e: React.FormEvent) {
     e.preventDefault();
     if (!orgId) return;
@@ -533,7 +510,6 @@ export default function UsersAndRolesPage() {
       toast.showErr("Email is required.");
       return;
     }
-
     setInviting(true);
     setInviteLink(null);
 
@@ -543,9 +519,7 @@ export default function UsersAndRolesPage() {
       slot: inviteSlot,
     };
 
-    // Try the existing endpoint first (no regression), then fall back.
     const orgIdStrict = orgId as string; // guaranteed by: if (!orgId) return; above
-
     async function postInvite(): Promise<InviteApiResponse> {
       const baseQs = `?orgId=${encodeURIComponent(orgIdStrict)}`;
       try {
@@ -553,7 +527,7 @@ export default function UsersAndRolesPage() {
           `/api/org/users/invite${baseQs}`,
           body
         );
-      } catch (err: any) {
+      } catch {
         return await postJSON<InviteApiResponse>(
           `/api/org/users${baseQs}`,
           body
@@ -580,12 +554,11 @@ export default function UsersAndRolesPage() {
           : "";
       const link = candidates[0] || tokenLink;
 
-      // optimistic insert using returned member (preferred) or a minimal placeholder
+      // optimistic insert using returned member (preferred)
       const returnedMember: UserItem | null =
         (resp as any)?.member && typeof (resp as any).member === "object"
           ? ((resp as any).member as UserItem)
           : null;
-
       if (returnedMember) {
         setItems((list) => {
           const exists = (list ?? []).some((u) => u.id === returnedMember.id);
@@ -747,11 +720,9 @@ export default function UsersAndRolesPage() {
     } = {};
     if (d.label.trim() !== o.label) update.label = d.label.trim();
     if (d.isActive !== o.isActive) update.isActive = d.isActive;
-
     const origAllowed = new Set(
       o.overrides.filter((x) => x.allowed).map((x) => x.key)
     );
-
     const changedOverrides: { key: string; allowed: boolean }[] = [];
     for (const k of permissionKeys ?? []) {
       const nextAllowed = !!d.allow[k]; // checkbox state now
@@ -763,12 +734,10 @@ export default function UsersAndRolesPage() {
     if (changedOverrides.length) {
       update.overrides = changedOverrides;
     }
-
     if (!Object.keys(update).length) {
       toast.showOk("Already saved.");
       return;
     }
-
     setRoleSaving((s) => ({ ...s, [slotNum]: true }));
     try {
       await patchJSON(`/api/org/roles`, {
@@ -803,8 +772,61 @@ export default function UsersAndRolesPage() {
     }
   }
 
-  // profile modal
+  // profile modal (kept minimal and unchanged logic)
   const [viewing, setViewing] = React.useState<UserItem | null>(null);
+
+  // NEW: per-row freshly generated invite links
+  const [rowInviteLinks, setRowInviteLinks] = React.useState<
+    Record<string, string>
+  >({});
+
+  async function onReinvite(user: UserItem) {
+    if (!orgId) return;
+    setPending((p) => ({ ...p, [user.id]: true }));
+    try {
+      const body = {
+        email: user.email,
+        name: user.name ?? undefined,
+        slot: user.slot ?? 6,
+      };
+      const base = `?orgId=${encodeURIComponent(orgId)}`;
+      let resp: InviteApiResponse;
+      try {
+        resp = await postJSON<InviteApiResponse>(
+          `/api/org/users/invite${base}`,
+          body
+        );
+      } catch {
+        resp = await postJSON<InviteApiResponse>(`/api/org/users${base}`, body);
+      }
+      const candidates = [
+        resp?.inviteUrl,
+        resp?.invitePath,
+        resp?.acceptUrl,
+        resp?.url,
+        resp?.path,
+        resp?.link,
+      ].filter((v): v is string => typeof v === "string" && v.length > 0);
+      const tokenLink =
+        typeof resp?.token === "string" && resp.token.length > 0
+          ? `/auth/invite/accept?token=${resp.token}`
+          : "";
+      const link = candidates[0] || tokenLink;
+
+      if (link) {
+        setRowInviteLinks((m) => ({ ...m, [user.id]: link }));
+        toast.showOk("Invite regenerated.");
+      } else {
+        toast.showErr("Invite created, but no link was returned.");
+      }
+
+      // best-effort refresh (invited flag might flip if user accepts quickly)
+    } catch (e: any) {
+      toast.showErr(e?.message || "Failed to re-invite.");
+    } finally {
+      setPending((p) => ({ ...p, [user.id]: false }));
+    }
+  }
 
   /* ───────────────────────────────────────────────────────────────────────────
    * Render
@@ -814,15 +836,14 @@ export default function UsersAndRolesPage() {
       <>
         {toast.node}
         <main className="mx-auto max-w-5xl px-4 py-8">
-          <h1 className="mb-2 text-2xl font-semibold tracking-tight">
-            Users & Roles
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Users &amp; Roles
           </h1>
-          <p className="text-sm text-neutral-600">
+          <p className="mt-2 text-neutral-600">
             {resolvingOrg
               ? "Resolving your organization…"
               : "We couldn’t determine your organization automatically."}
           </p>
-
           {!resolvingOrg && (
             <button
               onClick={async () => {
@@ -851,11 +872,11 @@ export default function UsersAndRolesPage() {
   return (
     <>
       {toast.node}
-      {/* Header */}
       <main className="mx-auto max-w-5xl px-4 py-8">
-        <header className="mb-6 flex items-start justify-between gap-4">
+        {/* Header */}
+        <header className="mb-8 flex items-start justify-between gap-4">
           <h1 className="text-2xl font-semibold tracking-tight">
-            Users & Roles
+            Users &amp; Roles
           </h1>
           <button
             onClick={() => setShowInvite((v) => !v)}
@@ -866,8 +887,8 @@ export default function UsersAndRolesPage() {
         </header>
 
         {/* Users */}
-        <section aria-labelledby="users-heading" className="mb-10">
-          <h2 id="users-heading" className="mb-3 text-lg font-medium">
+        <section aria-labelledby="users" className="mb-10">
+          <h2 id="users" className="mb-4 text-lg font-semibold">
             Users
           </h2>
 
@@ -875,12 +896,11 @@ export default function UsersAndRolesPage() {
           {showInvite && (
             <form
               onSubmit={onInvite}
-              className="mb-5 grid gap-3 rounded-md border p-4"
+              className="mb-6 rounded-xl border p-4 shadow-sm ring-1 ring-black/5"
             >
-              <h3 className="text-base font-medium">Invite a new user</h3>
-
-              <label className="block">
-                <span className="text-sm text-neutral-700">Email*</span>
+              <h3 className="mb-3 text-base font-medium">Invite a new user</h3>
+              <label className="block text-sm">
+                Email*
                 <input
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
@@ -890,76 +910,45 @@ export default function UsersAndRolesPage() {
                   className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </label>
-
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <label className="block">
-                  <span className="text-sm text-neutral-700">
-                    Name (optional)
-                  </span>
-                  <input
-                    value={inviteName}
-                    onChange={(e) => setInviteName(e.target.value)}
-                    placeholder="Alex Example"
-                    className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="text-sm text-neutral-700">Role</span>
-                  <select
-                    value={String(inviteSlot)}
-                    onChange={(e) => setInviteSlot(Number(e.target.value))}
-                    className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                      const label = roleMeta.get(n)?.label ?? `Role ${n}`;
-                      return (
-                        <option key={n} value={n}>
-                          {label}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </label>
-              </div>
+              <label className="mt-3 block text-sm">
+                Name (optional)
+                <input
+                  value={inviteName}
+                  onChange={(e) => setInviteName(e.target.value)}
+                  placeholder="Alex Example"
+                  className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </label>
+              <label className="mt-3 block text-sm">
+                Role
+                <select
+                  value={inviteSlot}
+                  onChange={(e) => setInviteSlot(Number(e.target.value))}
+                  className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                    const label = roleMeta.get(n)?.label ?? `Role ${n}`;
+                    return (
+                      <option key={n} value={n}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
 
               {/* Footer: button on first line; invite link wraps to its own full-width line */}
-              <div className="mt-1 flex w-full flex-wrap items-center gap-3 min-w-0">
+              <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
-                  type="submit"
                   disabled={inviting}
-                  className={
-                    inviting
-                      ? "h-9 rounded-md border px-3 text-sm cursor-not-allowed opacity-50"
-                      : "h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                  }
+                  className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
                 >
                   {inviting ? "Creating…" : "Create user"}
                 </button>
 
                 {inviteLink ? (
-                  <div className="mt-3 flex basis-full items-center gap-2 overflow-hidden">
-                    <span className="shrink-0 text-sm text-neutral-700">
-                      Invite link
-                    </span>
-                    <code className="block flex-1 min-w-0 max-w-full truncate rounded bg-neutral-50 px-2 py-1 text-xs text-neutral-700">
-                      {inviteLink}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={async (e) => {
-                        e.preventDefault();
-                        try {
-                          await navigator.clipboard.writeText(inviteLink!);
-                          toast.showOk("Invite link copied");
-                        } catch {
-                          /* ignore clipboard failures */
-                        }
-                      }}
-                      className="h-9 shrink-0 rounded-md border px-3 text-sm hover:bg-gray-50"
-                    >
-                      Copy
-                    </button>
+                  <div className="basis-full overflow-hidden">
+                    <CopyField label="Invite link" value={inviteLink} />
                   </div>
                 ) : null}
               </div>
@@ -967,35 +956,36 @@ export default function UsersAndRolesPage() {
           )}
 
           {/* Filters */}
-          <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-            <label className="block">
-              <span className="text-sm text-neutral-700">
-                Search (name or email)
-              </span>
+          <div className="mb-3 grid gap-3 sm:grid-cols-2">
+            <label className="block text-sm">
+              Search (name or email)
               <input
                 value={q}
                 onChange={(e) => {
                   setPage(1);
                   setQ(e.target.value);
                 }}
-                className="h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
+                className="mt-1 h-9 w-full rounded-md border border-gray-300 px-3 outline-none focus:ring-2 focus:ring-blue-500"
                 aria-describedby="search-hint"
-                placeholder="e.g. alex or @demo.test"
+                placeholder="e.g. alex"
               />
-              <span id="search-hint" className="sr-only">
-                Type to filter by name or email
+              <span
+                id="search-hint"
+                className="mt-1 block text-xs text-neutral-500"
+              >
+                Press Enter to search; list updates automatically.
               </span>
             </label>
 
-            <label className="block">
-              <span className="text-sm text-neutral-700">Role</span>
+            <label className="block text-sm">
+              Filter by role
               <select
                 value={slot}
                 onChange={(e) => {
                   setPage(1);
                   setSlot(e.target.value);
                 }}
-                className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
+                className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">All</option>
                 {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
@@ -1008,161 +998,142 @@ export default function UsersAndRolesPage() {
                 })}
               </select>
             </label>
-
-            <label className="block">
-              <span className="text-sm text-neutral-700">Page size</span>
-              <select
-                value={String(pageSize)}
-                onChange={(e) => {
-                  const v = Number(e.target.value) || 20;
-                  setPage(1);
-                  setPageSize(v);
-                }}
-                className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {[10, 20, 50].map((n) => (
-                  <option key={n} value={String(n)}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
 
-          {/* Meta */}
-          <div className="mb-2 text-sm text-neutral-600">
+          {/* List */}
+          <div className="overflow-hidden rounded-xl border ring-1 ring-black/5">
+            <div className="grid grid-cols-12 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-600">
+              <div className="col-span-5">Member</div>
+              <div className="col-span-2">Role</div>
+              <div className="col-span-2">Status</div>
+              <div className="col-span-3 text-right">Actions</div>
+            </div>
+
             {loading ? (
-              <>Loading…</>
+              <div className="px-4 py-6 text-sm text-neutral-500">Loading…</div>
             ) : error ? (
-              <span className="text-rose-700">{error}</span>
-            ) : (
-              <>{total} results</>
-            )}
-          </div>
-
-          {/* Table */}
-          {!loading && !error && (items?.length ?? 0) === 0 && (
-            <div className="rounded-md border p-6 text-sm text-neutral-600">
-              No members found. Try clearing filters.
-            </div>
-          )}
-
-          {(items ?? []).map((r) => {
-            const isBusy = !!pending[r.id];
-            const selectValue =
-              typeof r.slot === "number" ? String(r.slot) : "";
-            const isPending = !!(r.isInvited ?? r.invited);
-            return (
-              <div
-                key={r.id}
-                className="grid grid-cols-[1fr_1fr_minmax(220px,260px)_minmax(160px,200px)] items-center gap-3 border-b py-3 last:border-b-0"
-              >
-                {/* Name + email */}
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-neutral-900">
-                    {r.name || "—"}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="truncate text-xs text-neutral-600">
-                      {r.email}
-                    </div>
-                    {isPending && (
-                      <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                        Pending
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Role label (readable) */}
-                <div className="min-w-0 text-sm text-neutral-700">
-                  {typeof r.slot === "number"
-                    ? roleMeta.get(r.slot)?.label ?? `Role ${r.slot}`
-                    : "—"}
-                </div>
-
-                {/* Role selector */}
-                <div className="min-w-0">
-                  <label className="sr-only" htmlFor={`role-${r.id}`}>
-                    Role
-                  </label>
-                  <select
-                    id={`role-${r.id}`}
-                    value={selectValue}
-                    onChange={(e) => onChangeSlot(r.id, e.target.value)}
-                    className={cx(
-                      "h-9 w-full rounded-md border bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500",
-                      isBusy && "cursor-not-allowed opacity-50"
-                    )}
-                    disabled={isBusy}
-                  >
-                    <option value="">Select role…</option>
-                    {Array.from({ length: 10 }, (_, i) => i + 1).map((s) => {
-                      const label = roleMeta.get(s)?.label ?? `Role ${s}`;
-                      return (
-                        <option key={s} value={String(s)}>
-                          {label}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-
-                {/* Actions */}
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <button
-                    onClick={() => setViewing(r)}
-                    className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                  >
-                    View
-                  </button>
-                  <button
-                    onClick={() => onRemove(r.id, r.name || r.email)}
-                    disabled={isBusy}
-                    className={cx(
-                      "h-9 rounded-md border px-3 text-sm",
-                      isBusy
-                        ? "cursor-not-allowed opacity-50"
-                        : "hover:bg-gray-50"
-                    )}
-                    aria-label={`Remove ${r.name || r.email} from org`}
-                  >
-                    Remove
-                  </button>
-                </div>
+              <div className="px-4 py-6 text-sm text-rose-700">{error}</div>
+            ) : (items ?? []).length === 0 ? (
+              <div className="px-4 py-6 text-sm text-neutral-500">
+                No users found.
               </div>
-            );
-          })}
+            ) : (
+              (items ?? []).map((u) => {
+                const role = u.slot ?? 0;
+                const roleLabel =
+                  roleMeta.get(role)?.label ?? (role ? `Role ${role}` : "—");
+                const isPending = !!(u.isInvited ?? u.invited);
+                return (
+                  <div key={u.id} className="border-t px-4 py-3">
+                    <div className="grid grid-cols-12 items-center gap-3">
+                      {/* Member */}
+                      <div className="col-span-5 min-w-0">
+                        <div className="truncate font-medium">
+                          {u.name || u.email}
+                        </div>
+                        <div className="truncate text-sm text-neutral-600">
+                          {u.email}
+                        </div>
+                      </div>
 
-          {/* Pagination */}
-          <div className="mt-4 flex items-center justify-between">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page <= 1 || loading}
-              className={cx(
-                "h-9 rounded-md border px-3",
-                page <= 1 || loading
-                  ? "cursor-not-allowed opacity-50"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              Previous
-            </button>
-            <div className="text-sm">
-              Page {page} of {totalPages}
+                      {/* Role */}
+                      <div className="col-span-2">
+                        <select
+                          disabled={pending[u.id]}
+                          value={String(u.slot ?? "")}
+                          onChange={(e) => onChangeSlot(u.id, e.target.value)}
+                          className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        >
+                          <option value="">—</option>
+                          {Array.from({ length: 10 }, (_, i) => i + 1).map(
+                            (n) => (
+                              <option key={n} value={String(n)}>
+                                {roleMeta.get(n)?.label ?? `Role ${n}`}
+                              </option>
+                            )
+                          )}
+                        </select>
+                      </div>
+
+                      {/* Status */}
+                      <div className="col-span-2">
+                        {isPending ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200">
+                            Pending
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200">
+                            Active
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Actions (incl. NEW: Re-invite when pending) */}
+                      <div className="col-span-3 flex items-center justify-end gap-2">
+                        {isPending ? (
+                          <button
+                            disabled={pending[u.id]}
+                            onClick={() => onReinvite(u)}
+                            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap"
+                            title="Generate a new invite link"
+                          >
+                            Re-invite
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setViewing(u)}
+                            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                          >
+                            View
+                          </button>
+                        )}
+
+                        <button
+                          disabled={pending[u.id]}
+                          onClick={() => onRemove(u.id, u.name || u.email)}
+                          className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Inline invite link (NEW; appears only after clicking Re-invite) */}
+                    {rowInviteLinks[u.id] ? (
+                      <div className="mt-3">
+                        <CopyField
+                          label="Invite link"
+                          value={rowInviteLinks[u.id]}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })
+            )}
+
+            {/* Pagination */}
+            <div className="flex items-center justify-between border-t px-4 py-2 text-sm">
+              <div>
+                Page {page} of {totalPages} • {total} total
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="h-8 rounded-md border px-2 disabled:opacity-50"
+                >
+                  Prev
+                </button>
+                <button
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  className="h-8 rounded-md border px-2 disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
             </div>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages || loading}
-              className={cx(
-                "h-9 rounded-md border px-3",
-                page >= totalPages || loading
-                  ? "cursor-not-allowed opacity-50"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              Next
-            </button>
           </div>
         </section>
 
