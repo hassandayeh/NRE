@@ -415,10 +415,7 @@ export default function UsersAndRolesPage() {
   React.useEffect(() => {
     if (!orgId) return;
     refreshUsers();
-    // do NOT include refreshUsers in deps
-  }, [orgId, apiUrl]);
-  // if your linter complains, keep the comment to silence it:
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId, apiUrl, refreshUsers]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
