@@ -1,9 +1,10 @@
 // prisma/schema.prisma
-// === Clean Base Schema (Hard Reset, slot-based roles only) ===
-// - Org-scoped Roles 1–10 + permissions
-// - Users, Organizations
-// - Bookings + normalized participants (slot-based; NO named roles)
-// - Minimal
+// === Clean Base Schema (slot-based roles) ===
+// - Organizations, Users
+// - Slot-based roles (1..10) with per-org labels
+// - Bookings + participants
+// - NOTE: UserRole now includes `orgManaged` (Boolean)
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -16,7 +17,7 @@ datasource db {
 
 /**
  * =========================
- * Enums (no role names)
+ * Enums
  * =========================
  */
 enum BookingStatus {
@@ -38,27 +39,21 @@ enum InviteStatus {
   CANCELLED
 }
 
-// New (additive): guest visibility controls
-enum GuestVisibility {
-  PRIVATE
-  PUBLIC
-}
-
 /**
  * =========================
  * Tenancy & Users
  * =========================
  */
 model Organization {
-  id   String @id @default(cuid())
-  name String @db.VarChar(200)
+  id        String   @id @default(cuid())
+  name      String   @db.VarChar(200)
 
   // Access control
   orgRoles  OrgRole[]
   userRoles UserRole[]
 
   // Domain
-  bookings Booking[]
+  bookings  Booking[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -67,14 +62,14 @@ model Organization {
 }
 
 model User {
-  id             String @id @default(cuid())
-  email          String @unique @db.VarChar(320)
-  hashedPassword String @db.VarChar(255)
+  id               String   @id @default(cuid())
+  email            String   @unique @db.VarChar(320)
+  hashedPassword   String   @db.VarChar(255)
 
   // Display/profile
-  displayName String? @db.VarChar(200)
-  avatarUrl   String? @db.Text
-  bio         String? @db.Text
+  displayName      String?  @db.VarChar(200)
+  avatarUrl        String?  @db.Text
+  bio              String?  @db.Text
 
   // Directory/search facets
   languages        String[] @default([])
@@ -86,17 +81,14 @@ model User {
   timeZone         String?  @db.VarChar(64)
 
   // Access
-  userRoles UserRole[]
+  userRoles        UserRole[]
 
-  // Participation (legacy user-based participants)
+  // Participation
   bookingParticipants BookingParticipant[]
   notes               BookingNote[]
 
-  // Guest (1:1 optional)
-  guestProfile GuestProfile?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@index([displayName])
   @@index([countryCode])
@@ -107,35 +99,34 @@ model User {
  * Access Control (Roles 1–10)
  * =========================
  */
-// Canonical permission catalog (e.g., "booking:update", "directory:listed_internal")
-model PermissionKey {
-  id          String   @id @default(cuid())
-  key         String   @unique @db.VarChar(120)
-  description String?  @db.Text
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 
+// Canonical permission catalog (optional; kept from your base)
+model PermissionKey {
+  id           String   @id @default(cuid())
+  key          String   @unique @db.VarChar(120)
+  description  String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
   templateLinks RoleTemplatePermission[]
   orgLinks      OrgRolePermission[]
 }
 
 // Default slots 1..10 with default labels and permissions
 model RoleTemplate {
-  id                String   @id @default(cuid())
-  slot              Int      @unique // 1..10
-  defaultLabel      String   @db.VarChar(100)
-  isActiveByDefault Boolean  @default(false)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  permissions RoleTemplatePermission[]
+  id                 String   @id @default(cuid())
+  slot               Int      @unique   // 1..10
+  defaultLabel       String   @db.VarChar(100)
+  isActiveByDefault  Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  permissions        RoleTemplatePermission[]
 }
 
 model RoleTemplatePermission {
   roleTemplateId  String
   permissionKeyId String
 
-  roleTemplate  RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
+  roleTemplate RoleTemplate @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
   permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([roleTemplateId, permissionKeyId])
@@ -143,17 +134,19 @@ model RoleTemplatePermission {
 
 // Per-org instance of a slot with label + active toggle
 model OrgRole {
-  id           String       @id @default(cuid())
-  orgId        String
+  id        String   @id @default(cuid())
+  orgId     String
+  slot      Int
+  label     String   @db.VarChar(100)
+  isActive  Boolean  @default(false)
+
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  slot         Int
-  label        String       @db.VarChar(100)
-  isActive     Boolean      @default(false)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   permissions OrgRolePermission[]
-  assignments UserRole[]          @relation("OrgRoleAssignments")
+  assignments UserRole[] @relation("OrgRoleAssignments")
 
   @@unique([orgId, slot])
   @@index([orgId])
@@ -164,22 +157,21 @@ model OrgRolePermission {
   permissionKeyId String
   allowed         Boolean @default(true)
 
-  orgRole       OrgRole       @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
+  orgRole      OrgRole      @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
   permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([orgRoleId, permissionKeyId])
 }
 
 // Membership = role assignment (one per user per org)
-// Additive: orgManaged flag (maps to "StaffMembership.orgManaged" from spec)
 model UserRole {
   userId     String
   orgId      String
   slot       Int
   assignedAt DateTime @default(now())
 
-  // NEW: Whether this membership is org-managed (STAFF)
-  orgManaged Boolean @default(true)
+  // NEW: who controls this assignment (used by your API/seed)
+  orgManaged Boolean  @default(false)
 
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -187,35 +179,8 @@ model UserRole {
   // Composite relation to the org's chosen slot (enforces slot exists)
   orgRole OrgRole @relation("OrgRoleAssignments", fields: [orgId, slot], references: [orgId, slot], onDelete: Cascade)
 
-  // NEW: back-relation from UserRole → BookingParticipant (staff view)
-  bookingParticipants BookingParticipant[] @relation("BookingParticipantStaffMembership")
-
-  @@id([userId, orgId]) // exactly one role per user per org
+  @@id([userId, orgId])        // exactly one role per user per org
   @@index([orgId, slot])
-}
-
-/**
- * =========================
- * Guest Identity (additive)
- * =========================
- */
-model GuestProfile {
-  id            String          @id @default(cuid())
-  userId        String          @unique
-  personalEmail String          @unique @db.VarChar(320)
-  visibility    GuestVisibility @default(PRIVATE)
-  inviteable    Boolean         @default(true)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  // NEW: back-relation from GuestProfile → BookingParticipant (guest view)
-  bookingParticipants BookingParticipant[] @relation("BookingParticipantGuest")
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([visibility])
-  @@index([inviteable])
 }
 
 /**
@@ -224,59 +189,47 @@ model GuestProfile {
  * =========================
  */
 model Booking {
-  id           String       @id @default(cuid())
-  orgId        String
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id            String   @id @default(cuid())
+  orgId         String
+  organization  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  subject      String        @db.VarChar(300)
-  status       BookingStatus @default(PENDING)
-  startAt      DateTime
-  durationMins Int
+  subject       String   @db.VarChar(300)
+  status        BookingStatus @default(PENDING)
+  startAt       DateTime
+  durationMins  Int
 
   // Optional shared “where” defaults
-  appearanceType  AppearanceType?
-  locationUrl     String?
-  locationName    String?         @db.VarChar(300)
+  appearanceType  AppearanceType? // ONLINE
+  locationUrl     String?         // IN_PERSON
+  locationName    String? @db.VarChar(300)
   locationAddress String?
-  dialInfo        String?
+  dialInfo        String?         // PHONE
 
-  participants BookingParticipant[]
-  notes        BookingNote[]
+  participants  BookingParticipant[]
+  notes         BookingNote[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@index([orgId])
   @@index([startAt])
 }
 
-// Additive transition to staff/guest references.
-// We KEEP legacy userId for now (for backward compatibility reads).
 model BookingParticipant {
-  id        String  @id @default(cuid())
-  bookingId String
-  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  bookingId  String
+  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  // Legacy (kept): direct user link (will be deprecated after rollout)
-  userId String?
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  // NEW: Staff membership reference (UserRole composite key)
-  staffUserId     String?
-  staffOrgId      String?
-  staffMembership UserRole? @relation(name: "BookingParticipantStaffMembership", fields: [staffUserId, staffOrgId], references: [userId, orgId], onDelete: SetNull)
-
-  // NEW: Guest reference
-  guestProfileId String?
-  guestProfile   GuestProfile? @relation(name: "BookingParticipantGuest", fields: [guestProfileId], references: [id], onDelete: SetNull)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   // Slot-based role (1..10). Enforce range in app/UI.
-  roleSlot Int
+  roleSlot   Int
 
   // Optional snapshot of the org role label at invite time (for stable UI)
   roleLabelSnapshot String? @db.VarChar(100)
 
-  inviteStatus InviteStatus @default(PENDING)
+  inviteStatus  InviteStatus @default(PENDING)
 
   // Optional audit
   invitedByUserId String?
@@ -284,33 +237,15 @@ model BookingParticipant {
   respondedAt     DateTime?
 
   // Optional per-participant context
-  notes String? @db.Text
+  notes       String? @db.Text
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  // IMPORTANT: In migration SQL we will add a DB-level CHECK constraint:
-  // CHECK (
-  //   (
-  //     ("staffUserId" IS NOT NULL AND "staffOrgId" IS NOT NULL)
-  //     OR "guestProfileId" IS NOT NULL
-  //   )
-  //   AND NOT (
-  //     ("staffUserId" IS NOT NULL AND "staffOrgId" IS NOT NULL)
-  //     AND "guestProfileId" IS NOT NULL
-  //   )
-  // )
-
-  // Legacy uniqueness (kept)
-  @@unique([bookingId, userId])
-  // New uniqueness guards (each actor appears at most once)
-  @@unique([bookingId, staffUserId, staffOrgId])
-  @@unique([bookingId, guestProfileId])
+  @@unique([bookingId, userId]) // a user appears at most once on a booking
   @@index([bookingId])
   @@index([roleSlot])
   @@index([userId, inviteStatus])
-  @@index([staffUserId, staffOrgId])
-  @@index([guestProfileId])
 }
 
 model BookingNote {
@@ -319,63 +254,11 @@ model BookingNote {
   booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
   body      String   @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([bookingId, createdAt])
-}
-
-/// ========== Modes & Access (additive; safe) ==========
-model OrganizationMode {
-  id               String  @id @default(cuid())
-  orgId            String
-  slot             Int
-  active           Boolean @default(false)
-  label            String?
-  accessFieldLabel String?
-
-  // children presets
-  OrganizationModePreset OrganizationModePreset[]
-
-  // Indexes & guards
-  @@unique([orgId, slot])
-  @@index([orgId, active])
-}
-
-model OrganizationModePreset {
-  id        String @id @default(cuid())
-  orgModeId String
-  value     String
-
-  // relation (kept scalar-safe; Prisma can infer without foreign keys in DB)
-  mode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
-
-  @@index([orgModeId])
-}
-
-model OrganizationAccessField {
-  id    String @id @default(cuid())
-  orgId String
-
-  /// A short stable identifier within the org (e.g., "link", "address", "dial")
-  key String
-
-  /// Human label shown in UI (e.g., "Link", "Address", "Dial-in number")
-  label String
-
-  presets OrganizationAccessPreset[]
-
-  @@unique([orgId, key])
-  @@index([orgId])
-}
-
-model OrganizationAccessPreset {
-  id            String @id @default(cuid())
-  accessFieldId String
-  value         String
-
-  field OrganizationAccessField @relation(fields: [accessFieldId], references: [id], onDelete: Cascade)
-
-  @@index([accessFieldId])
 }
