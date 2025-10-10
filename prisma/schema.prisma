@@ -1,9 +1,5 @@
 // prisma/schema.prisma
-// === Clean Base Schema (slot-based roles) ===
-// - Organizations, Users
-// - Slot-based roles (1..10) with per-org labels
-// - Bookings + participants
-// - Modes (OrganizationMode) for /api/org/modes routes
+// Base: Orgs, Users, Roles (slots 1..10), Bookings, Modes & Access (additive-only)
 
 generator client {
   provider = "prisma-client-js"
@@ -15,11 +11,9 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-/**
- * =========================
- * Enums
- * =========================
- */
+/* =========================
+   Enums
+   ========================= */
 enum BookingStatus {
   PENDING
   CONFIRMED
@@ -39,21 +33,21 @@ enum InviteStatus {
   CANCELLED
 }
 
-/**
- * =========================
- * Tenancy & Users
- * =========================
- */
+/* =========================
+   Tenancy & Users
+   ========================= */
 model Organization {
   id        String   @id @default(cuid())
   name      String   @db.VarChar(200)
 
   // Access control
-  orgRoles  OrgRole[]
-  userRoles UserRole[]
+  orgRoles   OrgRole[]
+  userRoles  UserRole[]
 
-  // Modes
-  modes     OrganizationMode[]
+  // Modes & access (additive)
+  modes              OrganizationMode[]
+  modePresets        OrganizationModePreset[]
+  accessPresets      OrganizationAccessPreset[]
 
   // Domain
   bookings  Booking[]
@@ -69,12 +63,10 @@ model User {
   email            String   @unique @db.VarChar(320)
   hashedPassword   String   @db.VarChar(255)
 
-  // Display/profile
   displayName      String?  @db.VarChar(200)
   avatarUrl        String?  @db.Text
   bio              String?  @db.Text
 
-  // Directory/search facets
   languages        String[] @default([])
   tags             String[] @default([])
   supportsOnline   Boolean  @default(false)
@@ -83,10 +75,7 @@ model User {
   countryCode      String?  @db.VarChar(2)
   timeZone         String?  @db.VarChar(64)
 
-  // Access
   userRoles        UserRole[]
-
-  // Participation
   bookingParticipants BookingParticipant[]
   notes               BookingNote[]
 
@@ -97,13 +86,9 @@ model User {
   @@index([countryCode])
 }
 
-/**
- * =========================
- * Access Control (Roles 1–10)
- * =========================
- */
-
-// Canonical permission catalog
+/* =========================
+   Access Control (Roles 1–10)
+   ========================= */
 model PermissionKey {
   id            String   @id @default(cuid())
   key           String   @unique @db.VarChar(120)
@@ -114,10 +99,9 @@ model PermissionKey {
   orgLinks      OrgRolePermission[]
 }
 
-// Default slots 1..10 with default labels and permissions
 model RoleTemplate {
   id                 String   @id @default(cuid())
-  slot               Int      @unique   // 1..10
+  slot               Int      @unique
   defaultLabel       String   @db.VarChar(100)
   isActiveByDefault  Boolean  @default(false)
   createdAt          DateTime @default(now())
@@ -128,14 +112,11 @@ model RoleTemplate {
 model RoleTemplatePermission {
   roleTemplateId  String
   permissionKeyId String
-
   roleTemplate  RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
   permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
-
   @@id([roleTemplateId, permissionKeyId])
 }
 
-// Per-org instance of a slot with label + active toggle
 model OrgRole {
   id        String   @id @default(cuid())
   orgId     String
@@ -166,53 +147,95 @@ model OrgRolePermission {
   @@id([orgRoleId, permissionKeyId])
 }
 
-// Membership = role assignment (one per user per org)
 model UserRole {
   userId     String
   orgId      String
   slot       Int
   assignedAt DateTime @default(now())
-
-  // used by API/seed
   orgManaged Boolean  @default(false)
 
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  // Composite relation to the org's chosen slot (enforces slot exists)
   orgRole OrgRole @relation("OrgRoleAssignments", fields: [orgId, slot], references: [orgId, slot], onDelete: Cascade)
 
-  @@id([userId, orgId])        // exactly one role per user per org
+  @@id([userId, orgId])
   @@index([orgId, slot])
 }
 
-/**
- * =========================
- * Modes (per org)
- * =========================
- * Matches API at /api/org/modes/route.ts which upserts by (orgId, slot)
+/* =========================
+   Modes (per org) + Presets & Access (additive)
+   ========================= */
+
+/** OrganizationMode
+ * API upserts by { orgId_slot: { orgId, slot } }
+ * Field is named `active` for Prisma client, but mapped to existing DB column `isActive`.
  */
 model OrganizationMode {
   id        String   @id @default(cuid())
   orgId     String
   slot      Int
   label     String   @db.VarChar(120)
-  isActive  Boolean  @default(false)
+  active    Boolean  @map("isActive") @default(false) // <-- no drop/rename in DB
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([orgId, slot]) // enables where: { orgId_slot: { orgId, slot } }
+  @@unique([orgId, slot])
   @@index([orgId])
 }
 
-/**
- * =========================
- * Bookings & Participation
- * =========================
- */
+/** Optional curated mode label per org+slot */
+model OrganizationModePreset {
+  id        String   @id @default(cuid())
+  orgId     String
+  slot      Int
+  label     String   @db.VarChar(120)
+  active    Boolean  @default(false)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, slot])
+  @@index([orgId])
+}
+
+/** Catalog of access fields (keys) that can be toggled per mode */
+model OrganizationAccessField {
+  id          String   @id @default(cuid())
+  key         String   @unique @db.VarChar(120)
+  label       String   @db.VarChar(200)
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  presets     OrganizationAccessPreset[]
+}
+
+/** Per-org+mode toggle for a field (allowed/denied) */
+model OrganizationAccessPreset {
+  id        String   @id @default(cuid())
+  orgId     String
+  modeSlot  Int
+  fieldId   String
+  allowed   Boolean  @default(true)
+
+  organization Organization           @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  field        OrganizationAccessField @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, modeSlot, fieldId])
+  @@index([orgId])
+}
+
+/* =========================
+   Bookings & Participation
+   ========================= */
 model Booking {
   id            String   @id @default(cuid())
   orgId         String
@@ -223,7 +246,6 @@ model Booking {
   startAt       DateTime
   durationMins  Int
 
-  // Optional shared “where” defaults
   appearanceType  AppearanceType?
   locationUrl     String?
   locationName    String? @db.VarChar(300)
