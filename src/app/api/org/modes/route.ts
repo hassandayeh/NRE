@@ -1,17 +1,13 @@
 // src/app/api/org/modes/route.ts
-import { NextRequest, NextResponse } from "next/server";
-// prisma singleton (matches your existing import style here)
-import { prisma } from "../../../../lib/prisma";
 
-// Optional helpers used elsewhere in the repo for auth/perm checks
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "../../../../lib/prisma";
 import { resolveViewerFromRequest } from "../../../../lib/viewer";
 import { hasCan } from "../../../../lib/access/permissions";
 
-/* ============================================================================
- * DTOs returned to the UI (unchanged)
- * ==========================================================================*/
+/* ================================== DTOs ================================== */
 type ModeDto = {
-  slot: number; // 1..10
+  slot: number;
   active: boolean;
   label?: string;
   accessFieldLabel?: string;
@@ -19,14 +15,12 @@ type ModeDto = {
 };
 
 type AccessFieldDto = {
-  key: string; // e.g., "link" | "address" | "dial"
-  label: string; // e.g., "Link" | "Address" | "Dial-in number"
+  key: string;
+  label: string;
   presets?: string[];
 };
 
-/* ============================================================================
- * Stub fallback (kept exactly as before)
- * ==========================================================================*/
+/* =============================== Stub Data ================================ */
 const stubModes: ModeDto[] = [
   {
     slot: 1,
@@ -68,25 +62,22 @@ const stubAccess: AccessFieldDto[] = [
   { key: "dial", label: "Dial-in number", presets: [] },
 ];
 
-/* ============================================================================
- * Raw SQL row shapes (unchanged)
- * ==========================================================================*/
+/* =========================== Raw SQL row shapes =========================== */
 interface ModeRow {
   slot: number;
   active: boolean;
   label: string | null;
   accessFieldLabel: string | null;
-  presets: string[]; // aggregated JSON array
+  presets: string[];
 }
+
 interface AccessRow {
   key: string;
   label: string;
-  presets: string[]; // aggregated JSON array
+  presets: string[];
 }
 
-/* ============================================================================
- * Helpers
- * ==========================================================================*/
+/* ================================ Helpers ================================= */
 function toStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((x) => String(x)).filter((s) => s.length > 0);
@@ -118,8 +109,6 @@ async function ensureCanManage(
 ): Promise<boolean> {
   const viewer = await resolveViewerFromRequest(req);
   if (!viewer?.userId) return false;
-
-  // Try a few common/manage keys; allow if ANY passes.
   const candidateKeys = [
     "org.modes.manage",
     "settings:manage",
@@ -127,30 +116,26 @@ async function ensureCanManage(
   ];
   for (const permission of candidateKeys) {
     try {
-      // @ts-ignore repo's hasCan signature accepts this object
+      // @ts-ignore: repo helper signature
       const ok = await hasCan({ userId: viewer.userId, orgId, permission });
       if (ok) return true;
     } catch {
-      // ignore unknown permission keys and keep trying
+      // ignore
     }
   }
   return false;
 }
 
-/* ============================================================================
- * GET  — DB-backed when orgId is present; otherwise stub (UNCHANGED)
- * ==========================================================================*/
+/* ================================== GET =================================== */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-
-  // Keep existing behavior: if orgId missing, return stub to keep the page resilient.
   const orgId = (searchParams.get("orgId") || "").trim();
+
   if (!orgId) {
     return NextResponse.json({ modes: stubModes, access: stubAccess });
   }
 
   try {
-    // Modes with preset aggregation
     const modesRaw = (await prisma.$queryRawUnsafe(
       `
       SELECT
@@ -163,11 +148,12 @@ export async function GET(req: NextRequest) {
           '[]'
         ) AS "presets"
       FROM "OrganizationMode" m
-      LEFT JOIN "OrganizationModePreset" mp ON mp."orgModeId" = m."id"
+      LEFT JOIN "OrganizationModePreset" mp
+        ON mp."orgModeId" = m."id"
       WHERE m."orgId" = $1
       GROUP BY m."slot", m."active", m."label", m."accessFieldLabel"
       ORDER BY m."slot" ASC
-    `,
+      `,
       orgId
     )) as unknown as ModeRow[];
 
@@ -179,22 +165,23 @@ export async function GET(req: NextRequest) {
       presets: Array.isArray(r.presets) ? r.presets : [],
     }));
 
-    // Access fields with preset aggregation
     const accessRaw = (await prisma.$queryRawUnsafe(
       `
       SELECT
         a."key",
         a."label",
         COALESCE(
-          JSON_AGG(ap."value" ORDER BY ap."id") FILTER (WHERE ap."id" IS NOT NULL),
+          JSON_AGG(ap."value" ORDER BY ap."id") FILTER (WHERE m."orgId" = $1),
           '[]'
         ) AS "presets"
       FROM "OrganizationAccessField" a
-      LEFT JOIN "OrganizationAccessPreset" ap ON ap."accessFieldId" = a."id"
-      WHERE a."orgId" = $1
+      LEFT JOIN "OrganizationAccessPreset" ap
+        ON ap."accessFieldId" = a."id"
+      LEFT JOIN "OrganizationMode" m
+        ON m."id" = ap."orgModeId"
       GROUP BY a."key", a."label"
       ORDER BY a."label" ASC
-    `,
+      `,
       orgId
     )) as unknown as AccessRow[];
 
@@ -206,17 +193,15 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ modes, access });
   } catch {
-    // Any DB error → safe stub
     return NextResponse.json({ modes: stubModes, access: stubAccess });
   }
 }
 
-/* ============================================================================
- * POST — Mutations with PERMISSION GATING
- * ==========================================================================*/
+/* ================================== POST ================================== */
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json().catch(() => ({}))) as any;
+
     let orgId: string = (body?.orgId || "").trim();
     if (!orgId) {
       const fromSession = await sessionOrgIdFrom(req);
@@ -229,7 +214,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Permission gate: only managers can write
     const canManage = await ensureCanManage(req, orgId);
     if (!canManage) {
       return NextResponse.json(
@@ -241,7 +225,7 @@ export async function POST(req: NextRequest) {
     const action = String(body?.action || "").trim();
 
     switch (action) {
-      /* ------------------------- Mode: upsert/update ------------------------*/
+      /* --------------------------- mode:update --------------------------- */
       case "mode:update": {
         const slot = Number(body?.slot || 0);
         if (!Number.isInteger(slot) || slot < 1 || slot > 10) {
@@ -250,11 +234,12 @@ export async function POST(req: NextRequest) {
             { status: 400 }
           );
         }
+
         const active =
           body?.active === true || body?.active === false
             ? Boolean(body.active)
             : undefined;
-        const label =
+        const labelInput =
           typeof body?.label === "string" && body.label.trim()
             ? body.label.trim()
             : undefined;
@@ -265,25 +250,26 @@ export async function POST(req: NextRequest) {
             : undefined;
         const presets = toStringArray(body?.presets);
 
-        // Upsert OrganizationMode by (orgId, slot)
+        // IMPORTANT: label is required by schema → provide a default when creating
+        const defaultLabel = `Mode ${slot}`;
+
         const mode = await prisma.organizationMode.upsert({
           where: { orgId_slot: { orgId, slot } },
           create: {
             orgId,
             slot,
             active: active ?? true,
-            label,
-            accessFieldLabel,
+            label: labelInput ?? defaultLabel,
+            ...(accessFieldLabel ? { accessFieldLabel } : {}),
           },
           update: {
             ...(active === undefined ? {} : { active }),
-            ...(label === undefined ? {} : { label }),
+            ...(labelInput === undefined ? {} : { label: labelInput }),
             ...(accessFieldLabel === undefined ? {} : { accessFieldLabel }),
           },
           select: { id: true },
         });
 
-        // Replace presets if provided
         if (presets.length) {
           await prisma.organizationModePreset.deleteMany({
             where: { orgModeId: mode.id },
@@ -292,7 +278,6 @@ export async function POST(req: NextRequest) {
             data: presets.map((value) => ({ orgModeId: mode.id, value })),
           });
         } else if (Array.isArray(body?.presets)) {
-          // Explicitly clear when empty array passed
           await prisma.organizationModePreset.deleteMany({
             where: { orgModeId: mode.id },
           });
@@ -301,7 +286,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, status: "mode_updated" });
       }
 
-      /* ---------------------- Access field: create/upsert --------------------*/
+      /* --------------------- access:create / access:update -------------------- */
       case "access:create":
       case "access:update": {
         const key =
@@ -313,6 +298,11 @@ export async function POST(req: NextRequest) {
             ? body.label.trim()
             : null;
         const presets = toStringArray(body?.presets);
+        const modeSlotRaw = body?.modeSlot;
+        const modeSlot =
+          Number.isInteger(modeSlotRaw) || typeof modeSlotRaw === "string"
+            ? Number(modeSlotRaw)
+            : 0;
 
         if (!key || !label) {
           return NextResponse.json(
@@ -321,31 +311,63 @@ export async function POST(req: NextRequest) {
           );
         }
 
+        // Access fields are GLOBAL: upsert by `key`
         const field = await prisma.organizationAccessField.upsert({
-          where: { orgId_key: { orgId, key } },
-          create: { orgId, key, label },
+          where: { key },
+          create: { key, label },
           update: { label },
           select: { id: true },
         });
 
-        // Replace presets if provided
-        if (presets.length) {
-          await prisma.organizationAccessPreset.deleteMany({
-            where: { accessFieldId: field.id },
-          });
-          await prisma.organizationAccessPreset.createMany({
-            data: presets.map((value) => ({ accessFieldId: field.id, value })),
-          });
-        } else if (Array.isArray(body?.presets)) {
-          await prisma.organizationAccessPreset.deleteMany({
-            where: { accessFieldId: field.id },
-          });
+        // If presets array is present, we must have a valid modeSlot to attach them.
+        if (Array.isArray(body?.presets)) {
+          if (!Number.isInteger(modeSlot) || modeSlot < 1 || modeSlot > 10) {
+            if (presets.length) {
+              return NextResponse.json(
+                {
+                  ok: false,
+                  error: "modeSlot (1..10) is required when providing presets",
+                },
+                { status: 400 }
+              );
+            }
+            // else: silently ignore (no presets to write)
+          } else {
+            // IMPORTANT: label is required by schema → provide a default when creating
+            const defaultModeLabel = `Mode ${modeSlot}`;
+
+            const mode = await prisma.organizationMode.upsert({
+              where: { orgId_slot: { orgId, slot: modeSlot } },
+              create: {
+                orgId,
+                slot: modeSlot,
+                active: true,
+                label: defaultModeLabel,
+              },
+              update: {},
+              select: { id: true },
+            });
+
+            await prisma.organizationAccessPreset.deleteMany({
+              where: { orgModeId: mode.id, accessFieldId: field.id },
+            });
+
+            if (presets.length) {
+              await prisma.organizationAccessPreset.createMany({
+                data: presets.map((value) => ({
+                  orgModeId: mode.id,
+                  accessFieldId: field.id,
+                  value,
+                })),
+              });
+            }
+          }
         }
 
         return NextResponse.json({ ok: true, status: "access_saved" });
       }
 
-      /* -------------------------- Access field: delete -----------------------*/
+      /* ------------------------------ access:delete --------------------------- */
       case "access:delete": {
         const key =
           typeof body?.key === "string" && body.key.trim()
@@ -358,18 +380,22 @@ export async function POST(req: NextRequest) {
           );
         }
 
-        // Cascade delete presets first (if no FK cascade)
         const field = await prisma.organizationAccessField.findUnique({
-          where: { orgId_key: { orgId, key } },
+          where: { key },
           select: { id: true },
         });
+
         if (field) {
-          await prisma.organizationAccessPreset.deleteMany({
-            where: { accessFieldId: field.id },
+          const modes = await prisma.organizationMode.findMany({
+            where: { orgId },
+            select: { id: true },
           });
-          await prisma.organizationAccessField.delete({
-            where: { orgId_key: { orgId, key } },
-          });
+          const modeIds = modes.map((m) => m.id);
+          if (modeIds.length) {
+            await prisma.organizationAccessPreset.deleteMany({
+              where: { accessFieldId: field.id, orgModeId: { in: modeIds } },
+            });
+          }
         }
 
         return NextResponse.json({ ok: true, status: "access_deleted" });
