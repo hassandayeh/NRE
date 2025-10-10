@@ -1,15 +1,15 @@
 // app/modules/settings/modes-access/page.tsx
-
 import type { Metadata } from "next";
 import Link from "next/link";
 import { revalidatePath } from "next/cache";
 import { headers, cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { prisma } from "../../../../lib/prisma";
 
 /** ===================== Types ===================== */
 type ModeDto = {
   slot: number;
-  active: boolean;
+  active: boolean; // computed by API: row existence for (orgId, slot)
   label?: string | null;
   accessFieldLabel?: string | null; // read-only join
   presets?: string[];
@@ -36,6 +36,12 @@ function toSlug(input: string): string {
     .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
+}
+
+function makeId(prefix: string) {
+  return `${prefix}${Math.random().toString(36).slice(2)}${Date.now().toString(
+    36
+  )}`;
 }
 
 async function loadModesAndAccess(orgId: string): Promise<ModesApiResponse> {
@@ -69,14 +75,14 @@ async function loadModeAccesses(orgId: string): Promise<ModeAccessRow[]> {
   >(
     `
     SELECT
-      p."id"               AS id,
-      m."slot"            AS "modeSlot",
-      m."label"           AS "modeLabel",
-      f."label"           AS "label",
-      p."value"           AS "details"
+      p."id"                         AS id,
+      m."slot"                       AS "modeSlot",
+      m."label"                      AS "modeLabel",
+      f."label"                      AS "label",
+      p."value"                      AS "details"
     FROM "OrganizationAccessPreset" p
     JOIN "OrganizationAccessField" f ON p."accessFieldId" = f."id"
-    JOIN "OrganizationMode"        m ON p."modeId"       = m."id"
+    JOIN "OrganizationMode"       m ON p."orgModeId"      = m."id"
     WHERE m."orgId" = $1
     ORDER BY m."slot", f."label", p."value"
   `,
@@ -87,14 +93,10 @@ async function loadModeAccesses(orgId: string): Promise<ModeAccessRow[]> {
 }
 
 /**
- * Resolve orgId (server-only) WITHOUT importing authOptions.
- * Order of precedence:
- *   1) cookie candidates: orgId, org_id, org, oid
- *   2) /api/auth/session  (reads { orgId } or { user.orgId })
- *   3) /api/org/profile   (reads orgId/organizationId/id/org.id)
+ * Resolve orgId (server-only).
+ * Try cookie first, then /api/org/profile.
  */
 async function resolveOrgIdServer(): Promise<string | null> {
-  // 1) cookie candidates
   try {
     const c = cookies();
     const fromCookie =
@@ -108,57 +110,44 @@ async function resolveOrgIdServer(): Promise<string | null> {
     // ignore
   }
 
-  const h = headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  const base = `${proto}://${host}`;
-  const cookie = h.get("cookie") ?? "";
-
-  // 2) /api/auth/session
   try {
-    const sess = await fetch(`${base}/api/auth/session`, {
-      cache: "no-store",
-      headers: { cookie },
-    });
-    if (sess.ok) {
-      const data = (await sess.json()) as any;
-      const fromSession: string | undefined =
-        (typeof data?.orgId === "string" && data.orgId) ||
-        (typeof data?.user?.orgId === "string" && data.user.orgId) ||
-        undefined;
-      if (fromSession) return fromSession;
-    }
-  } catch {
-    // ignore
-  }
+    const h = headers();
+    const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+    const proto = h.get("x-forwarded-proto") ?? "http";
+    const base = `${proto}://${host}`;
 
-  // 3) /api/org/profile
-  try {
     const res = await fetch(`${base}/api/org/profile`, {
       cache: "no-store",
-      headers: { cookie },
+      headers: { cookie: h.get("cookie") ?? "" },
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as any;
-    const resolved: string | null =
+
+    const data = (await res.json().catch(() => ({} as any))) as any;
+
+    const resolved =
       (typeof data?.orgId === "string" && data.orgId) ||
       (typeof data?.organizationId === "string" && data.organizationId) ||
       (typeof data?.id === "string" && data.id) ||
       (typeof data?.org?.id === "string" && data.org.id) ||
       null;
+
     return resolved || null;
   } catch {
     return null;
   }
 }
 
-/** ===================== Server actions — Modes (active + label only) ===================== */
+/** ===================== Server actions — Modes ===================== */
+/**
+ * Save behavior:
+ * - If a label is provided OR radio=active → upsert via API (becomes active).
+ * - If radio=inactive AND no label → delete the row (becomes inactive).
+ */
 async function saveMode(formData: FormData) {
   "use server";
-
   const orgId = String(formData.get("orgId") ?? "").trim();
   const slot = Number(formData.get("slot") ?? 0);
-  const active = formData.get("active") != null;
+  const activeRadio = String(formData.get("active") ?? ""); // "1" | "0" | ""
   const labelRaw = String(formData.get("label") ?? "").trim();
 
   if (!orgId || !slot || slot < 1 || slot > 10) {
@@ -166,65 +155,31 @@ async function saveMode(formData: FormData) {
     return;
   }
 
-  const label = labelRaw ? labelRaw.slice(0, 80) : null;
+  const wantsActive = activeRadio === "1" || !!labelRaw;
+  const label = labelRaw || `Mode ${slot}`;
 
-  const updated = (await prisma.$executeRawUnsafe(
-    `
-    UPDATE "OrganizationMode"
-       SET "active" = $3, "label" = $4
-     WHERE "orgId" = $1 AND "slot" = $2
-  `,
-    orgId,
-    slot,
-    active,
-    label
-  )) as number;
+  if (wantsActive) {
+    // Upsert through the API
+    const h = headers();
+    const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+    const proto = h.get("x-forwarded-proto") ?? "http";
+    const base = `${proto}://${host}`;
 
-  if (!updated) {
+    await fetch(`${base}/api/org/modes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "mode:update",
+        orgId,
+        slot,
+        label,
+      }),
+      cache: "no-store",
+    });
+  } else {
+    // Explicit inactivate: remove the row; presets cascade via FK.
     await prisma.$executeRawUnsafe(
-      `
-      INSERT INTO "OrganizationMode" ("id","orgId","slot","active","label")
-      VALUES ($1, $2, $3, $4, $5)
-    `,
-      `om_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
-      orgId,
-      slot,
-      active,
-      label
-    );
-  }
-
-  revalidatePath("/modules/settings/modes-access");
-}
-
-async function resetMode(formData: FormData) {
-  "use server";
-
-  const orgId = String(formData.get("orgId") ?? "").trim();
-  const slot = Number(formData.get("slot") ?? 0);
-
-  if (!orgId || !slot || slot < 1 || slot > 10) {
-    revalidatePath("/modules/settings/modes-access");
-    return;
-  }
-
-  const updated = (await prisma.$executeRawUnsafe(
-    `
-    UPDATE "OrganizationMode"
-       SET "active" = false, "label" = NULL
-     WHERE "orgId" = $1 AND "slot" = $2
-  `,
-    orgId,
-    slot
-  )) as number;
-
-  if (!updated) {
-    await prisma.$executeRawUnsafe(
-      `
-      INSERT INTO "OrganizationMode" ("id","orgId","slot","active","label")
-      VALUES ($1, $2, $3, false, NULL)
-    `,
-      `om_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+      `DELETE FROM "OrganizationMode" WHERE "orgId" = $1 AND "slot" = $2`,
       orgId,
       slot
     );
@@ -233,10 +188,29 @@ async function resetMode(formData: FormData) {
   revalidatePath("/modules/settings/modes-access");
 }
 
+async function resetMode(formData: FormData) {
+  "use server";
+  const orgId = String(formData.get("orgId") ?? "").trim();
+  const slot = Number(formData.get("slot") ?? 0);
+
+  if (!orgId || !slot || slot < 1 || slot > 10) {
+    revalidatePath("/modules/settings/modes-access");
+    return;
+  }
+
+  // Reset = remove the mode row entirely
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM "OrganizationMode" WHERE "orgId" = $1 AND "slot" = $2`,
+    orgId,
+    slot
+  );
+
+  revalidatePath("/modules/settings/modes-access");
+}
+
 /** ===================== Server actions — Access (Mode, Label, Details) ===================== */
 async function createModeAccess(formData: FormData) {
   "use server";
-
   const orgId = String(formData.get("orgId") ?? "").trim();
   const modeSlot = Number(formData.get("modeSlot") ?? 0);
   const labelRaw = String(formData.get("label") ?? "").trim();
@@ -248,16 +222,28 @@ async function createModeAccess(formData: FormData) {
   if (!labelRaw) throw new Error("Label is required.");
   if (!detailsRaw) throw new Error("Details are required.");
 
-  const modeRow = (await prisma.$queryRawUnsafe<
-    { id: string; active: boolean }[]
-  >(
-    `SELECT "id","active" FROM "OrganizationMode" WHERE "orgId" = $1 AND "slot" = $2 LIMIT 1`,
+  // Ensure the mode row exists for (orgId, slot) and get its id
+  const ensured = (await prisma.$queryRawUnsafe<{ id: string }[]>(
+    `
+    WITH upsert AS (
+      INSERT INTO "OrganizationMode" ("id","orgId","slot","label","updatedAt")
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT ("orgId","slot")
+      DO UPDATE SET "updatedAt" = NOW()
+      RETURNING "id"
+    )
+    SELECT "id" FROM upsert
+    `,
+    makeId("om_"),
     orgId,
-    modeSlot
-  )) as { id: string; active: boolean }[];
-  const modeId = modeRow?.[0]?.id;
-  if (!modeId) throw new Error("Mode not found. Save the Mode first.");
+    modeSlot,
+    `Mode ${modeSlot}`
+  )) as { id: string }[];
 
+  const orgModeId = ensured?.[0]?.id;
+  if (!orgModeId) throw new Error("Mode not found. Save the Mode first.");
+
+  // Access field is GLOBAL (no orgId). Upsert by key, with timestamps.
   const key = (toSlug(labelRaw) || `access-${Date.now().toString(36)}`).slice(
     0,
     40
@@ -265,40 +251,42 @@ async function createModeAccess(formData: FormData) {
   const label = labelRaw.slice(0, 80);
   const details = detailsRaw.slice(0, 240);
 
+  // AccessField upsert with timestamps
   await prisma.$executeRawUnsafe(
     `
-    INSERT INTO "OrganizationAccessField" ("id","orgId","key","label")
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT ("orgId","key")
-    DO UPDATE SET "label" = EXCLUDED."label"
-  `,
-    `accf_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
-    orgId,
+    INSERT INTO "OrganizationAccessField" ("id","key","label","createdAt","updatedAt")
+    VALUES ($1, $2, $3, NOW(), NOW())
+    ON CONFLICT ("key")
+    DO UPDATE SET "label" = EXCLUDED."label", "updatedAt" = NOW()
+    `,
+    makeId("accf_"),
     key,
     label
   );
 
   const fieldRow = (await prisma.$queryRawUnsafe<{ id: string }[]>(
-    `SELECT "id" FROM "OrganizationAccessField" WHERE "orgId" = $1 AND "key" = $2 LIMIT 1`,
-    orgId,
+    `SELECT "id" FROM "OrganizationAccessField" WHERE "key" = $1 LIMIT 1`,
     key
   )) as { id: string }[];
   const accessFieldId = fieldRow?.[0]?.id;
-  if (!accessFieldId) throw new Error("Failed to create access field.");
+  if (!accessFieldId)
+    throw new Error("Failed to create or fetch access field.");
 
+  // Preset insert with timestamps (guarded)
   await prisma.$executeRawUnsafe(
     `
-    INSERT INTO "OrganizationAccessPreset" ("id","accessFieldId","value","modeId")
-    SELECT $1, $2, $3, $4
+    INSERT INTO "OrganizationAccessPreset" ("id","accessFieldId","value","orgModeId","createdAt","updatedAt")
+    SELECT $1, $2, $3, $4, NOW(), NOW()
     WHERE NOT EXISTS (
-      SELECT 1 FROM "OrganizationAccessPreset"
-      WHERE "accessFieldId" = $2 AND "value" = $3 AND "modeId" = $4
+      SELECT 1
+      FROM "OrganizationAccessPreset"
+      WHERE "accessFieldId" = $2 AND "value" = $3 AND "orgModeId" = $4
     )
-  `,
-    `apre_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+    `,
+    makeId("apre_"),
     accessFieldId,
     details,
-    modeId
+    orgModeId
   );
 
   revalidatePath("/modules/settings/modes-access");
@@ -306,7 +294,6 @@ async function createModeAccess(formData: FormData) {
 
 async function deleteModeAccess(formData: FormData) {
   "use server";
-
   const id = String(formData.get("id") ?? "").trim();
   if (!id) {
     revalidatePath("/modules/settings/modes-access");
@@ -318,6 +305,7 @@ async function deleteModeAccess(formData: FormData) {
     id
   );
 
+  // GC unreferenced global fields
   await prisma.$executeRawUnsafe(`
     DELETE FROM "OrganizationAccessField"
     WHERE "id" IN (
@@ -341,21 +329,28 @@ export default async function ModesAndAccessPage({
 }: {
   searchParams: Record<string, string | string[] | undefined>;
 }) {
-  // 1) URL (override if provided)
   const orgIdFromQuery =
     (Array.isArray(searchParams.orgId)
       ? searchParams.orgId[0]
       : searchParams.orgId) || "";
 
-  // 2) Fallback to server resolution (cookies → /api/auth/session → /api/org/profile)
-  const orgId = orgIdFromQuery || (await resolveOrgIdServer()) || "";
+  if (!orgIdFromQuery) {
+    const resolved = await resolveOrgIdServer();
+    if (resolved) {
+      redirect(
+        `/modules/settings/modes-access?orgId=${encodeURIComponent(resolved)}`
+      );
+    }
+  }
+
+  const orgId = orgIdFromQuery;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-8 flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">
-            Modes &amp; access
+            Modes & access
           </h1>
           <p className="mt-1 text-sm text-neutral-600">
             Create Modes (1..10), then add Access entries linked to a Mode with
@@ -364,20 +359,21 @@ export default async function ModesAndAccessPage({
         </div>
         <Link
           href="/modules/settings"
-          className="rounded-lg border px-3 py-1.5 text-sm hover:bg-neutral-50"
+          className="inline-flex h-9 items-center rounded-xl border px-3 text-sm"
         >
           Settings
         </Link>
       </header>
 
-      <div className="mb-4 text-sm text-neutral-500">Org: {orgId || "—"}</div>
+      <p className="mb-6 text-sm text-neutral-600">
+        <span className="font-medium">Org:</span> {orgId || "—"}
+      </p>
 
       {!orgId ? (
-        <div className="rounded-2xl border border-dashed p-6 text-sm text-neutral-700">
-          <p className="mb-1 font-medium">No organization provided.</p>
-          <p>
-            Append <code>?orgId=YOUR_ORG_ID</code> to manage Modes &amp; Access,
-            or sign in so we can detect your org automatically.
+        <div className="rounded-xl border p-4 text-sm">
+          <p className="font-medium">No organization provided.</p>
+          <p className="mt-1">
+            Append <code>?orgId=YOUR_ORG_ID</code> to manage Modes &amp; Access.
           </p>
         </div>
       ) : (
@@ -390,79 +386,81 @@ export default async function ModesAndAccessPage({
 /** ===================== Content ===================== */
 async function Content({ orgId }: { orgId: string }) {
   const { modes } = await loadModesAndAccess(orgId);
-
   const bySlot = new Map<number, ModeDto>();
   modes.forEach((m) => bySlot.set(m.slot, m));
 
   return (
     <>
-      {/* Slot pills */}
-      <SlotPills modes={modes} />
-
       {/* MODES (activate + label) */}
-      <Section
-        title="Mode slots"
-        description="Activate and label up to 10 Modes."
-      >
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <Section title="Modes">
+        <div role="table" className="grid grid-cols-12 gap-2 text-sm">
+          <div role="row" className="contents text-neutral-500">
+            <div role="columnheader" className="col-span-2">
+              Slot
+            </div>
+            <div role="columnheader" className="col-span-3">
+              Active
+            </div>
+            <div role="columnheader" className="col-span-5">
+              Label
+            </div>
+            <div role="columnheader" className="col-span-2 text-right">
+              Actions
+            </div>
+          </div>
+
           {Array.from({ length: 10 }, (_, i) => i + 1).map((slot) => {
             const m = bySlot.get(slot);
-            const saveFormId = `save-mode-${slot}`;
-            const resetFormId = `reset-mode-${slot}`;
-            return (
-              <div key={slot} className="rounded-2xl border p-4">
-                <div className="mb-3 font-medium">Mode {slot}</div>
 
-                {/* SAVE form */}
-                <form id={saveFormId} action={saveMode} className="contents">
+            return (
+              <div key={slot} role="row" className="contents items-center">
+                <div className="col-span-2 py-2 font-medium">Mode {slot}</div>
+
+                <form action={saveMode} className="contents">
                   <input type="hidden" name="orgId" value={orgId} />
                   <input type="hidden" name="slot" value={slot} />
 
-                  <div className="mb-2 flex items-center gap-3">
-                    <label className="text-sm">Active</label>
-                    <input
-                      type="checkbox"
-                      name="active"
-                      defaultChecked={!!m?.active}
-                      className="size-4 accent-black"
-                    />
+                  <div className="col-span-3 flex items-center gap-3 py-2">
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="active"
+                        value="0"
+                        defaultChecked={!m?.active}
+                        aria-label="inactive"
+                      />
+                      <span className="text-neutral-600">inactive</span>
+                    </label>
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="active"
+                        value="1"
+                        defaultChecked={!!m?.active}
+                        aria-label="active"
+                      />
+                      <span className="text-neutral-600">active</span>
+                    </label>
                   </div>
 
-                  <div className="mb-3">
-                    <label className="mb-1 block text-sm">Label</label>
+                  <div className="col-span-5 py-2">
                     <input
-                      type="text"
                       name="label"
                       defaultValue={m?.label ?? ""}
-                      placeholder={`Mode ${slot}`}
-                      className="w-full rounded-lg border px-3 py-1.5 text-sm"
+                      placeholder="Optional mode label"
+                      className="w-full rounded-xl border px-3 py-2"
                     />
                   </div>
+
+                  <div className="col-span-2 py-2 text-right">
+                    <button
+                      type="submit"
+                      className="inline-flex h-9 items-center rounded-xl border px-3"
+                    >
+                      Save
+                    </button>
+                  </div>
                 </form>
-
-                <div className="flex gap-2">
-                  <button
-                    form={saveFormId}
-                    type="submit"
-                    className="rounded-lg border px-3 py-1.5 text-sm hover:bg-neutral-50"
-                  >
-                    Save
-                  </button>
-
-                  {/* Hidden reset form */}
-                  <form id={resetFormId} action={resetMode} className="hidden">
-                    <input type="hidden" name="orgId" value={orgId} />
-                    <input type="hidden" name="slot" value={slot} />
-                  </form>
-
-                  <button
-                    form={resetFormId}
-                    type="submit"
-                    className="rounded-lg border px-3 py-1.5 text-sm hover:bg-neutral-50"
-                  >
-                    Reset
-                  </button>
-                </div>
               </div>
             );
           })}
@@ -470,20 +468,15 @@ async function Content({ orgId }: { orgId: string }) {
       </Section>
 
       {/* ACCESS (Mode + Label + Details) */}
-      <Section
-        title="Access"
-        description='Add quick-access entries for each Mode, e.g., label "HQ address" with details like "123 Queens Street".'
-      >
-        <div className="grid grid-cols-1 gap-4">
-          <AddAccessForm orgId={orgId} />
-          <AccessList orgId={orgId} />
-        </div>
+      <Section title="Access">
+        <AddAccessForm orgId={orgId} />
+        <AccessList orgId={orgId} />
       </Section>
     </>
   );
 }
 
-/** ===== Small UI helpers (unchanged visual design) ===== */
+/** ===== Small UI helpers ===== */
 function Section({
   title,
   description,
@@ -494,22 +487,20 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mb-6">
-      <details className="group rounded-2xl border p-4 open:shadow-sm" open>
-        <summary className="flex cursor-pointer list-none items-center justify-between">
-          <span className="text-base font-medium">{title}</span>
-          <span className="text-xs text-neutral-500 group-open:hidden">
-            expand
-          </span>
-          <span className="hidden text-xs text-neutral-500 group-open:inline">
-            collapse
-          </span>
-        </summary>
-        {description ? (
-          <p className="mt-2 text-sm text-neutral-600">{description}</p>
-        ) : null}
-        <div className="mt-4">{children}</div>
-      </details>
+    <section className="mb-8 rounded-2xl border p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold">{title}</h2>
+          {description ? (
+            <p className="mt-1 text-sm text-neutral-600">{description}</p>
+          ) : null}
+        </div>
+        <details className="text-sm">
+          <summary className="cursor-pointer select-none">▾</summary>
+          <div className="sr-only">toggle</div>
+        </details>
+      </div>
+      <div>{children}</div>
     </section>
   );
 }
@@ -517,15 +508,18 @@ function Section({
 function SlotPills({ modes }: { modes: ModeDto[] }) {
   const activeSlots = new Set(modes.filter((m) => m.active).map((m) => m.slot));
   return (
-    <div className="mb-4 flex flex-wrap gap-2">
+    <div className="flex flex-wrap gap-2">
       {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
         const isActive = activeSlots.has(n);
         return (
           <span
             key={n}
-            className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs ${
-              isActive ? "bg-black text-white" : "bg-white text-neutral-700"
-            }`}
+            className={[
+              "inline-flex h-7 w-7 items-center justify-center rounded-full border text-xs",
+              isActive ? "font-semibold" : "opacity-50",
+            ].join(" ")}
+            aria-pressed={isActive}
+            aria-label={`Mode ${n} ${isActive ? "active" : "inactive"}`}
           >
             {n}
           </span>
@@ -539,26 +533,19 @@ async function AddAccessForm({ orgId }: { orgId: string }) {
   const { modes } = await loadModesAndAccess(orgId);
 
   return (
-    <form action={createModeAccess} className="rounded-2xl border p-4">
+    <form
+      action={createModeAccess}
+      className="mb-6 grid grid-cols-12 gap-2 text-sm"
+    >
       <input type="hidden" name="orgId" value={orgId} />
-
-      <h3 className="mb-3 text-sm font-medium">Add access</h3>
-      <p className="mb-4 text-xs text-neutral-500">
-        Example: Mode “In-Person”, Label “HQ address”, Details “123 Queens
-        Street…”.
-      </p>
-
-      <div className="mb-3">
-        <label className="mb-1 block text-sm">Mode</label>
+      <div className="col-span-3">
+        <label className="mb-1 block text-xs text-neutral-500">Mode</label>
         <select
           name="modeSlot"
-          className="w-full rounded-lg border px-3 py-1.5 text-sm"
-          defaultValue=""
+          className="w-full rounded-xl border px-3 py-2"
           required
         >
-          <option value="" disabled>
-            Select mode
-          </option>
+          <option value="">Select mode</option>
           {modes
             .filter((m) => m.active)
             .map((m) => (
@@ -568,35 +555,32 @@ async function AddAccessForm({ orgId }: { orgId: string }) {
             ))}
         </select>
       </div>
-
-      <div className="mb-3">
-        <label className="mb-1 block text-sm">Label</label>
+      <div className="col-span-4">
+        <label className="mb-1 block text-xs text-neutral-500">Label</label>
         <input
-          type="text"
           name="label"
-          className="w-full rounded-lg border px-3 py-1.5 text-sm"
-          placeholder="e.g., Link, Address, Dial-in"
+          placeholder="e.g., HQ address"
+          className="w-full rounded-xl border px-3 py-2"
           required
         />
       </div>
-
-      <div className="mb-4">
-        <label className="mb-1 block text-sm">Details</label>
+      <div className="col-span-4">
+        <label className="mb-1 block text-xs text-neutral-500">Details</label>
         <input
-          type="text"
           name="details"
-          className="w-full rounded-lg border px-3 py-1.5 text-sm"
-          placeholder="Paste the link or address here"
+          placeholder="e.g., 123 Queens Street…"
+          className="w-full rounded-xl border px-3 py-2"
           required
         />
       </div>
-
-      <button
-        type="submit"
-        className="rounded-lg border px-3 py-1.5 text-sm hover:bg-neutral-50"
-      >
-        Save access
-      </button>
+      <div className="col-span-1 flex items-end justify-end">
+        <button
+          type="submit"
+          className="inline-flex h-9 items-center rounded-xl border px-3"
+        >
+          Save
+        </button>
+      </div>
     </form>
   );
 }
@@ -606,40 +590,37 @@ async function AccessList({ orgId }: { orgId: string }) {
 
   if (accesses.length === 0) {
     return (
-      <div className="rounded-2xl border p-4 text-sm text-neutral-600">
+      <div className="rounded-xl border p-4 text-sm text-neutral-600">
         No access entries yet.
       </div>
     );
   }
-  return (
-    <div className="rounded-2xl border p-4">
-      <h3 className="mb-3 text-sm font-medium">Existing access</h3>
-      <ul className="space-y-3">
-        {accesses.map((row) => (
-          <li
-            key={row.id}
-            className="flex flex-col items-start justify-between gap-2 rounded-lg border p-3 md:flex-row md:items-center"
-          >
-            <div className="text-sm">
-              <div className="font-medium">
-                {row.modeLabel || `Mode ${row.modeSlot}`}
-              </div>
-              <div className="text-neutral-700">{row.label}</div>
-              <div className="text-neutral-500">{row.details}</div>
-            </div>
 
+  return (
+    <ul className="space-y-2">
+      {accesses.map((row) => (
+        <li
+          key={row.id}
+          className="grid grid-cols-12 items-start gap-2 rounded-xl border p-3 text-sm"
+        >
+          <div className="col-span-3 font-medium">
+            {row.modeLabel || `Mode ${row.modeSlot}`}
+          </div>
+          <div className="col-span-3">{row.label}</div>
+          <div className="col-span-5">{row.details}</div>
+          <div className="col-span-1 text-right">
             <form action={deleteModeAccess}>
               <input type="hidden" name="id" value={row.id} />
               <button
                 type="submit"
-                className="rounded-lg border px-3 py-1.5 text-sm hover:bg-neutral-50"
+                className="inline-flex h-8 items-center rounded-xl border px-3 text-xs"
               >
                 Delete
               </button>
             </form>
-          </li>
-        ))}
-      </ul>
-    </div>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
