@@ -168,17 +168,22 @@ model UserRole {
    ========================= */
 
 /** OrganizationMode
- * API upserts by { orgId_slot: { orgId, slot } }
- * Field is named `active` for Prisma client, but mapped to existing DB column `isActive`.
+ * Route writes: { orgId, slot, active, label, accessFieldLabel }
+ * We expose `active` but map it to the existing DB column `isActive`.
  */
 model OrganizationMode {
   id        String   @id @default(cuid())
   orgId     String
   slot      Int
   label     String   @db.VarChar(120)
-  active    Boolean  @map("isActive") @default(false) // <-- no drop/rename in DB
+  active    Boolean  @map("isActive") @default(false)   // maps to existing column
+  accessFieldLabel String?
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  // *** Back-relations required by Prisma (additive, no DB changes) ***
+  presets        OrganizationModePreset[]
+  accessPresets  OrganizationAccessPreset[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -187,24 +192,7 @@ model OrganizationMode {
   @@index([orgId])
 }
 
-/** Optional curated mode label per org+slot */
-model OrganizationModePreset {
-  id        String   @id @default(cuid())
-  orgId     String
-  slot      Int
-  label     String   @db.VarChar(120)
-  active    Boolean  @default(false)
-
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([orgId, slot])
-  @@index([orgId])
-}
-
-/** Catalog of access fields (keys) that can be toggled per mode */
+/** Catalog of access fields toggled per mode */
 model OrganizationAccessField {
   id          String   @id @default(cuid())
   key         String   @unique @db.VarChar(120)
@@ -212,25 +200,69 @@ model OrganizationAccessField {
   description String?  @db.Text
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  presets     OrganizationAccessPreset[]
+
+  // Two different relations from AccessPreset -> AccessField need names
+  presetsByAccessId  OrganizationAccessPreset[] @relation("AccessPresetByAccessFieldId")
+  presetsByLegacyId  OrganizationAccessPreset[] @relation("AccessPresetByLegacyFieldId")
 }
 
-/** Per-org+mode toggle for a field (allowed/denied) */
-model OrganizationAccessPreset {
-  id        String   @id @default(cuid())
-  orgId     String
-  modeSlot  Int
-  fieldId   String
-  allowed   Boolean  @default(true)
+/** Mode presets (per OrganizationMode).
+ * Route sends arrays like: [{ orgModeId, value }]
+ * Legacy orgId/slot/label/active kept OPTIONAL (no drops).
+ */
+model OrganizationModePreset {
+  id         String   @id @default(cuid())
+  orgModeId  String
+  value      String
 
-  organization Organization           @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  field        OrganizationAccessField @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  // legacy/optional (kept for compatibility)
+  orgId      String?
+  slot       Int?
+  label      String?
+  active     Boolean? @default(false)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  organizationMode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
+  organization     Organization?    @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  @@unique([orgId, modeSlot, fieldId])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([orgModeId])
   @@index([orgId])
+  @@unique([orgId, slot]) // legacy uniqueness (null-friendly)
+}
+
+/** Access presets (per OrganizationMode + AccessField).
+ * Route sends arrays like: [{ orgModeId, accessFieldId, value }]
+ * Legacy orgId/modeSlot/fieldId/allowed kept OPTIONAL (no drops).
+ */
+model OrganizationAccessPreset {
+  id            String   @id @default(cuid())
+  orgModeId     String
+  accessFieldId String
+  value         String?
+
+  // legacy/optional (kept for compatibility)
+  orgId     String?
+  modeSlot  Int?
+  fieldId   String?
+  allowed   Boolean? @default(true)
+
+  organizationMode OrganizationMode       @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
+
+  // *** disambiguated relations ***
+  accessField     OrganizationAccessField @relation("AccessPresetByAccessFieldId", fields: [accessFieldId], references: [id], onDelete: Cascade)
+  field           OrganizationAccessField?@relation("AccessPresetByLegacyFieldId", fields: [fieldId], references: [id], onDelete: SetNull)
+
+  organization    Organization?           @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([orgModeId])
+  @@index([accessFieldId])
+  @@index([orgId])
+  @@unique([orgId, modeSlot, fieldId]) // legacy uniqueness (null-friendly)
 }
 
 /* =========================
