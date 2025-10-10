@@ -3,7 +3,7 @@
 // - Organizations, Users
 // - Slot-based roles (1..10) with per-org labels
 // - Bookings + participants
-// - NOTE: UserRole now includes `orgManaged` (Boolean)
+// - Modes (OrganizationMode) for /api/org/modes routes
 
 generator client {
   provider = "prisma-client-js"
@@ -51,6 +51,9 @@ model Organization {
   // Access control
   orgRoles  OrgRole[]
   userRoles UserRole[]
+
+  // Modes
+  modes     OrganizationMode[]
 
   // Domain
   bookings  Booking[]
@@ -100,13 +103,13 @@ model User {
  * =========================
  */
 
-// Canonical permission catalog (optional; kept from your base)
+// Canonical permission catalog
 model PermissionKey {
-  id           String   @id @default(cuid())
-  key          String   @unique @db.VarChar(120)
-  description  String?  @db.Text
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(cuid())
+  key           String   @unique @db.VarChar(120)
+  description   String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   templateLinks RoleTemplatePermission[]
   orgLinks      OrgRolePermission[]
 }
@@ -126,7 +129,7 @@ model RoleTemplatePermission {
   roleTemplateId  String
   permissionKeyId String
 
-  roleTemplate RoleTemplate @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
+  roleTemplate  RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
   permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([roleTemplateId, permissionKeyId])
@@ -157,7 +160,7 @@ model OrgRolePermission {
   permissionKeyId String
   allowed         Boolean @default(true)
 
-  orgRole      OrgRole      @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
+  orgRole       OrgRole       @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
   permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([orgRoleId, permissionKeyId])
@@ -170,7 +173,7 @@ model UserRole {
   slot       Int
   assignedAt DateTime @default(now())
 
-  // NEW: who controls this assignment (used by your API/seed)
+  // used by API/seed
   orgManaged Boolean  @default(false)
 
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -181,6 +184,28 @@ model UserRole {
 
   @@id([userId, orgId])        // exactly one role per user per org
   @@index([orgId, slot])
+}
+
+/**
+ * =========================
+ * Modes (per org)
+ * =========================
+ * Matches API at /api/org/modes/route.ts which upserts by (orgId, slot)
+ */
+model OrganizationMode {
+  id        String   @id @default(cuid())
+  orgId     String
+  slot      Int
+  label     String   @db.VarChar(120)
+  isActive  Boolean  @default(false)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, slot]) // enables where: { orgId_slot: { orgId, slot } }
+  @@index([orgId])
 }
 
 /**
@@ -199,11 +224,11 @@ model Booking {
   durationMins  Int
 
   // Optional shared “where” defaults
-  appearanceType  AppearanceType? // ONLINE
-  locationUrl     String?         // IN_PERSON
+  appearanceType  AppearanceType?
+  locationUrl     String?
   locationName    String? @db.VarChar(300)
   locationAddress String?
-  dialInfo        String?         // PHONE
+  dialInfo        String?
 
   participants  BookingParticipant[]
   notes         BookingNote[]
@@ -223,26 +248,21 @@ model BookingParticipant {
   userId     String?
   user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  // Slot-based role (1..10). Enforce range in app/UI.
   roleSlot   Int
-
-  // Optional snapshot of the org role label at invite time (for stable UI)
   roleLabelSnapshot String? @db.VarChar(100)
 
   inviteStatus  InviteStatus @default(PENDING)
 
-  // Optional audit
   invitedByUserId String?
   invitedAt       DateTime?
   respondedAt     DateTime?
 
-  // Optional per-participant context
   notes       String? @db.Text
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  @@unique([bookingId, userId]) // a user appears at most once on a booking
+  @@unique([bookingId, userId])
   @@index([bookingId])
   @@index([roleSlot])
   @@index([userId, inviteStatus])
