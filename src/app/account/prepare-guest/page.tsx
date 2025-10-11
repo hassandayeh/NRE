@@ -158,13 +158,17 @@ export default function PrepareGuestPage() {
     }
   }
 
-  // Debounced policy check on email change.
+  // Re-check policy whenever the normalized email changes (debounced)
   React.useEffect(() => {
     const id = setTimeout(() => {
-      if (email) fetchPolicy(normEmail);
+      if (normEmail) {
+        fetchPolicy(normEmail);
+      } else {
+        setPolicy(null);
+      }
     }, 250);
     return () => clearTimeout(id);
-  }, [email]);
+  }, [normEmail]);
 
   const allowed =
     policy?.ok && (policy as any).allow !== false && normEmail.includes("@");
