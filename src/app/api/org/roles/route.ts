@@ -122,21 +122,30 @@ async function shapeSlot(orgId: string, slot: number) {
   };
 }
 
-/** permission gate: allow if current user’s role has settings:manage OR roles:manage */
+/** Unified manage check:
+ *  allow if role has `settings:manage` (or legacy `settingsmanage`)
+ *  OR `roles:manage` (or legacy `rolesmanage`)
+ */
 async function canManageSettingsForOrg(userId: string, orgId: string) {
   const ur = await prisma.userRole.findUnique({
     where: { userId_orgId: { userId, orgId } },
     select: { slot: true },
   });
   if (!ur) return false;
-  // local, deny-aware compute for the viewer as well
+
+  // local, deny-aware compute for the viewer
   const [shell, tmpl, over] = await Promise.all([
     readOrgRoleShell(orgId, ur.slot),
     readTemplate(ur.slot),
     readOrgOverrides(orgId, ur.slot),
   ]);
+
   const eff = computeEffective(tmpl, over, shell.isActive);
-  return eff.has("settings:manage") || eff.has("roles:manage");
+
+  // accept both colon and non-colon keys so DB/UI aliases work
+  const has = (key: string) => eff.has(key) || eff.has(key.replace(":", ""));
+
+  return has("settings:manage") || has("roles:manage");
 }
 
 // ---------- GET ----------

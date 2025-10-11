@@ -1,89 +1,64 @@
 // src/app/auth/post-removal/page.tsx
 
-// Server component: pure UI, no client handlers.
-export const runtime = "nodejs";
+import Link from "next/link";
 
 /**
- * Post-removal screen (route-only skeleton)
- *
- * Intent:
- *  When a user’s org staff membership has been removed, we show a friendly screen:
- *    “Your staff access ended. Keep working as a guest?”
- *
- * Behavior in this slice:
- *  - No mutations or token logic.
- *  - Two safe links only:
- *      • Continue as guest → kicks user to auth with an intent hint (?entry=guest)
- *      • Sign in again as staff → back to regular sign-in (for cases like re-invite)
+ * Staff access ended → continuity screen.
+ * Always on (no flags). Clear path to continue as a guest.
  *
  * Notes:
- *  - Later slices will wire: one-use tokens, audit, and the guest creation/attach flow
- *    (with org-domain block enforced by /api/policy/guest-email).
+ * - This page is intentionally static (server component).
+ * - If you later detect context (e.g., reason code), you can tailor the copy.
  */
 
-export default async function PostRemovalPage() {
-  const enabled =
-    (process.env.NEXT_PUBLIC_GUEST_PROFILE_ENABLED ?? "")
-      .toLowerCase()
-      .match(/^(1|true|on|yes)$/) !== null;
+export const runtime = "nodejs";
 
+export default function PostRemovalPage() {
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16">
+    <main className="mx-auto max-w-3xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Your staff access ended
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Your staff access has ended
         </h1>
-        <p className="mt-2 text-sm text-gray-600">
-          Your organization account is no longer active. You can keep working as
-          a guest with a personal email.{" "}
-          <strong>No organization messages or files carry over.</strong>
+        <p className="mt-2 text-sm text-neutral-600">
+          Organization data (messages, files, and internal tools) are no longer
+          available. You can still keep working independently as a guest using
+          your personal email. No organization content is moved or copied.
         </p>
       </header>
 
-      <section className="rounded-2xl border bg-white/60 p-6 shadow-sm">
-        <h2 className="text-lg font-medium">Keep working as a guest?</h2>
-        <p className="mt-1 text-xs text-gray-500">
-          We’ll help you set up a personal guest login. Organization domains are
-          blocked for guests — use a personal address.
+      <section className="rounded-2xl border border-neutral-200 p-5 shadow-sm">
+        <h2 className="text-lg font-medium">Continue as a guest</h2>
+        <p className="mt-1 text-sm text-neutral-600">
+          Create or attach a self-managed guest login tied to your personal
+          email.
         </p>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {/* Route-only links — no client handlers */}
-          <a
-            href="/api/auth/signin?entry=guest"
-            className="inline-flex items-center justify-center rounded-xl border px-3 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/10"
-            aria-label="Continue as guest with a personal email"
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Link
+            href="/account/prepare-guest"
+            className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
           >
-            Continue as guest
-            <span aria-hidden="true" className="ml-1">
-              →
-            </span>
-          </a>
+            Prepare guest login →
+          </Link>
 
-          <a
-            href="/api/auth/signin?entry=invited"
-            className="inline-flex items-center justify-center rounded-xl border px-3 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/10"
-            aria-label="Sign in as staff (if you were re-invited)"
+          <Link
+            href="/api/auth/signin?hint=staff"
+            className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
           >
-            Sign in as staff
-          </a>
+            I still have a staff invite →
+          </Link>
         </div>
 
-        {!enabled && (
-          <p className="mt-3 text-xs text-amber-600">
-            Guest setup is staged. Ask your admin to enable{" "}
-            <code>NEXT_PUBLIC_GUEST_PROFILE_ENABLED</code> to proceed.
-          </p>
-        )}
+        <p className="mt-4 text-xs text-neutral-500">
+          Guests are self-managed: they can be invited to multiple organizations
+          without exposing old-org content.
+        </p>
       </section>
 
-      <div className="mt-6 rounded-2xl border bg-white/60 p-5 text-xs text-gray-600">
-        <p>
-          <strong>Privacy note:</strong> Guest work is separate from your former
-          organization. You’ll keep notifications and booking context, but you
-          won’t see old organization messages or files.
-        </p>
-      </div>
+      <p className="mt-6 text-xs text-neutral-500">
+        If you believe this was a mistake, contact your organization admin.
+      </p>
     </main>
   );
 }

@@ -2,9 +2,8 @@
 
 /**
  * Settings (autosave)
- * - Fast load for Organization section:
- *   * prefers localStorage.orgId → URL ?orgId → /api/auth/session (in that order)
- *   * probes /api/org/roles?orgId=...&probe=1 to decide show/hide
+ * - Org resolution: URL ?orgId → /api/auth/session (single-org policy)
+ * - Probes /api/org/roles?orgId=...&probe=1 to decide show/hide Organization section
  * - Always shows the "Organization profile →" link when the section is visible
  * - Feature toggles / appearance remain unchanged
  */
@@ -39,6 +38,14 @@ function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
         </button>
       )}
     </div>
+  );
+}
+
+function ForbiddenCard() {
+  return (
+    <section className="rounded-2xl border border-neutral-200 p-5 shadow-sm bg-white">
+      {/* ...contents... */}
+    </section>
   );
 }
 
@@ -85,15 +92,7 @@ function SettingsInner() {
   const searchParams = useSearchParams();
   const orgIdFromUrl = searchParams.get("orgId");
   const [orgIdForProbe, setOrgIdForProbe] = React.useState<string | null>(
-    () => {
-      // Prefer localStorage first (sync, fastest)
-      if (typeof window !== "undefined") {
-        const cached = window.localStorage.getItem("orgId");
-        if (cached && cached.length >= 18) return cached;
-      }
-      // Fall back to URL if present
-      return orgIdFromUrl || null;
-    }
+    () => orgIdFromUrl || null
   );
 
   // If we still don't have orgId (no LS & no URL), probe session once.

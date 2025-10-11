@@ -336,3 +336,13 @@ model BookingNote {
 
   @@index([bookingId, createdAt])
 }
+
+model GuestProfile {
+  id            String   @id @default(cuid())
+  personalEmail String   @unique
+  displayName   String?     // optional; future-friendly
+  avatarUrl     String?     // optional
+  inviteable    Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
