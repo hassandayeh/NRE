@@ -1,52 +1,50 @@
+// src/middleware.ts
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 
-// We protect everything under /modules/*
-const PROTECTED_PREFIX = "/modules/";
+// Public paths that never require auth
+const PUBLIC_PREFIXES = [
+  "/auth", // our custom sign-in UI lives here
+  "/api/auth", // NextAuth's own routes must stay public
+  "/account/prepare-guest",
+  "/api/guest", // guest verify/complete flow
+  "/_next", // Next.js assets
+  "/favicon.ico",
+  "/robots.txt",
+  "/sitemap.xml",
+];
 
 export async function middleware(req: NextRequest) {
-  const { nextUrl } = req;
-  const pathname = nextUrl.pathname;
+  const { pathname, search } = req.nextUrl;
 
-  // Extra guard (config.matcher already limits this)
-  if (!pathname.startsWith(PROTECTED_PREFIX)) {
+  // 1) Allow public paths verbatim
+  if (PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }
 
-  // Allow Next.js internals and auth endpoints through
-  if (
-    pathname.startsWith("/_next") ||
-    pathname.startsWith("/api/auth") ||
-    pathname.startsWith("/favicon") ||
-    pathname.startsWith("/images") ||
-    pathname.startsWith("/public")
-  ) {
-    return NextResponse.next();
-  }
-
-  // Read NextAuth JWT on the edge
+  // 2) Decode JWT (JWT strategy) — MUST pass the secret for Edge
   const token = await getToken({
     req,
     secret: process.env.NEXTAUTH_SECRET,
   });
 
-  // Not signed in? -> redirect to NextAuth sign-in
+  // 3) Unauthenticated → redirect to /auth/signin with callbackUrl
   if (!token) {
-    const signInUrl = new URL("/api/auth/signin", req.url);
-    // After successful sign-in, send the user back to where they tried to go.
-    signInUrl.searchParams.set(
-      "callbackUrl",
-      nextUrl.pathname + nextUrl.search
-    );
-    return NextResponse.redirect(signInUrl);
+    const url = req.nextUrl.clone();
+    url.pathname = "/auth/signin";
+    url.searchParams.set("callbackUrl", pathname + search);
+    return NextResponse.redirect(url);
   }
 
-  // Signed in -> allow
+  // 4) Authenticated → allow
   return NextResponse.next();
 }
 
-// Apply only to /modules/* pages (App Router paths don't include /app in the URL)
+// Apply to everything except static files; leave /api/auth to NextAuth
 export const config = {
-  matcher: ["/modules/:path*"],
+  matcher: [
+    // Skip Next static/image and the NextAuth API explicitly (we also gated above)
+    "/((?!_next/static|_next/image|favicon.ico|api/auth).*)",
+  ],
 };
