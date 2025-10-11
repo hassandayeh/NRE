@@ -2,6 +2,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 export const runtime = "nodejs";
 
@@ -10,7 +11,7 @@ export const runtime = "nodejs";
  *
  * Validates the short-lived "guest_verify" cookie (set by /api/guest/verify-code),
  * then creates or reuses a GuestProfile (by personalEmail) and returns its id.
- * Now with robust try/catch so DB errors are returned as helpful JSON instead of opaque 500s.
+ * Optionally accepts { password } to set a guest password (hashed).
  *
  * Status:
  * - 200: { ok: true, email, guestProfileId }
@@ -26,7 +27,6 @@ declare global {
   // created in /api/guest/verify-code
   // eslint-disable-next-line no-var
   var __guestVerifyTickets: Map<string, TicketEntry> | undefined;
-
   // prisma singleton for dev hot-reload
   // eslint-disable-next-line no-var
   var __prisma: PrismaClient | undefined;
@@ -34,7 +34,7 @@ declare global {
 
 function getTicketStore(): Map<string, TicketEntry> {
   if (!globalThis.__guestVerifyTickets) {
-    globalThis.__guestVerifyTickets = new Map<string, TicketEntry>();
+    globalThis.__guestVerifyTickets = new Map();
   }
   return globalThis.__guestVerifyTickets;
 }
@@ -53,7 +53,6 @@ function clearCookie(res: NextResponse) {
 
 function asMsg(e: unknown) {
   const err = e as any;
-  // Prisma errors often have code/meta; surface a concise message.
   if (err?.message) return String(err.message);
   try {
     return JSON.stringify(err);
@@ -62,10 +61,9 @@ function asMsg(e: unknown) {
   }
 }
 
-export async function POST() {
+export async function POST(req: Request) {
   const jar = cookies();
   const ticket = jar.get("guest_verify")?.value || "";
-
   if (!ticket) {
     return NextResponse.json(
       { ok: false, reason: "no_ticket" },
@@ -75,13 +73,11 @@ export async function POST() {
 
   const tickets = getTicketStore();
   const entry = tickets.get(ticket);
-
   if (!entry) {
     return clearCookie(
       NextResponse.json({ ok: false, reason: "not_found" }, { status: 404 })
     );
   }
-
   if (Date.now() >= entry.exp) {
     tickets.delete(ticket);
     return clearCookie(
@@ -93,6 +89,22 @@ export async function POST() {
   tickets.delete(ticket);
 
   const email = entry.email.toLowerCase().trim();
+
+  // Optional password from body
+  let providedPassword: string | undefined;
+  try {
+    const body = (await req.json().catch(() => null)) as {
+      password?: string;
+    } | null;
+    if (body && typeof body.password === "string") {
+      const p = body.password.trim();
+      // keep len minimal; you can harden later if needed
+      if (p.length >= 6 && p.length <= 200) providedPassword = p;
+    }
+  } catch {
+    // ignore malformed bodies; password remains undefined
+  }
+
   const prisma = getPrisma();
 
   // Access the model dynamically so TS compiles even if the client types are stale.
@@ -120,14 +132,19 @@ export async function POST() {
 
     if (!profile) {
       // Safe fallback even if personalEmail isn't unique: find first, else create.
+      const baseData: any = { personalEmail: email };
+      if (providedPassword) {
+        baseData.passwordHash = await bcrypt.hash(providedPassword, 10);
+      }
       profile =
         (await gp.findFirst({ where: { personalEmail: email } })) ??
-        (await gp.create({
-          data: {
-            personalEmail: email,
-            // Schema defaults (e.g., visibility/inviteable) will apply automatically.
-          },
-        }));
+        (await gp.create({ data: baseData }));
+    } else if (providedPassword) {
+      // Update password when provided
+      await gp.update({
+        where: { id: profile.id },
+        data: { passwordHash: await bcrypt.hash(providedPassword, 10) },
+      });
     }
 
     return clearCookie(

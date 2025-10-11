@@ -1,9 +1,10 @@
 // src/lib/auth.ts
-// NextAuth options wired to our clean User model.
-// - Uses JWT sessions.
-// - Credentials provider: finds user by email and verifies password.
-// * Accepts dev password "seeded" (for local/dev speed).
-// * Prefers bcrypt hashes; falls back to plaintext for legacy rows (kept for MVP).
+// NextAuth options: staff (User) + guest (GuestProfile) credentials.
+// - Staff: lookup by User.email → verify password (bcrypt preferred, legacy plaintext ok for MVP).
+// - Guest: fallback by GuestProfile.personalEmail → verify passwordHash (bcrypt preferred).
+// - Guests never get org context in the token/session.
+// - Dev-only convenience: if NODE_ENV !== "production" and a stored password equals "seeded",
+//   then password "seeded" logs in. This mirrors seed data without forcing bcrypt in dev.
 
 import type { NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
@@ -11,21 +12,28 @@ import bcrypt from "bcryptjs";
 import prisma from "./prisma";
 import { getEffectiveRole } from "./access/permissions";
 
-// Helper: choose a membership to hydrate org context.
-// For now, pick the first UserRole we find (stable and deterministic).
+// Choose an org membership for staff (single-org policy: first/only assignment).
 async function pickUserOrgAndSlot(userId: string) {
   const ur = await prisma.userRole.findFirst({
     where: { userId },
-    orderBy: { assignedAt: "asc" }, // <-- FIX: UserRole has assignedAt (not createdAt)
+    orderBy: { assignedAt: "asc" }, // schema has assignedAt
     select: { orgId: true, slot: true },
   });
   if (!ur) return null;
   return { orgId: ur.orgId, slot: ur.slot };
 }
 
+// Dev-only helper: allow "seeded" password when stored value is literally "seeded".
+function devSeedOk(input: string, stored: string | null | undefined) {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    input === "seeded" &&
+    (stored ?? "") === "seeded"
+  );
+}
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
-
   providers: [
     Credentials({
       name: "Email & Password",
@@ -38,6 +46,7 @@ export const authOptions: NextAuthOptions = {
         const password = (creds?.password || "").toString();
         if (!email || !password) return null;
 
+        // 1) STAFF USER
         const user = await prisma.user.findUnique({
           where: { email },
           select: {
@@ -47,10 +56,27 @@ export const authOptions: NextAuthOptions = {
             hashedPassword: true,
           },
         });
-        if (!user) return null;
 
-        // DEV-ONLY bypass: matches prisma/seed.js
-        if (password === "seeded") {
+        if (user) {
+          const stored = user.hashedPassword || "";
+          let ok = false;
+
+          if (devSeedOk(password, stored)) {
+            ok = true;
+          } else if (/^\$2[aby]\$/.test(stored)) {
+            // bcrypt hash
+            try {
+              ok = await bcrypt.compare(password, stored);
+            } catch {
+              ok = false;
+            }
+          } else {
+            // legacy/plaintext (MVP)
+            ok = stored.length > 0 && password === stored;
+          }
+
+          if (!ok) return null;
+
           return {
             id: user.id,
             email: user.email,
@@ -58,63 +84,85 @@ export const authOptions: NextAuthOptions = {
           };
         }
 
-        const stored = user.hashedPassword || "";
-        let ok = false;
+        // 2) GUEST PROFILE (fallback)
+        const gp = await prisma.guestProfile.findUnique({
+          where: { personalEmail: email },
+        });
+        if (!gp) return null;
 
-        // If it's a bcrypt hash (starts with $2a/$2b/$2y), use bcrypt.compare
-        if (typeof stored === "string" && /^\$2[aby]\$/.test(stored)) {
+        // Read via any to avoid transient Prisma typing mismatch after new column
+        const guestId = (gp as any).id as string;
+        const guestEmail = (gp as any).personalEmail as string;
+        const guestName =
+          ((gp as any).displayName as string | null) || guestEmail;
+        const storedGuest = ((gp as any).passwordHash as string | null) || "";
+
+        let okGuest = false;
+
+        if (devSeedOk(password, storedGuest)) {
+          okGuest = true;
+        } else if (/^\$2[aby]\$/.test(storedGuest)) {
           try {
-            ok = await bcrypt.compare(password, stored);
+            okGuest = await bcrypt.compare(password, storedGuest);
           } catch {
-            ok = false;
+            okGuest = false;
           }
         } else {
-          // Fallback for MVP/legacy rows saved in plaintext
-          ok = typeof stored === "string" && password === stored;
+          okGuest =
+            typeof storedGuest === "string" &&
+            storedGuest.length > 0 &&
+            password === storedGuest;
         }
 
-        if (!ok) return null;
+        if (!okGuest) return null;
 
-        // Minimal user shape for NextAuth
         return {
-          id: user.id,
-          email: user.email,
-          name: user.displayName || user.email,
-        };
+          id: `guest:${guestId}`,
+          email: guestEmail,
+          name: guestName,
+          guestProfileId: guestId,
+          role: "guest",
+        } as any;
       },
     }),
   ],
-
   pages: {
-    // Keep NextAuth default pages unless/until we add custom ones.
+    // Keep default NextAuth pages for now.
     // signIn: "/auth/signin",
   },
-
   callbacks: {
-    // Hydrate JWT with identity + org/role context (slot-based RBAC).
     async jwt({ token, user }) {
       if (user) {
-        // Set identity on initial sign-in
+        // Identity on initial sign-in
         token.sub = (user as any).id;
         token.email = user.email;
         token.name = user.name;
+
+        // Mark guest identity (no org context)
+        if ((user as any).guestProfileId) {
+          (token as any).guestProfileId = (user as any).guestProfileId;
+          (token as any).role = "guest";
+          delete (token as any).orgId;
+          delete (token as any).roleSlot;
+          delete (token as any).roleLabel;
+        }
       }
 
-      // If org/slot are missing (first login or token just created), hydrate them.
-      if (!(token as any).orgId || !(token as any).roleSlot) {
-        const userId = (user as any)?.id || token.sub;
-        if (userId) {
-          const picked = await pickUserOrgAndSlot(userId);
-          if (picked) {
-            (token as any).orgId = picked.orgId;
-            (token as any).roleSlot = picked.slot;
-
-            // Try to resolve label via access layer (optional).
-            try {
-              const eff = await getEffectiveRole(picked.orgId, picked.slot);
-              (token as any).roleLabel = eff?.label;
-            } catch {
-              // Non-fatal; navbar can fetch /api/org/roles for label later.
+      // Hydrate org context for STAFF ONLY
+      if (!(token as any).guestProfileId) {
+        if (!(token as any).orgId || !(token as any).roleSlot) {
+          const userId = (user as any)?.id || token.sub;
+          if (userId) {
+            const picked = await pickUserOrgAndSlot(userId);
+            if (picked) {
+              (token as any).orgId = picked.orgId;
+              (token as any).roleSlot = picked.slot;
+              try {
+                const eff = await getEffectiveRole(picked.orgId, picked.slot);
+                (token as any).roleLabel = eff?.label;
+              } catch {
+                // Non-fatal; UI can fetch label later if needed.
+              }
             }
           }
         }
@@ -123,28 +171,35 @@ export const authOptions: NextAuthOptions = {
       return token;
     },
 
-    // Expose JWT fields on session.user so the UI can read them.
     async session({ session, token }) {
       if (session.user) {
         (session.user as any).id = token.sub;
         session.user.email = token.email as string | undefined;
         session.user.name = token.name as string | undefined;
 
-        // New fields (slot-based RBAC context)
-        (session.user as any).orgId = (token as any).orgId as
-          | string
-          | undefined;
-        (session.user as any).roleSlot = (token as any).roleSlot as
-          | number
-          | undefined;
-        (session.user as any).roleLabel = (token as any).roleLabel as
-          | string
-          | undefined;
+        const gpid = (token as any).guestProfileId as string | undefined;
+        if (gpid) {
+          // Guest UI signal + guarantee no org context on session
+          (session as any).guestProfileId = gpid;
+          (session.user as any).role = "guest";
+          (session.user as any).orgId = undefined;
+          (session.user as any).roleSlot = undefined;
+          (session.user as any).roleLabel = undefined;
+        } else {
+          // Staff context
+          (session.user as any).orgId = (token as any).orgId as
+            | string
+            | undefined;
+          (session.user as any).roleSlot = (token as any).roleSlot as
+            | number
+            | undefined;
+          (session.user as any).roleLabel = (token as any).roleLabel as
+            | string
+            | undefined;
+        }
       }
       return session;
     },
   },
-
-  // Make sure NEXTAUTH_SECRET is set in .env for prod; NextAuth will warn if missing.
   secret: process.env.NEXTAUTH_SECRET,
 };

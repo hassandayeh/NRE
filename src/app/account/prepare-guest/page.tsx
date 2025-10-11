@@ -1,550 +1,314 @@
 // src/app/account/prepare-guest/page.tsx
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import React from "react";
+import { signIn } from "next-auth/react";
 
-/**
- * Prepare Guest Login — always on (no feature flag).
- * - Debounced GET /api/policy/guest-email?email=... for allow/deny.
- * - POST /api/guest/send-code to request a one-time code (rate-limited).
- * - POST /api/guest/verify-code to confirm the 6-digit code (sets short-lived cookie).
- * - POST /api/guest/complete to consume the ticket and finish the flow.
- */
+type PolicyResp =
+  | { ok: true; allow: true }
+  | { ok: false; allow: false; reason?: string };
 
-type PolicyState =
-  | { kind: "idle" }
-  | { kind: "checking" }
-  | { kind: "allowed" }
-  | { kind: "invalid" }
-  | { kind: "blocked"; message: string }
-  | { kind: "error"; message: string };
+type SendCodeResp =
+  | {
+      ok: true;
+      message?: string;
+      devCode?: string | number;
+      ttlSeconds?: number;
+    }
+  | { ok: false; reason?: string; message?: string; retryAfter?: number };
 
-type SendState =
-  | { kind: "idle" }
-  | { kind: "sending" }
-  | { kind: "sent"; devCode?: string }
-  | { kind: "error"; message: string };
+type VerifyResp = { ok: boolean };
 
-type VerifyState =
-  | { kind: "idle" }
-  | { kind: "verifying" }
-  | { kind: "ok" }
-  | { kind: "error"; message: string };
-
-type CompleteState =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "ok"; email: string }
-  | { kind: "error"; message: string };
+type CompleteResp =
+  | { ok: true; email: string; guestProfileId: string }
+  | { ok: false; reason: string; message?: string };
 
 export default function PrepareGuestPage() {
-  const [email, setEmail] = useState("");
-  const [policy, setPolicy] = useState<PolicyState>({ kind: "idle" });
-  const [send, setSend] = useState<SendState>({ kind: "idle" });
-  const [code, setCode] = useState("");
-  const [verify, setVerify] = useState<VerifyState>({ kind: "idle" });
-  const [complete, setComplete] = useState<CompleteState>({ kind: "idle" });
+  const [email, setEmail] = React.useState("");
+  const [policy, setPolicy] = React.useState<PolicyResp | null>(null);
 
-  const canCheck = useMemo(() => email.includes("@"), [email]);
+  const [sending, setSending] = React.useState(false);
+  const [devCode, setDevCode] = React.useState<string | null>(null);
+  const [tooManyMsg, setTooManyMsg] = React.useState<string | null>(null);
 
-  useEffect(() => {
-    if (policy.kind !== "allowed") {
-      setSend({ kind: "idle" });
-      setCode("");
-      setVerify({ kind: "idle" });
-      setComplete({ kind: "idle" });
+  const [code, setCode] = React.useState("");
+  const [verified, setVerified] = React.useState(false);
+  const [verifyBusy, setVerifyBusy] = React.useState(false);
+
+  const [password, setPassword] = React.useState("");
+  const [submitBusy, setSubmitBusy] = React.useState(false);
+  const [submitMsg, setSubmitMsg] = React.useState<string | null>(null);
+
+  const normEmail = (email || "").trim().toLowerCase();
+
+  // ----- Helpers -------------------------------------------------------------
+
+  async function fetchPolicy(forEmail: string): Promise<PolicyResp | null> {
+    try {
+      const r = await fetch(
+        `/api/policy/guest-email?email=${encodeURIComponent(forEmail)}`,
+        { cache: "no-store" }
+      );
+      const j = (await r.json()) as PolicyResp;
+      setPolicy(j);
+      return j;
+    } catch {
+      setPolicy({ ok: false, allow: false, reason: "network" } as any);
+      return null;
     }
-  }, [policy.kind, email]);
+  }
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!canCheck) {
-      setPolicy(email ? { kind: "invalid" } : { kind: "idle" });
+  async function sendCode() {
+    setTooManyMsg(null);
+    setDevCode(null);
+    setSending(true);
+    setSubmitMsg(null);
+
+    // Re-check policy synchronously and gate only when explicitly blocked.
+    const p = await fetchPolicy(normEmail);
+    if (p && (p as any).allow === false) {
+      setSending(false);
       return;
     }
-    setPolicy({ kind: "checking" });
-    const t = setTimeout(async () => {
-      try {
-        const res = await fetch(
-          `/api/policy/guest-email?email=${encodeURIComponent(email)}`,
-          { method: "GET", headers: { Accept: "application/json" } }
-        );
-        if (cancelled) return;
-        if (res.status === 200) return setPolicy({ kind: "allowed" });
-        if (res.status === 400) return setPolicy({ kind: "invalid" });
-        if (res.status === 409) {
-          const data = (await res.json().catch(() => ({}))) as {
-            message?: string;
-          };
-          return setPolicy({
-            kind: "blocked",
-            message:
-              data?.message ??
-              "This looks like a work domain. Use a personal email or join as staff.",
-          });
+
+    try {
+      const r = await fetch("/api/guest/send-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: normEmail }),
+      });
+      const j = (await r.json()) as SendCodeResp;
+
+      if (!r.ok || !("ok" in j) || !j.ok) {
+        if ((j as any)?.reason === "too_many") {
+          const wait = (j as any)?.retryAfter ?? 300;
+          setTooManyMsg(`Too many requests. Try again in ~${wait}s.`);
+        } else {
+          setTooManyMsg(j.message || "Could not send code. Try again.");
         }
-        const txt = await res.text().catch(() => "");
-        setPolicy({
-          kind: "error",
-          message: txt || `Unexpected response: ${res.status}`,
-        });
-      } catch (e: any) {
-        if (!cancelled) {
-          setPolicy({
-            kind: "error",
-            message: e?.message ?? "Network error while checking policy",
-          });
+      } else {
+        // Always surface the dev code in dev builds if provided by the API.
+        if ("devCode" in j && j.devCode != null) {
+          setDevCode(String(j.devCode));
         }
       }
-    }, 400);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [email, canCheck]);
-
-  const sendDisabled = policy.kind !== "allowed" || send.kind === "sending";
-
-  async function handleSend() {
-    if (sendDisabled) return;
-    setSend({ kind: "sending" });
-    setVerify({ kind: "idle" });
-    setCode("");
-    setComplete({ kind: "idle" });
-
-    try {
-      const res = await fetch("/api/guest/send-code", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({ email }),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        message?: string;
-        devCode?: string;
-      };
-      if (res.status === 200 && data?.ok) {
-        setSend({ kind: "sent", devCode: data.devCode });
-        return;
-      }
-      if (res.status === 409) {
-        setPolicy({
-          kind: "blocked",
-          message:
-            data?.message ??
-            "This email domain is managed by an organization here.",
-        });
-        setSend({ kind: "idle" });
-        return;
-      }
-      if (res.status === 400) {
-        setPolicy({ kind: "invalid" });
-        setSend({ kind: "idle" });
-        return;
-      }
-      if (res.status === 429) {
-        setSend({
-          kind: "error",
-          message:
-            data?.message ??
-            "Too many requests. Please wait a moment and try again.",
-        });
-        return;
-      }
-      setSend({
-        kind: "error",
-        message:
-          data?.message ??
-          `Unexpected response when sending code: ${res.status}`,
-      });
-    } catch (e: any) {
-      setSend({
-        kind: "error",
-        message: e?.message ?? "Network error while sending code",
-      });
+    } catch {
+      setTooManyMsg("Network error. Try again.");
+    } finally {
+      setSending(false);
     }
   }
 
-  const codeValid = /^\d{6}$/.test(code);
-  const verifyDisabled =
-    policy.kind !== "allowed" ||
-    send.kind !== "sent" ||
-    !codeValid ||
-    verify.kind === "verifying";
-
-  async function handleVerify() {
-    if (verifyDisabled) return;
-    setVerify({ kind: "verifying" });
-    setComplete({ kind: "idle" });
-
+  async function verifyCode() {
+    setVerifyBusy(true);
+    setSubmitMsg(null);
     try {
-      const res = await fetch("/api/guest/verify-code", {
+      const r = await fetch("/api/guest/verify-code", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({ email, code }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: normEmail, code: code.trim() }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        reason?: string;
-        attemptsRemaining?: number;
-      };
-      if (res.status === 200 && data?.ok) {
-        setVerify({ kind: "ok" });
-        return;
-      }
-      if (res.status === 401 && data?.reason === "invalid_code") {
-        const left =
-          typeof data.attemptsRemaining === "number"
-            ? ` (${data.attemptsRemaining} attempt${
-                data.attemptsRemaining === 1 ? "" : "s"
-              } left)`
-            : "";
-        setVerify({
-          kind: "error",
-          message: `That code isn’t correct${left}.`,
-        });
-        return;
-      }
-      if (res.status === 404) {
-        setVerify({
-          kind: "error",
-          message:
-            "No active code found for this email. Please request a new code.",
-        });
-        return;
-      }
-      if (res.status === 410) {
-        setVerify({
-          kind: "error",
-          message: "This code expired. Request a new one.",
-        });
-        return;
-      }
-      if (res.status === 429) {
-        setVerify({
-          kind: "error",
-          message: "Too many attempts. Please wait and try again.",
-        });
-        return;
-      }
-      setVerify({
-        kind: "error",
-        message: `Unexpected response: ${res.status}`,
-      });
-    } catch (e: any) {
-      setVerify({
-        kind: "error",
-        message: e?.message ?? "Network error while verifying code",
-      });
+      const j = (await r.json()) as VerifyResp;
+      setVerified(Boolean(j?.ok));
+      if (!j?.ok) setSubmitMsg("Invalid or expired code.");
+    } catch {
+      setSubmitMsg("Network error while verifying code.");
+    } finally {
+      setVerifyBusy(false);
     }
   }
 
-  const completeDisabled = verify.kind !== "ok" || complete.kind === "saving";
+  // Single action: save password (if provided) and sign the user in.
+  async function saveAndSignIn() {
+    setSubmitBusy(true);
+    setSubmitMsg(null);
 
-  async function handleComplete() {
-    if (completeDisabled) return;
-    setComplete({ kind: "saving" });
+    const pass = (password || "").trim();
+    const body: Record<string, any> = {};
+    if (pass.length >= 6) body.password = pass;
 
     try {
-      const res = await fetch("/api/guest/complete", {
+      const r = await fetch("/api/guest/complete", {
         method: "POST",
-        headers: { Accept: "application/json" },
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        email?: string;
-        reason?: string;
-        message?: string;
-      };
+      const j = (await r.json()) as CompleteResp;
 
-      if (res.status === 200 && data?.ok && data?.email) {
-        setComplete({ kind: "ok", email: data.email });
-        return;
-      }
-      if (res.status === 401 || data?.reason === "no_ticket") {
-        setComplete({
-          kind: "error",
-          message:
-            "Verification session not found. Please verify your email again.",
-        });
-        return;
-      }
-      if (res.status === 404 || data?.reason === "not_found") {
-        setComplete({
-          kind: "error",
-          message: "This verification has already been used. Send a new code.",
-        });
-        return;
-      }
-      if (res.status === 410 || data?.reason === "expired") {
-        setComplete({
-          kind: "error",
-          message:
-            "Verification expired. Please request and verify a new code.",
-        });
-        return;
-      }
-      // NEW: surface server message on 500 (db_error / prisma_client_out_of_date)
-      if (res.status === 500) {
-        setComplete({
-          kind: "error",
-          message: data?.message || "Server error while finishing setup.",
-        });
+      if (!r.ok || !j.ok) {
+        const msg =
+          (j as any)?.message ||
+          (j as any)?.reason ||
+          "Unexpected error while completing setup.";
+        setSubmitMsg(typeof msg === "string" ? msg : "Setup failed.");
         return;
       }
 
-      setComplete({
-        kind: "error",
-        message: `Unexpected response: ${res.status}`,
+      // Require a password to auto sign in (one-button flow by design).
+      await signIn("credentials", {
+        email: normEmail,
+        password: pass,
+        callbackUrl: "/",
       });
-    } catch (e: any) {
-      setComplete({
-        kind: "error",
-        message: e?.message ?? "Network error while completing setup",
-      });
+      // NextAuth will navigate; no further UI updates.
+    } catch {
+      setSubmitMsg("Network error while saving.");
+    } finally {
+      setSubmitBusy(false);
     }
   }
 
-  const frozen = complete.kind === "ok";
+  // Debounced policy check on email change.
+  React.useEffect(() => {
+    const id = setTimeout(() => {
+      if (email) fetchPolicy(normEmail);
+    }, 250);
+    return () => clearTimeout(id);
+  }, [email]);
+
+  const allowed =
+    policy?.ok && (policy as any).allow !== false && normEmail.includes("@");
+
+  const canSend = allowed && normEmail.length >= 6 && !sending;
+  const canVerify = normEmail && code.trim().length >= 4 && !verifyBusy;
+
+  // One-button intent: must have verified email + a password ≥ 6 chars
+  const canSaveAndSignIn =
+    verified && password.trim().length >= 6 && !submitBusy;
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-10">
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Prepare a personal guest login
-        </h1>
-        <p className="mt-2 text-sm text-neutral-600">
-          Set up a self-managed guest identity tied to your personal email so
-          you can keep working even if your staff access ends. No organization
-          messages or files are moved.
-        </p>
-      </header>
+    <main className="mx-auto max-w-3xl px-6 py-8">
+      <h1 className="text-2xl font-semibold tracking-tight">
+        Prepare a personal guest login
+      </h1>
+      <p className="mt-2 text-sm text-neutral-600">
+        Set up a self-managed guest identity tied to your personal email so you
+        can keep working even if your staff access ends. No organization
+        messages or files are moved.
+      </p>
 
-      {/* Section 1 */}
-      <section className="mb-8 rounded-2xl border border-neutral-200 p-5 shadow-sm">
+      {/* Step 1: email & code */}
+      <section className="mt-6 rounded-2xl border border-neutral-200 p-5 shadow-sm">
         <h2 className="text-lg font-medium">1) Verify your personal email</h2>
         <p className="mt-1 text-sm text-neutral-600">
           Use a personal address (not a work domain). We’ll check and send a
           one-time code to confirm.
         </p>
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-          <label htmlFor="personalEmail" className="sr-only">
-            Personal email
-          </label>
+        <div className="mt-4 flex items-stretch gap-3">
           <input
-            id="personalEmail"
             type="email"
-            placeholder="you@example.com"
-            className="w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-            aria-describedby="personalEmailHelp policyStatus sendStatus verifyStatus completeStatus"
             value={email}
-            onChange={(e) => setEmail(e.target.value.trim())}
-            autoComplete="email"
-            inputMode="email"
-            disabled={frozen}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            className="flex-1 rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/20"
           />
           <button
             type="button"
-            className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 disabled:opacity-60"
-            disabled={sendDisabled || frozen}
-            onClick={handleSend}
+            onClick={sendCode}
+            disabled={!canSend}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 disabled:opacity-50"
           >
-            {send.kind === "sending" ? "Sending…" : "Send code"}
+            Send
+            <br />
+            code
           </button>
         </div>
 
-        <div id="policyStatus" className="mt-2 min-h-5 text-xs">
-          {policy.kind === "idle" && (
-            <span className="text-neutral-500">Enter your personal email.</span>
-          )}
-          {policy.kind === "checking" && (
-            <span className="text-neutral-500">Checking…</span>
-          )}
-          {policy.kind === "allowed" && (
-            <span className="rounded-md bg-green-50 px-2 py-1 text-green-700">
-              Allowed as guest ✔
+        {/* Policy / status line */}
+        <div className="mt-2 text-xs">
+          {allowed ? (
+            <span className="rounded bg-green-50 px-2 py-1 text-green-700">
+              Allowed as guest ✓
             </span>
-          )}
-          {policy.kind === "invalid" && (
-            <span className="text-amber-700">
-              That doesn’t look like a valid email.
+          ) : policy && (policy as any).allow === false ? (
+            <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+              This email domain is managed by an organization here. Use a
+              personal email for guest access, or choose “I was invited” to join
+              as staff.
             </span>
-          )}
-          {policy.kind === "blocked" && (
-            <span className="rounded-md bg-amber-50 px-2 py-1 text-amber-700">
-              {policy.message}
+          ) : null}
+
+          {devCode ? (
+            <span className="ml-2 rounded bg-emerald-50 px-2 py-1 text-emerald-700">
+              Code sent. <strong>Dev code:</strong> {devCode}
             </span>
-          )}
-          {policy.kind === "error" && (
-            <span className="rounded-md bg-red-50 px-2 py-1 text-red-700">
-              {policy.message}
+          ) : null}
+
+          {tooManyMsg ? (
+            <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-rose-700">
+              {tooManyMsg}
             </span>
-          )}
+          ) : null}
         </div>
 
-        <div id="sendStatus" className="mt-2 min-h-5 text-xs">
-          {send.kind === "sent" && (
-            <span className="rounded-md bg-green-50 px-2 py-1 text-green-700">
-              Code sent.{" "}
-              {send.devCode ? (
-                <>
-                  Dev code: <strong>{send.devCode}</strong>
-                </>
-              ) : (
-                <>Check your inbox.</>
-              )}
-            </span>
-          )}
-          {send.kind === "error" && (
-            <span className="rounded-md bg-red-50 px-2 py-1 text-red-700">
-              {send.message}
-            </span>
-          )}
+        {/* Verify row */}
+        <div className="mt-3 flex items-stretch gap-3">
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="6-digit code"
+            className="flex-1 rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/20"
+            disabled={!email}
+          />
+          <button
+            type="button"
+            onClick={verifyCode}
+            disabled={!canVerify}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 disabled:opacity-50"
+          >
+            Verify
+          </button>
         </div>
 
-        {send.kind === "sent" && (
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-            <label htmlFor="guestCode" className="sr-only">
-              Verification code
-            </label>
-            <input
-              id="guestCode"
-              type="text"
-              placeholder="6-digit code"
-              inputMode="numeric"
-              pattern="\d*"
-              maxLength={6}
-              className="w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-              value={code}
-              onChange={(e) =>
-                setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
-              }
-              disabled={frozen}
-            />
-            <button
-              type="button"
-              className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 disabled:opacity-60"
-              disabled={verifyDisabled || frozen}
-              onClick={handleVerify}
-            >
-              {verify.kind === "verifying" ? "Verifying…" : "Verify"}
-            </button>
+        {verified ? (
+          <div className="mt-2 text-xs">
+            <span className="rounded bg-green-50 px-2 py-1 text-green-700">
+              Verified ✓ Your guest email is confirmed.
+            </span>
           </div>
-        )}
-
-        <div id="verifyStatus" className="mt-2 min-h-5 text-xs">
-          {verify.kind === "ok" && (
-            <span className="rounded-md bg-green-50 px-2 py-1 text-green-700">
-              Verified ✔ Your guest email is confirmed.
-            </span>
-          )}
-          {verify.kind === "error" && (
-            <span className="rounded-md bg-red-50 px-2 py-1 text-red-700">
-              {verify.message}
-            </span>
-          )}
-        </div>
-
-        <div id="completeStatus" className="mt-2 min-h-5 text-xs">
-          {complete.kind === "ok" && (
-            <span className="rounded-md bg-green-50 px-2 py-1 text-green-700">
-              Guest setup complete for <strong>{complete.email}</strong>.
-            </span>
-          )}
-          {complete.kind === "error" && (
-            <span className="rounded-md bg-red-50 px-2 py-1 text-red-700">
-              {complete.message}
-            </span>
-          )}
-        </div>
-
-        <p id="personalEmailHelp" className="mt-2 text-xs text-neutral-500">
-          We never move org content into your guest account. This only prepares
-          a separate login.
-        </p>
+        ) : null}
       </section>
 
-      {/* Section 2 */}
-      <section className="mb-8 rounded-2xl border border-neutral-200 p-5 shadow-sm">
+      {/* Step 2: password + one action */}
+      <section className="mt-6 rounded-2xl border border-neutral-200 p-5 shadow-sm">
         <h2 className="text-lg font-medium">2) Choose how you’ll sign in</h2>
         <p className="mt-1 text-sm text-neutral-600">
-          Password or SSO — your choice. You can change this later from your
-          guest account.
+          Set a password now to sign in immediately as a guest.
         </p>
 
-        <div className="mt-4 grid gap-3">
-          <div className="flex flex-col gap-2">
-            <label htmlFor="guestPassword" className="text-sm font-medium">
-              Password{" "}
-              <span className="font-normal text-neutral-500">(optional)</span>
-            </label>
-            <input
-              id="guestPassword"
-              type="password"
-              placeholder="••••••••"
-              className="w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-              disabled={verify.kind !== "ok" || complete.kind === "ok"}
-            />
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 disabled:opacity-60"
-              disabled={verify.kind !== "ok" || complete.kind === "ok"}
-              aria-disabled={verify.kind !== "ok" || complete.kind === "ok"}
-            >
-              Continue with Google
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 disabled:opacity-60"
-              disabled={verify.kind !== "ok" || complete.kind === "ok"}
-              aria-disabled={verify.kind !== "ok" || complete.kind === "ok"}
-            >
-              Continue with Apple
-            </button>
-          </div>
-          <p className="text-xs text-neutral-500">
-            These remain disabled until your email is verified.
-          </p>
+        <div className="mt-4">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password (6+ characters)"
+            className="w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/20"
+            disabled={!verified}
+          />
         </div>
+
+        {submitMsg ? (
+          <p className="mt-3 text-sm text-neutral-700">{submitMsg}</p>
+        ) : null}
       </section>
 
-      {/* Footer */}
-      <div className="mt-6 flex flex-wrap items-center gap-3">
+      <div className="mt-4">
         <button
           type="button"
-          className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 disabled:opacity-60"
-          disabled={
-            verify.kind !== "ok" ||
-            complete.kind === "saving" ||
-            complete.kind === "ok"
-          }
-          onClick={handleComplete}
+          onClick={saveAndSignIn}
+          disabled={!canSaveAndSignIn}
+          className="rounded-xl border border-neutral-300 px-4 py-2 text-sm font-medium hover:bg-neutral-50 disabled:opacity-50"
+          title="Save and sign in"
         >
-          {complete.kind === "saving" ? "Saving…" : "Save & enable"}
+          Save &amp; sign in →
         </button>
-
-        {complete.kind === "ok" && (
-          <Link
-            href="/api/auth/signin?hint=guest"
-            className="inline-flex items-center justify-center rounded-xl border border-neutral-300 px-3 py-2 text-sm font-medium hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20"
-          >
-            Continue as guest →
-          </Link>
-        )}
       </div>
 
-      <p className="mt-4 text-xs text-neutral-500">
+      <p className="mt-6 text-xs text-neutral-500">
         Important: This creates a separate, self-managed guest identity tied to
         your personal email. It does not copy or expose any organization
         content. If your staff access is removed, you’ll be offered to continue

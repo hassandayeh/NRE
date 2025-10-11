@@ -340,9 +340,11 @@ model BookingNote {
 model GuestProfile {
   id            String   @id @default(cuid())
   personalEmail String   @unique
-  displayName   String?     // optional; future-friendly
-  avatarUrl     String?     // optional
+  passwordHash  String?  @db.VarChar(255) // ← NEW: hashed password for guest sign-in
+  displayName   String?  // optional; future-friendly
+  avatarUrl     String?  // optional
   inviteable    Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }
+
