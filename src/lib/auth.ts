@@ -1,10 +1,6 @@
 // src/lib/auth.ts
 // NextAuth options: staff (User) + guest (GuestProfile) credentials.
-// - Staff: lookup by User.email → verify password (bcrypt preferred, legacy plaintext ok for MVP).
-// - Guest: fallback by GuestProfile.personalEmail → verify passwordHash (bcrypt preferred).
-// - Guests never get org context in the token/session.
-// - Dev-only convenience: if NODE_ENV !== "production" and a stored password equals "seeded",
-//   then password "seeded" logs in. This mirrors seed data without forcing bcrypt in dev.
+// Dev telemetry is enabled only when NODE_ENV !== "production".
 
 import type { NextAuthOptions } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
@@ -12,18 +8,26 @@ import bcrypt from "bcryptjs";
 import prisma from "./prisma";
 import { getEffectiveRole } from "./access/permissions";
 
-// Choose an org membership for staff (single-org policy: first/only assignment).
+// ---------- Dev-only logger (no secrets/PII beyond email)
+const DEV = process.env.NODE_ENV !== "production";
+function devLog(label: string, payload: Record<string, unknown>) {
+  if (!DEV) return;
+  // eslint-disable-next-line no-console
+  console.log(`[auth:${label}] ${new Date().toISOString()}`, payload);
+}
+
+// ---------- Choose an org membership for staff (single-org policy)
 async function pickUserOrgAndSlot(userId: string) {
   const ur = await prisma.userRole.findFirst({
     where: { userId },
-    orderBy: { assignedAt: "asc" }, // schema has assignedAt
+    orderBy: { assignedAt: "asc" },
     select: { orgId: true, slot: true },
   });
   if (!ur) return null;
   return { orgId: ur.orgId, slot: ur.slot };
 }
 
-// Dev-only helper: allow "seeded" password when stored value is literally "seeded".
+// ---------- Dev-only helper: allow "seeded" password when stored value is literally "seeded".
 function devSeedOk(input: string, stored: string | null | undefined) {
   return (
     process.env.NODE_ENV !== "production" &&
@@ -34,6 +38,7 @@ function devSeedOk(input: string, stored: string | null | undefined) {
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
+
   providers: [
     Credentials({
       name: "Email & Password",
@@ -64,24 +69,25 @@ export const authOptions: NextAuthOptions = {
           if (devSeedOk(password, stored)) {
             ok = true;
           } else if (/^\$2[aby]\$/.test(stored)) {
-            // bcrypt hash
             try {
               ok = await bcrypt.compare(password, stored);
             } catch {
               ok = false;
             }
           } else {
-            // legacy/plaintext (MVP)
-            ok = stored.length > 0 && password === stored;
+            ok = stored.length > 0 && password === stored; // legacy/plaintext (MVP)
           }
 
           if (!ok) return null;
 
-          return {
+          const authed = {
             id: user.id,
             email: user.email,
             name: user.displayName || user.email,
           };
+
+          devLog("authorize.success", { email: user.email, kind: "staff" });
+          return authed as any;
         }
 
         // 2) GUEST PROFILE (fallback)
@@ -90,7 +96,6 @@ export const authOptions: NextAuthOptions = {
         });
         if (!gp) return null;
 
-        // Read via any to avoid transient Prisma typing mismatch after new column
         const guestId = (gp as any).id as string;
         const guestEmail = (gp as any).personalEmail as string;
         const guestName =
@@ -98,7 +103,6 @@ export const authOptions: NextAuthOptions = {
         const storedGuest = ((gp as any).passwordHash as string | null) || "";
 
         let okGuest = false;
-
         if (devSeedOk(password, storedGuest)) {
           okGuest = true;
         } else if (/^\$2[aby]\$/.test(storedGuest)) {
@@ -116,24 +120,23 @@ export const authOptions: NextAuthOptions = {
 
         if (!okGuest) return null;
 
-        return {
+        const authedGuest = {
           id: `guest:${guestId}`,
           email: guestEmail,
           name: guestName,
           guestProfileId: guestId,
           role: "guest",
-        } as any;
+        };
+
+        devLog("authorize.success", { email: guestEmail, kind: "guest" });
+        return authedGuest as any;
       },
     }),
   ],
-  pages: {
-    // Keep default NextAuth pages for now.
-    // signIn: "/auth/signin",
-  },
+
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        // Identity on initial sign-in
         token.sub = (user as any).id;
         token.email = user.email;
         token.name = user.name;
@@ -179,14 +182,12 @@ export const authOptions: NextAuthOptions = {
 
         const gpid = (token as any).guestProfileId as string | undefined;
         if (gpid) {
-          // Guest UI signal + guarantee no org context on session
           (session as any).guestProfileId = gpid;
           (session.user as any).role = "guest";
           (session.user as any).orgId = undefined;
           (session.user as any).roleSlot = undefined;
           (session.user as any).roleLabel = undefined;
         } else {
-          // Staff context
           (session.user as any).orgId = (token as any).orgId as
             | string
             | undefined;
@@ -198,8 +199,36 @@ export const authOptions: NextAuthOptions = {
             | undefined;
         }
       }
+
+      // Dev telemetry (compact)
+      devLog("session", {
+        email: token.email ?? null,
+        orgId: (token as any).orgId ?? null,
+        guestProfileId: (token as any).guestProfileId ?? null,
+        role: (token as any).role ?? (session as any)?.user?.role ?? null,
+      });
+
       return session;
     },
   },
+
+  // Event telemetry (dev only) — supported events only
+  events: {
+    async signIn(message) {
+      devLog("signIn", {
+        provider: message?.account?.provider ?? "credentials",
+        email: message?.user?.email ?? null,
+        isNewUser: message?.isNewUser ?? false,
+      });
+    },
+    async signOut() {
+      devLog("signOut", {});
+    },
+  },
+
+  // Required for JWT signing (set in .env)
   secret: process.env.NEXTAUTH_SECRET,
+
+  // Helpful logs during dev
+  debug: DEV,
 };

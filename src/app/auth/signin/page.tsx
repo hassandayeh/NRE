@@ -20,83 +20,110 @@ export default function SignInPage() {
       redirect: true,
       email,
       password,
-      // Keep existing behavior for now (we'll adjust home routing later)
+      // After success, our authOptions.redirect() sends to /modules/booking
       callbackUrl: "/modules/booking",
     });
 
-    // If redirect is true, NextAuth will navigate away; no need to handle res.
+    // If redirect is true, NextAuth will navigate away; no need to handle res here
     setLoading(false);
   }
 
   return (
-    <div className="mx-auto max-w-md space-y-6">
-      <h1 className="text-2xl font-semibold">Sign in</h1>
-      <p className="text-sm text-gray-600">
+    <div className="mx-auto w-full max-w-md px-4 py-8">
+      <h1 className="mb-2 text-2xl font-semibold">Sign in</h1>
+      <p className="mb-6 text-sm text-gray-600">
         Use your email and password (seed or existing user).
       </p>
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <label className="block text-sm">
-          <span className="mb-1 block">Email</span>
+        {/* Email */}
+        <div>
+          <label htmlFor="email" className="mb-1 block text-sm font-medium">
+            Email
+          </label>
           <input
+            id="email"
+            name="email"
             type="email"
+            autoComplete="username"
             value={email}
-            onChange={(e) => setEmail(e.currentTarget.value)}
+            onChange={(e) => setEmail(e.target.value)}
             className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
             placeholder="owner@nre.test"
             required
           />
-        </label>
+        </div>
 
-        <label className="block text-sm">
-          <span className="mb-1 block">Password</span>
+        {/* Password */}
+        <div>
+          <label htmlFor="password" className="mb-1 block text-sm font-medium">
+            Password
+          </label>
           <input
+            id="password"
+            name="password"
             type="password"
+            autoComplete="current-password"
             value={password}
-            onChange={(e) => setPassword(e.currentTarget.value)}
+            onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-md border px-3 py-2 outline-none focus:ring"
-            placeholder="123"
+            placeholder="•••"
             required
           />
-        </label>
+        </div>
 
-        {error ? (
-          <p role="alert" className="text-sm text-red-600">
+        {/* Error */}
+        {error && (
+          <div
+            role="alert"
+            className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          >
             {error}
-          </p>
-        ) : null}
+          </div>
+        )}
 
+        {/* Submit */}
         <button
           type="submit"
-          disabled={loading}
-          className="w-full rounded-md bg-black px-4 py-2 text-white hover:opacity-90 disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+          disabled={loading || !email || !password}
         >
           {loading ? "Signing in…" : "Sign in"}
         </button>
       </form>
 
-      {/* New: self-serve sign-up entry point */}
-      <p className="text-sm text-gray-700">
-        New here?{" "}
-        <Link
-          href="/auth/signup"
-          className="underline underline-offset-2 hover:opacity-80"
-        >
-          Create an account
-        </Link>
-        .
-      </p>
+      {/* Secondary actions */}
+      <div className="mt-6 space-y-2 text-sm">
+        <div className="text-gray-700">
+          New here?{" "}
+          <Link
+            href="/entry"
+            className="font-medium text-indigo-600 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+          >
+            Create account
+          </Link>
+        </div>
 
-      <p className="text-xs text-gray-500">
-        Prefer the default page?{" "}
-        <a
-          href="/api/auth/signin"
-          className="underline underline-offset-2 hover:opacity-80"
-        >
-          Use NextAuth default sign-in
-        </a>
-        .
-      </p>
+        <div className="text-gray-700">
+          No password yet?{" "}
+          <Link
+            href="/account/prepare-guest"
+            className="font-medium text-indigo-600 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+          >
+            Prepare guest login
+          </Link>
+        </div>
+
+        {/* Keep the original escape hatch */}
+        <div>
+          <Link
+            href="/api/auth/signin"
+            className="text-gray-500 underline hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+          >
+            Use NextAuth default sign-in
+          </Link>
+        </div>
+      </div>
     </div>
   );
 }

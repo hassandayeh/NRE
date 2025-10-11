@@ -21,12 +21,22 @@ export const runtime = "nodejs";
  * - 500: { ok: false, reason: "db_error" | "prisma_client_out_of_date", message }
  */
 
+// ---------------- Dev-only telemetry ----------------
+const DEV = process.env.NODE_ENV !== "production";
+function devLog(label: string, payload: Record<string, unknown>) {
+  if (!DEV) return;
+  // eslint-disable-next-line no-console
+  console.log(`[guest_complete:${label}] ${new Date().toISOString()}`, payload);
+}
+
+// ---------------- Ticket store + Prisma singleton ----------------
 type TicketEntry = { email: string; exp: number };
 
 declare global {
   // created in /api/guest/verify-code
   // eslint-disable-next-line no-var
   var __guestVerifyTickets: Map<string, TicketEntry> | undefined;
+
   // prisma singleton for dev hot-reload
   // eslint-disable-next-line no-var
   var __prisma: PrismaClient | undefined;
@@ -61,10 +71,13 @@ function asMsg(e: unknown) {
   }
 }
 
+// ---------------- Handler ----------------
 export async function POST(req: Request) {
   const jar = cookies();
   const ticket = jar.get("guest_verify")?.value || "";
+
   if (!ticket) {
+    devLog("no_ticket", {});
     return NextResponse.json(
       { ok: false, reason: "no_ticket" },
       { status: 401 }
@@ -73,13 +86,17 @@ export async function POST(req: Request) {
 
   const tickets = getTicketStore();
   const entry = tickets.get(ticket);
+
   if (!entry) {
+    devLog("not_found", {});
     return clearCookie(
       NextResponse.json({ ok: false, reason: "not_found" }, { status: 404 })
     );
   }
+
   if (Date.now() >= entry.exp) {
     tickets.delete(ticket);
+    devLog("expired", { email: entry.email });
     return clearCookie(
       NextResponse.json({ ok: false, reason: "expired" }, { status: 410 })
     );
@@ -87,7 +104,6 @@ export async function POST(req: Request) {
 
   // Consume the ticket so it can't be replayed
   tickets.delete(ticket);
-
   const email = entry.email.toLowerCase().trim();
 
   // Optional password from body
@@ -105,11 +121,14 @@ export async function POST(req: Request) {
     // ignore malformed bodies; password remains undefined
   }
 
+  devLog("start", { email, hasPassword: Boolean(providedPassword) });
+
   const prisma = getPrisma();
 
   // Access the model dynamically so TS compiles even if the client types are stale.
   const gp = (prisma as any).guestProfile;
   if (!gp) {
+    devLog("prisma_client_out_of_date", {});
     return clearCookie(
       NextResponse.json(
         {
@@ -130,22 +149,35 @@ export async function POST(req: Request) {
         .findUnique({ where: { personalEmail: email } })
         .catch(() => null)) ?? null;
 
+    let created = false;
+    let passwordAction: "set" | "updated" | "unchanged" = "unchanged";
+
     if (!profile) {
       // Safe fallback even if personalEmail isn't unique: find first, else create.
       const baseData: any = { personalEmail: email };
       if (providedPassword) {
         baseData.passwordHash = await bcrypt.hash(providedPassword, 10);
+        passwordAction = "set";
       }
       profile =
         (await gp.findFirst({ where: { personalEmail: email } })) ??
         (await gp.create({ data: baseData }));
+      created = !("id" in (profile ?? {})) ? false : true;
     } else if (providedPassword) {
       // Update password when provided
       await gp.update({
         where: { id: profile.id },
         data: { passwordHash: await bcrypt.hash(providedPassword, 10) },
       });
+      passwordAction = "updated";
     }
+
+    devLog("success", {
+      email,
+      guestProfileId: profile.id,
+      created,
+      password: passwordAction,
+    });
 
     return clearCookie(
       NextResponse.json({
@@ -156,6 +188,8 @@ export async function POST(req: Request) {
     );
   } catch (e) {
     // Log for dev; return helpful message to the client.
+    devLog("db_error", { email, message: asMsg(e) });
+    // eslint-disable-next-line no-console
     console.error("[/api/guest/complete] DB error:", e);
     return clearCookie(
       NextResponse.json(

@@ -3,9 +3,9 @@
  * Keep this file minimal: only export GET/POST and (optionally) runtime.
  * All configuration (providers, Prisma client, callbacks, etc.) lives in src/lib/auth.ts.
  */
-
 import NextAuth from "next-auth";
-// From: src/app/api/auth/[...nextauth]/route.ts  ->  src/lib/auth.ts
+
+// From: src/app/api/auth/[...nextauth]/route.ts -> src/lib/auth.ts
 import { authOptions } from "../../../../lib/auth";
 
 const handler = NextAuth(authOptions);
