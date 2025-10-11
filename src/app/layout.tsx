@@ -4,11 +4,15 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../lib/auth";
+import { getEffectiveRole } from "../lib/access/permissions";
 
 export const metadata: Metadata = {
   title: "NRE",
   description: "Newsroom booking & expert management",
 };
+
+// Keep Node runtime (Prisma/access helpers need Node, not Edge)
+export const runtime = "nodejs";
 
 export default async function RootLayout({
   children,
@@ -17,85 +21,113 @@ export default async function RootLayout({
 }) {
   const session = await getServerSession(authOptions);
 
-  // Signed-out: render page content without the app shell
-  if (!session) {
-    return (
-      <html lang="en">
-        <body>{children}</body>
-      </html>
-    );
+  const signedIn = !!(session as any)?.user;
+  const nameOrEmail =
+    (session as any)?.user?.name || (session as any)?.user?.email || "Account";
+
+  const orgId = (session as any)?.user?.orgId as string | undefined;
+  const roleSlot = (session as any)?.user?.roleSlot as number | undefined;
+  const roleLabelFromSession = (session as any)?.user?.roleLabel as
+    | string
+    | undefined;
+
+  // Server-side resolution for the role label (no client hooks)
+  let roleLabelToShow: string | undefined = roleLabelFromSession;
+  if (!roleLabelToShow && orgId && roleSlot) {
+    try {
+      const eff = await getEffectiveRole(orgId, roleSlot);
+      roleLabelToShow = eff?.label || `Role ${roleSlot}`;
+    } catch {
+      roleLabelToShow = `Role ${roleSlot}`;
+    }
   }
 
-  // ---- Minimal, schema-agnostic identity (no prisma, no legacy imports)
-  const user: any = (session as any)?.user ?? {};
-  const sessionEmail =
-    (user?.email as string) ?? (user?.name as string) ?? "Account";
-
-  // Single-org policy: org id comes only from the authenticated session
-  const orgId: string | null =
-    (session as any)?.exclusiveOrgId ?? (session as any)?.orgId ?? null;
-
-  // Treat account as "guest" when any of these are present.
-  // (If none exist, this evaluates false and staff see everything.)
-  const isGuest =
-    Boolean(user?.guestProfileId) ||
-    user?.role === "guest" ||
-    Boolean((session as any)?.guestProfileId);
-
-  // Build Settings href with the viewer's org id — no cross-org fallback
+  // ✅ Settings link logic:
+  // - Staff: include orgId in query
+  // - Guest (or any signed-in without org): no orgId in the URL
   const settingsHref = orgId
     ? `/modules/settings?orgId=${encodeURIComponent(orgId)}`
-    : "/modules/settings";
+    : `/modules/settings`;
 
-  const links = [
+  const links: Array<{ href: string; label: string }> = [
     { href: "/modules/booking", label: "Bookings" },
     { href: "/modules/directory", label: "Directory" },
-    // Settings is staff-only — hidden for guest/expert identities
-    ...(isGuest ? [] : [{ href: settingsHref, label: "Settings" }]),
+    // Keep Settings in the main nav; guests are entitled to their personal settings
+    { href: settingsHref, label: "Settings" },
     { href: "/modules/profile", label: "Profile" },
   ];
 
   return (
     <html lang="en">
-      <body>
-        {/* Fixed navbar */}
+      <body className="min-h-screen bg-gray-50 text-gray-900">
+        {/* Fixed navbar — always visible */}
         <header className="fixed inset-x-0 top-0 z-50 border-b bg-white/80 backdrop-blur">
-          <div className="mx-auto flex h-12 max-w-6xl items-center justify-between px-4">
-            <div className="flex items-center gap-4">
-              <Link href="/" className="font-semibold">
+          <nav
+            aria-label="Top navigation"
+            className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8"
+          >
+            {/* Left side: brand + main links */}
+            <div className="flex items-center gap-6">
+              <Link
+                href="/"
+                className="font-semibold tracking-tight hover:opacity-80 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+              >
                 NRE
               </Link>
-              {links.map((l) => (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  className="text-sm text-neutral-700 hover:underline"
-                >
-                  {l.label}
-                </Link>
-              ))}
+
+              <ul className="hidden items-center gap-4 sm:flex">
+                {links.map((l) => (
+                  <li key={l.label}>
+                    <Link
+                      href={l.href}
+                      className="px-2 py-1 text-sm hover:text-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+                    >
+                      {l.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
             </div>
 
+            {/* Right side: auth area */}
             <div className="flex items-center gap-3">
-              <span className="text-sm text-neutral-600">{sessionEmail}</span>
-              <Link
-                href="/api/auth/signout"
-                className="text-sm text-neutral-700 hover:underline"
-              >
-                Sign out
-              </Link>
+              {signedIn ? (
+                <>
+                  <span className="text-sm text-gray-600">
+                    {nameOrEmail}
+                    {roleSlot ? (
+                      <>
+                        {" "}
+                        — <span className="font-medium">{roleLabelToShow}</span>
+                      </>
+                    ) : null}
+                  </span>
+                  {/* Simple sign-out link for now */}
+                  <Link
+                    href="/api/auth/signout?callbackUrl=/"
+                    className="text-sm text-gray-600 hover:text-red-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+                  >
+                    Sign out
+                  </Link>
+                </>
+              ) : (
+                <Link
+                  href="/auth/signin"
+                  className="text-sm text-indigo-600 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded"
+                >
+                  Sign in
+                </Link>
+              )}
             </div>
-          </div>
+          </nav>
         </header>
 
         {/* Spacer to offset the fixed header height */}
-        <div className="h-12" />
+        <div className="h-14" aria-hidden="true" />
 
-        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+        {/* Page content */}
+        <main className="min-h-[calc(100vh-3.5rem)]">{children}</main>
       </body>
     </html>
   );
 }
-
-/** Keep Node.js runtime here (Prisma not compatible with Edge) */
-export const runtime = "nodejs";
