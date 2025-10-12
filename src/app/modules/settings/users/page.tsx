@@ -327,20 +327,39 @@ export default function UsersAndRolesPage() {
     return typeof me?.slot === "number" ? (me!.slot as number) : null;
   }, [items, meEmail]);
 
+  function normalizePermKey(k: string): string {
+    const map: Record<string, string> = {
+      staffcreate: "staff:create",
+      staffdelete: "staff:delete",
+      rolesmanage: "roles:manage",
+      billingmanage: "billing:manage",
+      settingsmanage: "settings:manage",
+    };
+    const kk = (k || "").trim().toLowerCase();
+    return map[kk] ?? kk;
+  }
+
   function canAny(keys: string[]): boolean {
     // Admin (slot 1) has full access
     if (mySlot === 1) return true;
     if (!rolesRes || !mySlot) return false;
     const slot = rolesRes.slots?.find((s) => s.slot === mySlot);
     if (!slot) return false;
-    return keys.some((k) =>
-      slot.overrides?.some((o) => o.key === k && o.allowed)
+
+    const normKeys = keys.map(normalizePermKey);
+    return normKeys.some((k) =>
+      slot.overrides?.some((o) => normalizePermKey(o.key) === k && o.allowed)
     );
   }
 
-  const canCreate = canAny(["staffcreate", "staff:create"]);
-  const canDelete = canAny(["staffdelete", "staff:delete"]);
-  const canRolesManage = canAny(["rolesmanage", "roles:manage"]);
+  const canCreate = canAny(["staff:create"]);
+  const canDelete = canAny(["staff:delete"]);
+  const canRolesManage = canAny(["roles:manage"]);
+
+  // Admin helpers for UI policy: only Admin (Role 1) can promote/demote/remove Role 1
+  const viewerIsAdmin = mySlot === 1;
+  const isRowAdmin = (u: UserItem) => (u.slot ?? 0) === 1;
+
   // === end guards ===
 
   const [permissionKeys, setPermissionKeys] = React.useState<
@@ -475,10 +494,25 @@ export default function UsersAndRolesPage() {
   async function onChangeSlot(userId: string, newSlotStr: string) {
     if (!orgId) return;
     const newSlot = Number(newSlotStr) || 0;
+
+    // UI policy guard: only Admin can assign/demote Role 1
+    if (mySlot !== 1) {
+      const target = (items ?? []).find((x) => x.id === userId);
+      if (newSlot === 1) {
+        toast.showErr("Only Admin can assign Role 1.");
+        return;
+      }
+      if ((target?.slot ?? 0) === 1) {
+        toast.showErr("Only Admin can change a Role 1 member's role.");
+        return;
+      }
+    }
+
     if (!Number.isInteger(newSlot) || newSlot < 1 || newSlot > 10) {
       toast.showErr("Invalid role slot.");
       return;
     }
+
     setPending((p) => ({ ...p, [userId]: true }));
     const prev = items ?? [];
     setItems((list) =>
@@ -502,7 +536,16 @@ export default function UsersAndRolesPage() {
 
   async function onRemove(userId: string, userName: string) {
     if (!orgId) return;
+    // UI policy guard: only Admin can remove Role 1
+    if (mySlot !== 1) {
+      const target = (items ?? []).find((x) => x.id === userId);
+      if ((target?.slot ?? 0) === 1) {
+        toast.showErr("Only Admin can remove a Role 1 member.");
+        return;
+      }
+    }
     const ok = window.confirm(`Remove "${userName}" from this organization?`);
+
     if (!ok) return;
     setPending((p) => ({ ...p, [userId]: true }));
     const prevItems = items ?? [];
@@ -550,7 +593,12 @@ export default function UsersAndRolesPage() {
       toast.showErr("Email is required.");
       return;
     }
+    if (!viewerIsAdmin && inviteSlot === 1) {
+      toast.showErr("Only Admin can assign Role 1.");
+      return;
+    }
     setInviting(true);
+
     setInviteLink(null);
 
     const body = {
@@ -968,14 +1016,17 @@ export default function UsersAndRolesPage() {
                   onChange={(e) => setInviteSlot(Number(e.target.value))}
                   className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                    const label = roleMeta.get(n)?.label ?? `Role ${n}`;
-                    return (
-                      <option key={n} value={n}>
-                        {label}
-                      </option>
-                    );
-                  })}
+                  {Array.from({ length: 10 }, (_, i) => i + 1)
+                    .filter((n) => roleMeta.get(n)?.isActive ?? true) // active only
+                    .filter((n) => viewerIsAdmin || n !== 1) // non-admins: no Role 1
+                    .map((n) => {
+                      const label = roleMeta.get(n)?.label ?? `Role ${n}`;
+                      return (
+                        <option key={n} value={n}>
+                          {label}
+                        </option>
+                      );
+                    })}
                 </select>
               </label>
 
@@ -1033,14 +1084,16 @@ export default function UsersAndRolesPage() {
                 className="mt-1 h-9 w-full rounded-md border border-gray-300 bg-white px-2 outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">All</option>
-                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                  const label = roleMeta.get(n)?.label ?? `Role ${n}`;
-                  return (
-                    <option key={n} value={String(n)}>
-                      {label}
-                    </option>
-                  );
-                })}
+                {Array.from({ length: 10 }, (_, i) => i + 1)
+                  .filter((n) => roleMeta.get(n)?.isActive ?? true) // active only
+                  .map((n) => {
+                    const label = roleMeta.get(n)?.label ?? `Role ${n}`;
+                    return (
+                      <option key={n} value={String(n)}>
+                        {label}
+                      </option>
+                    );
+                  })}
               </select>
             </label>
           </div>
@@ -1084,19 +1137,32 @@ export default function UsersAndRolesPage() {
                       {/* Role */}
                       <div className="col-span-2">
                         <select
-                          disabled={pending[u.id]}
+                          disabled={
+                            pending[u.id] || (!viewerIsAdmin && isRowAdmin(u))
+                          }
                           value={String(u.slot ?? "")}
                           onChange={(e) => onChangeSlot(u.id, e.target.value)}
                           className="h-9 w-full rounded-md border border-gray-300 bg-white px-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                         >
                           <option value="">—</option>
-                          {Array.from({ length: 10 }, (_, i) => i + 1).map(
-                            (n) => (
+                          {(viewerIsAdmin
+                            ? Array.from(
+                                { length: 10 },
+                                (_, i) => i + 1
+                              ).filter((n) => roleMeta.get(n)?.isActive ?? true) // Admin: active only
+                            : isRowAdmin(u)
+                            ? [1] // Non-admin viewing an Admin row: keep Role 1 visible
+                            : Array.from({ length: 10 }, (_, i) => i + 1)
+                                .filter((n) => n !== 1)
+                                .filter(
+                                  (n) => roleMeta.get(n)?.isActive ?? true
+                                )
+                          ) // Non-admin: active only
+                            .map((n) => (
                               <option key={n} value={String(n)}>
                                 {roleMeta.get(n)?.label ?? `Role ${n}`}
                               </option>
-                            )
-                          )}
+                            ))}
                         </select>
                       </div>
 
@@ -1132,7 +1198,7 @@ export default function UsersAndRolesPage() {
                             View
                           </button>
                         )}
-                        {canDelete && (
+                        {canDelete && (viewerIsAdmin || !isRowAdmin(u)) && (
                           <button
                             disabled={pending[u.id]}
                             onClick={() => onRemove(u.id, u.name || u.email)}

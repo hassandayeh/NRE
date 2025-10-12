@@ -85,6 +85,15 @@ export async function POST(req: NextRequest) {
   if (!Number.isFinite(slot) || slot < 1 || slot > 10)
     return badRequest("Invalid slot");
 
+  // POLICY: slot must be active in this org
+  const destRole = await prisma.orgRole.findUnique({
+    where: { orgId_slot: { orgId, slot } },
+    select: { isActive: true },
+  });
+  if (!destRole || !destRole.isActive) {
+    return badRequest("Destination role is inactive.", "ROLE_INACTIVE");
+  }
+
   // Find existing by email (case-insensitive)
   let user = await prisma.user.findFirst({
     where: { email: { equals: email, mode: "insensitive" } },

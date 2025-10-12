@@ -122,6 +122,13 @@ export async function PATCH(
   const canManage = await hasPermission(orgId, actorUserId, "settings:manage");
   if (!canManage) return forbidden();
 
+  // Actor membership (for Role 1 policy)
+  const actorMembership = await prisma.userRole.findUnique({
+    where: { userId_orgId: { userId: actorUserId, orgId } },
+    select: { slot: true },
+  });
+  const actorIsAdmin = (actorMembership?.slot ?? 0) === 1;
+
   // Parse JSON body
   let body: any = null;
   try {
@@ -150,7 +157,13 @@ export async function PATCH(
   if (desiredSlot === null) {
     if (!existing) return notFound("Membership not found.");
 
+    // POLICY: Only Admin can remove a Role 1 member
+    if (!actorIsAdmin && (existing.slot ?? 0) === 1) {
+      return forbidden("Only Admin can remove a Role 1 member.");
+    }
+
     // SAFETY RAILS ↓↓↓
+
     const managersNow = await countMembersWith(orgId, "settings:manage");
     const targetIsManager = await hasPermission(
       orgId,
@@ -236,6 +249,25 @@ export async function PATCH(
     );
   }
   // SAFETY RAILS ↑↑↑
+
+  // POLICY: Only Admin can (a) assign Role 1, or (b) change a Role 1 member's role
+  if (!actorIsAdmin) {
+    if (desiredSlot === 1) {
+      return forbidden("Only Admin can assign Role 1.");
+    }
+    if ((existing.slot ?? 0) === 1) {
+      return forbidden("Only Admin can change a Role 1 member's role.");
+    }
+  }
+
+  // POLICY: destination slot must be active in this org
+  const destOrgRole = await prisma.orgRole.findUnique({
+    where: { orgId_slot: { orgId, slot: desiredSlot } },
+    select: { isActive: true },
+  });
+  if (!destOrgRole || !destOrgRole.isActive) {
+    return badRequest("Destination role is inactive.", "ROLE_INACTIVE");
+  }
 
   // Optional guard: allow moving even if destination orgRole is inactive; UI will reflect inactive
   const updated = await prisma.userRole.update({
