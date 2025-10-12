@@ -102,6 +102,8 @@ function displayName(x: OrgDirectoryItem | GlobalExpert): string {
  * ---------------------------------------------------------------------- */
 export default function DirectoryPage() {
   const qs = useSearchParams();
+  const sp = useSearchParams();
+  const orgId = sp.get("orgId");
 
   // Tabs + search
   const [tab, setTab] = React.useState<"internal" | "global">("internal");
@@ -281,6 +283,10 @@ export default function DirectoryPage() {
       {/* Header */}
       <header className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight">Directory</h1>
+        <div aria-live="polite" className="mt-1 text-xs text-gray-500">
+          Signed in as {orgId ? "Staff" : "Guest"}
+        </div>
+
         {/* orgId removed from UI per request */}
       </header>
 
@@ -388,74 +394,85 @@ export default function DirectoryPage() {
 function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
   return (
     <ul className="divide-y rounded-md border">
-      {items.map((p) => {
-        const name = displayName(p);
-        const availability = getAvailabilityStatus(p.availability);
+      {items
+        .filter((p) => {
+          const s = ((p as any)?.status ?? (p as any)?.state ?? "")
+            .toString()
+            .toLowerCase();
+          if (s === "pending" || s === "invited") return false;
+          if ((p as any)?.isPending === true) return false;
+          const hp = (p as any)?.hashedPassword;
+          if (typeof hp === "string" && hp.startsWith("invited:")) return false;
+          return true;
+        })
+        .map((p) => {
+          const name = displayName(p);
+          const availability = getAvailabilityStatus(p.availability);
 
-        const availBadge =
-          availability === "AVAILABLE"
-            ? "bg-green-100 text-green-800"
-            : availability === "BUSY"
-            ? "bg-red-100 text-red-800"
-            : "bg-gray-100 text-gray-700";
+          const availBadge =
+            availability === "AVAILABLE"
+              ? "bg-green-100 text-green-800"
+              : availability === "BUSY"
+              ? "bg-red-100 text-red-800"
+              : "bg-gray-100 text-gray-700";
 
-        return (
-          <li key={p.id} className="grid grid-cols-12 items-center gap-2 p-3">
-            <div className="col-span-4">
-              <div className="font-medium">{name}</div>
-              <div className="mt-0.5 text-xs text-neutral-500">
-                {p.email ?? p.id}
-              </div>
+          return (
+            <li key={p.id} className="grid grid-cols-12 items-center gap-2 p-3">
+              <div className="col-span-4">
+                <div className="font-medium">{name}</div>
+                <div className="mt-0.5 text-xs text-neutral-500">
+                  {p.email ?? p.id}
+                </div>
 
-              {/* Role & status badges */}
-              <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                {p.roleLabel && (
-                  <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-800">
-                    {/* Hide role number; show label only */}
-                    {p.roleLabel}
-                  </span>
-                )}
-                {availability && (
-                  <span
-                    className={clsx(
-                      "inline-flex rounded-md px-2 py-0.5 text-xs",
-                      availBadge
-                    )}
-                  >
-                    {availability}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="col-span-5 text-sm text-neutral-700">
-              {p.city && <span className="mr-2">{p.city}</span>}
-              {p.countryCode && (
-                <span className="text-neutral-500">({p.countryCode})</span>
-              )}
-              {(p.tags || []).length > 0 && (
-                <span className="ml-2 text-xs text-neutral-500">
-                  {(p.tags || []).slice(0, 3).map((t) => (
-                    <span key={t} className="mr-1">
-                      #{t}
+                {/* Role & status badges */}
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  {p.roleLabel && (
+                    <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-800">
+                      {/* Hide role number; show label only */}
+                      {p.roleLabel}
                     </span>
-                  ))}
-                </span>
-              )}
-            </div>
+                  )}
+                  {availability && (
+                    <span
+                      className={clsx(
+                        "inline-flex rounded-md px-2 py-0.5 text-xs",
+                        availBadge
+                      )}
+                    >
+                      {availability}
+                    </span>
+                  )}
+                </div>
+              </div>
 
-            <div className="col-span-3 flex items-center justify-end">
-              {/* Invite button (now always enabled here; enforcement will be in booking picker) */}
-              <button
-                className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                title="Invite"
-              >
-                Invite
-              </button>
-            </div>
-          </li>
-        );
-      })}
+              <div className="col-span-5 text-sm text-neutral-700">
+                {p.city && <span className="mr-2">{p.city}</span>}
+                {p.countryCode && (
+                  <span className="text-neutral-500">({p.countryCode})</span>
+                )}
+                {(p.tags || []).length > 0 && (
+                  <span className="ml-2 text-xs text-neutral-500">
+                    {(p.tags || []).slice(0, 3).map((t) => (
+                      <span key={t} className="mr-1">
+                        #{t}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </div>
+
+              <div className="col-span-3 flex items-center justify-end">
+                {/* Invite button (now always enabled here; enforcement will be in booking picker) */}
+                <button
+                  className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                  title="Invite"
+                >
+                  Invite
+                </button>
+              </div>
+            </li>
+          );
+        })}
     </ul>
   );
 }

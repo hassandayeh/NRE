@@ -15,6 +15,7 @@ type InvitePayload = Partial<{
   type: string;
   t: string;
   orgId: string;
+  orgName: string; // 👈 new (optional) claim
   userId: string;
   email: string;
   iat: number;
@@ -111,6 +112,7 @@ export default function AcceptInvitePage() {
   const token = sp.get("token");
 
   const payload = React.useMemo(() => tryDecodePayload(token), [token]);
+  const orgDisplay = payload?.orgName ?? payload?.orgId ?? "";
 
   // Org name (best-effort)
   const [orgName, setOrgName] = React.useState<string | null>(null);
@@ -202,8 +204,8 @@ export default function AcceptInvitePage() {
   return (
     <main className="mx-auto max-w-lg px-4 py-10">
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h1 className="text-xl font-semibold tracking-tight">
-          Accept invitation
+        <h1 className="text-xl font-semibold">
+          Accept invitation to {payload?.orgName ?? payload?.orgId}
         </h1>
 
         {payload?.email || payload?.orgId || payload?.exp ? (
@@ -212,15 +214,6 @@ export default function AcceptInvitePage() {
               <p>
                 You&apos;re setting a password for:{" "}
                 <span className="font-medium">{payload.email}</span>
-              </p>
-            )}
-
-            {(orgName || payload?.orgId) && (
-              <p className="mt-1">
-                Org:{" "}
-                <span className="tabular-nums">
-                  {orgName ?? payload?.orgId}
-                </span>
               </p>
             )}
 

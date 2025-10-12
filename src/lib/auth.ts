@@ -171,6 +171,10 @@ export const authOptions: NextAuthOptions = {
         }
       }
 
+      // Identity flag (derived; no extra DB calls)
+      (token as any).identity = (token as any).guestProfileId
+        ? "guest"
+        : "staff";
       return token;
     },
 
@@ -208,6 +212,9 @@ export const authOptions: NextAuthOptions = {
         role: (token as any).role ?? (session as any)?.user?.role ?? null,
       });
 
+      (session.user as any).identity =
+        (token as any)?.identity ??
+        ((token as any)?.guestProfileId ? "guest" : "staff");
       return session;
     },
   },

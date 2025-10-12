@@ -33,6 +33,7 @@ function b64url(buf: Buffer | string) {
     : Buffer.from(buf).toString("base64");
   return b.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
+
 function signHS256(header: any, payload: any, secret: string): string {
   const h = b64url(JSON.stringify(header));
   const p = b64url(JSON.stringify(payload));
@@ -45,6 +46,7 @@ type InvitePayload = {
   type: "invite";
   typ: "invite";
   orgId: string;
+  orgName?: string; // ✅ added so accept screen can show the human-readable name
   userId: string;
   email: string;
   iat: number;
@@ -88,6 +90,7 @@ export async function POST(req: NextRequest) {
   const email = (body?.email || "").trim();
   const name = typeof body?.name === "string" ? body.name.trim() : undefined;
   let slot = Number.isFinite(body?.slot) ? Number(body.slot) : 6;
+
   if (!email) return badRequest("Email required");
   if (!Number.isFinite(slot) || slot < 1 || slot > 10)
     return badRequest("Invalid slot");
@@ -146,7 +149,6 @@ export async function POST(req: NextRequest) {
         hashedPassword: true,
       },
     });
-
     devInfo("invite:new_user", { orgId, actingUserId, email, userId: user.id });
   }
 
@@ -165,13 +167,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Sign token with both keys + userId
+  // ✅ Fetch org name (best-effort; no behavior change if missing)
+  const org = await prisma.organization.findUnique({
+    where: { id: orgId },
+    select: { id: true, name: true },
+  });
+
+  // Sign token with both keys + userId (+ orgName for UI)
   const now = Math.floor(Date.now() / 1000);
   const exp = now + 60 * 60 * 24 * 7; // 7 days
   const token = signInviteToken({
     type: "invite",
     typ: "invite",
     orgId,
+    orgName: org?.name || undefined, // 👈 this powers the name on the accept page
     userId: user.id,
     email: user.email!,
     iat: now,
@@ -191,6 +200,7 @@ export async function POST(req: NextRequest) {
     inviteUrl,
   });
 
+  // Keep the response shape the same for callers
   return NextResponse.json(
     {
       inviteUrl,
@@ -198,6 +208,7 @@ export async function POST(req: NextRequest) {
       userId: user.id,
       email: user.email,
       orgId,
+      // NOTE: We intentionally do not add orgName here to avoid surprising existing callers.
     },
     { status: 201 }
   );

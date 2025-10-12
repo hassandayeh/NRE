@@ -970,6 +970,9 @@ export default function UsersAndRolesPage() {
           <h1 className="text-2xl font-semibold tracking-tight">
             Users &amp; Roles
           </h1>
+          <div aria-live="polite" className="mt-1 text-xs text-gray-500">
+            Signed in as {orgId ? "Staff" : "Guest"}
+          </div>
           {canCreate && (
             <button
               onClick={() => setShowInvite((v) => !v)}
