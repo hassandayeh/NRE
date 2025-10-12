@@ -20,6 +20,13 @@ function forbidden(msg = "Forbidden") {
   return NextResponse.json({ error: msg } as JsonErr, { status: 403 });
 }
 
+// Lightweight dev telemetry (no-op in production)
+function devInfo(...args: any[]) {
+  if (process.env.NODE_ENV !== "production") {
+    console.info("[telemetry]", ...args);
+  }
+}
+
 function b64url(buf: Buffer | string) {
   const b = Buffer.isBuffer(buf)
     ? buf.toString("base64")
@@ -85,6 +92,9 @@ export async function POST(req: NextRequest) {
   if (!Number.isFinite(slot) || slot < 1 || slot > 10)
     return badRequest("Invalid slot");
 
+  // Telemetry: request parsed
+  devInfo("invite:request", { orgId, actingUserId, email, slot });
+
   // POLICY: slot must be active in this org
   const destRole = await prisma.orgRole.findUnique({
     where: { orgId_slot: { orgId, slot } },
@@ -106,6 +116,13 @@ export async function POST(req: NextRequest) {
       typeof user.hashedPassword === "string" &&
       user.hashedPassword.startsWith("invited:");
     if (!isInvited) {
+      devInfo("invite:block", {
+        reason: "user_exists",
+        orgId,
+        actingUserId,
+        email,
+        userId: user.id,
+      });
       return NextResponse.json(
         { error: "User already exists", code: "user_exists" } as JsonErr,
         { status: 409 }
@@ -129,6 +146,8 @@ export async function POST(req: NextRequest) {
         hashedPassword: true,
       },
     });
+
+    devInfo("invite:new_user", { orgId, actingUserId, email, userId: user.id });
   }
 
   // Ensure membership (idempotent)
@@ -140,6 +159,10 @@ export async function POST(req: NextRequest) {
     await prisma.userRole.create({
       data: { orgId, userId: user.id, slot },
     });
+    devInfo(
+      existing ? "invite:membership:existing" : "invite:membership:created",
+      { orgId, actingUserId, userId: user.id, slot }
+    );
   }
 
   // Sign token with both keys + userId
@@ -158,6 +181,15 @@ export async function POST(req: NextRequest) {
   const inviteUrl = `${
     req.nextUrl.origin
   }/auth/invite/accept?token=${encodeURIComponent(token)}`;
+
+  devInfo("invite:issued", {
+    orgId,
+    actingUserId,
+    userId: user.id,
+    email,
+    expiresAt: exp * 1000,
+    inviteUrl,
+  });
 
   return NextResponse.json(
     {

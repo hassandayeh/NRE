@@ -356,6 +356,10 @@ export default function UsersAndRolesPage() {
   const canDelete = canAny(["staff:delete"]);
   const canRolesManage = canAny(["roles:manage"]);
 
+  // Read-only hints
+  const readOnlyUsers = !canCreate && !canDelete;
+  const readOnlyRoles = !canRolesManage;
+
   // Admin helpers for UI policy: only Admin (Role 1) can promote/demote/remove Role 1
   const viewerIsAdmin = mySlot === 1;
   const isRowAdmin = (u: UserItem) => (u.slot ?? 0) === 1;
@@ -981,6 +985,16 @@ export default function UsersAndRolesPage() {
           <h2 id="users" className="mb-4 text-lg font-semibold">
             Users
           </h2>
+          {readOnlyUsers && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="mt-1 text-sm text-gray-600"
+            >
+              You can view users, but you don’t have permission to invite or
+              remove. Contact your org admin if you need access.
+            </p>
+          )}
 
           {/* Create user (collapsible, above filters) */}
           {canCreate && showInvite && (
@@ -1254,6 +1268,17 @@ export default function UsersAndRolesPage() {
           <h2 id="roles-heading" className="mb-3 text-lg font-medium">
             Roles management
           </h2>
+
+          {readOnlyRoles && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="mb-2 text-sm text-gray-600"
+            >
+              You can view roles, but you can’t edit them. Ask an admin for
+              “roles:manage”.
+            </p>
+          )}
 
           {!rolesRes || !permissionKeys ? (
             <div className="rounded-md border p-6 text-sm text-neutral-600">
