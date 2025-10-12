@@ -300,6 +300,49 @@ export default function UsersAndRolesPage() {
 
   // roles
   const [rolesRes, setRolesRes] = React.useState<RolesResponse | null>(null);
+  // === UI permission guards (based on session email → my slot from `items`)
+  const [meEmail, setMeEmail] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const s = await fetch("/api/auth/session", { cache: "no-store" }).then(
+          (r) => r.json()
+        );
+        setMeEmail(
+          (s?.user?.email as string | undefined) ||
+            (s?.email as string | undefined) ||
+            null
+        );
+      } catch {
+        setMeEmail(null);
+      }
+    })();
+  }, []);
+
+  const mySlot: number | null = React.useMemo(() => {
+    if (!meEmail) return null;
+    const me = (items ?? []).find(
+      (u) => (u.email || "").toLowerCase() === meEmail.toLowerCase()
+    );
+    return typeof me?.slot === "number" ? (me!.slot as number) : null;
+  }, [items, meEmail]);
+
+  function canAny(keys: string[]): boolean {
+    // Admin (slot 1) has full access
+    if (mySlot === 1) return true;
+    if (!rolesRes || !mySlot) return false;
+    const slot = rolesRes.slots?.find((s) => s.slot === mySlot);
+    if (!slot) return false;
+    return keys.some((k) =>
+      slot.overrides?.some((o) => o.key === k && o.allowed)
+    );
+  }
+
+  const canCreate = canAny(["staffcreate", "staff:create"]);
+  const canDelete = canAny(["staffdelete", "staff:delete"]);
+  const canRolesManage = canAny(["rolesmanage", "roles:manage"]);
+  // === end guards ===
+
   const [permissionKeys, setPermissionKeys] = React.useState<
     readonly string[] | null
   >(null);
@@ -875,12 +918,14 @@ export default function UsersAndRolesPage() {
           <h1 className="text-2xl font-semibold tracking-tight">
             Users &amp; Roles
           </h1>
-          <button
-            onClick={() => setShowInvite((v) => !v)}
-            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-          >
-            {showInvite ? "Close" : "Create user"}
-          </button>
+          {canCreate && (
+            <button
+              onClick={() => setShowInvite((v) => !v)}
+              className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+            >
+              {showInvite ? "Close" : "Create user"}
+            </button>
+          )}
         </header>
 
         {/* Users */}
@@ -890,7 +935,7 @@ export default function UsersAndRolesPage() {
           </h2>
 
           {/* Create user (collapsible, above filters) */}
-          {showInvite && (
+          {canCreate && showInvite && (
             <form
               onSubmit={onInvite}
               className="mb-6 rounded-xl border p-4 shadow-sm ring-1 ring-black/5"
@@ -935,20 +980,23 @@ export default function UsersAndRolesPage() {
               </label>
 
               {/* Footer: button on first line; invite link wraps to its own full-width line */}
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button
-                  disabled={inviting}
-                  className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
-                >
-                  {inviting ? "Creating…" : "Create user"}
-                </button>
+              {canCreate && (
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="submit"
+                    disabled={inviting}
+                    className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {inviting ? "Creating…" : "Create user"}
+                  </button>
 
-                {inviteLink ? (
-                  <div className="basis-full overflow-hidden">
-                    <CopyField label="Invite link" value={inviteLink} />
-                  </div>
-                ) : null}
-              </div>
+                  {inviteLink ? (
+                    <div className="basis-full overflow-hidden">
+                      <CopyField label="Invite link" value={inviteLink} />
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </form>
           )}
 
@@ -1084,14 +1132,15 @@ export default function UsersAndRolesPage() {
                             View
                           </button>
                         )}
-
-                        <button
-                          disabled={pending[u.id]}
-                          onClick={() => onRemove(u.id, u.name || u.email)}
-                          className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
-                        >
-                          Remove
-                        </button>
+                        {canDelete && (
+                          <button
+                            disabled={pending[u.id]}
+                            onClick={() => onRemove(u.id, u.name || u.email)}
+                            className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            Remove
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -1167,6 +1216,7 @@ export default function UsersAndRolesPage() {
                     aria-label={`Role ${slotNum}`}
                   >
                     {/* Header row */}
+                    {/* Header row */}
                     <div className="flex flex-wrap items-center gap-3">
                       <div className="text-sm font-medium">Role {slotNum}</div>
 
@@ -1182,6 +1232,7 @@ export default function UsersAndRolesPage() {
                             [slotNum]: true,
                           }));
                         }}
+                        disabled={!canRolesManage}
                         className="h-9 w-full min-w-[240px] max-w-[360px] flex-1 rounded-md border border-gray-300 px-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
                         aria-label={`Label for role #${slotNum}`}
                         placeholder={`Role ${slotNum}`}
@@ -1206,6 +1257,7 @@ export default function UsersAndRolesPage() {
                                   [slotNum]: true,
                                 }));
                               }}
+                              disabled={!canRolesManage}
                               className="h-5 w-5"
                             />
                             Active
@@ -1218,28 +1270,30 @@ export default function UsersAndRolesPage() {
                               onChange={(e) =>
                                 setBookable(slotNum, e.target.checked)
                               }
+                              disabled={!canRolesManage}
                               className="h-5 w-5"
                             />
                             Bookable
                           </label>
 
-                          <button
-                            onClick={() =>
-                              setPermOpen((o) => ({
-                                ...o,
-                                [slotNum]: !o[slotNum],
-                              }))
-                            }
-                            className="ml-2 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                          >
-                            {permOpen[slotNum]
-                              ? "Hide permissions"
-                              : "Permissions"}
-                          </button>
+                          {canRolesManage && (
+                            <button
+                              onClick={() =>
+                                setPermOpen((o) => ({
+                                  ...o,
+                                  [slotNum]: !o[slotNum],
+                                }))
+                              }
+                              className="ml-2 h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
+                            >
+                              {permOpen[slotNum]
+                                ? "Hide permissions"
+                                : "Permissions"}
+                            </button>
+                          )}
                         </>
                       )}
 
-                      {/* Right edge: pill just left of Save; Save stays on the far right */}
                       {(busy || dirty) && (
                         <span
                           className={cx(
@@ -1253,25 +1307,27 @@ export default function UsersAndRolesPage() {
                         </span>
                       )}
 
-                      <button
-                        onClick={() => saveRole(slotNum)}
-                        disabled={busy || !dirty}
-                        className={cx(
-                          // when pill is hidden, push Save to the right
-                          busy || dirty ? "" : "ml-auto",
-                          "h-9 rounded-md border px-3 text-sm",
-                          busy || !dirty
-                            ? "cursor-not-allowed opacity-50"
-                            : "hover:bg-gray-50"
-                        )}
-                        aria-disabled={busy || !dirty}
-                      >
-                        Save
-                      </button>
+                      {canRolesManage && (
+                        <button
+                          onClick={() => saveRole(slotNum)}
+                          disabled={busy || !dirty}
+                          className={cx(
+                            busy || dirty ? "" : "ml-auto",
+                            "h-9 rounded-md border px-3 text-sm",
+                            busy || !dirty
+                              ? "cursor-not-allowed opacity-50"
+                              : "hover:bg-gray-50"
+                          )}
+                          aria-disabled={busy || !dirty}
+                        >
+                          Save
+                        </button>
+                      )}
                     </div>
 
                     {/* Permissions: single checkbox per key (no inherit) */}
-                    {!isAdmin && permOpen[slotNum] && (
+                    {/* Permissions: single checkbox per key (no inherit) */}
+                    {!isAdmin && permOpen[slotNum] && canRolesManage && (
                       <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                         {permissionKeys
                           .filter((k) => !HIDDEN_PERMISSION_KEYS.has(k))
