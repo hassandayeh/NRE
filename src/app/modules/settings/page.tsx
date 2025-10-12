@@ -71,6 +71,27 @@ export default function SettingsPage() {
  * Inner page
  * ---------- */
 function SettingsInner() {
+  // Platform-level CTA: check if a personal guest profile exists
+  const [session, setSession] = React.useState<any | undefined>(undefined);
+  React.useEffect(() => {
+    let disposed = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/auth/session", { cache: "no-store" });
+        const s = r.ok ? await r.json().catch(() => null) : null;
+        if (!disposed) setSession(s);
+      } catch {
+        if (!disposed) setSession(null);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  const hasGuestProfile = Boolean(
+    (session as any)?.guestProfileId ?? (session as any)?.user?.guestProfileId
+  );
+
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
 
@@ -273,6 +294,32 @@ function SettingsInner() {
         >
           &larr; Back to bookings
         </Link>
+
+        {/* Personal login (guest) CTA — platform-level */}
+        {session !== undefined && !hasGuestProfile ? (
+          <div className="mb-6 rounded-md border bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="font-medium">
+                  Add a personal login (recommended)
+                </div>
+                <p className="mt-1 text-sm text-gray-600">
+                  Link a personal email so you keep access if your work account
+                  changes. We never copy org data—your personal login is
+                  separate.
+                </p>
+              </div>
+              <div className="mt-3 sm:mt-0">
+                <Link
+                  href="/account/prepare-guest"
+                  className="inline-flex items-center rounded-md border bg-black px-3 py-1.5 text-sm text-white hover:bg-black/90"
+                >
+                  Set up personal login
+                </Link>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {/* ========== Organization (fast gated by probe) ========== */}
         {canManageSettings ? (

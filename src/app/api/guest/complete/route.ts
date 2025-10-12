@@ -71,6 +71,12 @@ function asMsg(e: unknown) {
   }
 }
 
+// Platform policy helper: split email domain
+function emailDomain(e: string) {
+  const at = e.indexOf("@");
+  return at > 0 ? e.slice(at + 1).toLowerCase() : "";
+}
+
 // ---------------- Handler ----------------
 export async function POST(req: Request) {
   const jar = cookies();
@@ -105,6 +111,37 @@ export async function POST(req: Request) {
   // Consume the ticket so it can't be replayed
   tickets.delete(ticket);
   const email = entry.email.toLowerCase().trim();
+
+  // Platform-level policy: the personal (guest) email must not share the same domain
+  // as the currently signed-in email. We fetch the session with the forwarded cookie.
+  try {
+    const base = new URL(req.url);
+    const cookieHeader = req.headers.get("cookie") || "";
+    const sessRes = await fetch(new URL("/api/auth/session", base).toString(), {
+      headers: { cookie: cookieHeader },
+      cache: "no-store",
+    });
+    if (sessRes.ok) {
+      const sess: any = await sessRes.json().catch(() => null);
+      const currentEmail: string | null =
+        (sess?.email as string) ?? (sess?.user?.email as string) ?? null;
+      if (currentEmail) {
+        const dCur = emailDomain(currentEmail);
+        const dTar = emailDomain(email);
+        if (dCur && dTar && dCur === dTar) {
+          devLog("use_personal_email", { currentEmail, target: email });
+          return clearCookie(
+            NextResponse.json(
+              { ok: false, reason: "use_personal_email" },
+              { status: 400 }
+            )
+          );
+        }
+      }
+    }
+  } catch {
+    // If session fetch fails, proceed; other guards exist in the flow.
+  }
 
   // Optional password from body
   let providedPassword: string | undefined;
