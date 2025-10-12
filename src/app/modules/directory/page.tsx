@@ -30,9 +30,12 @@ type OrgDirectoryItem = {
     | "UNKNOWN"
     | null;
 
-  // Role info (set by API)
+  // Optional role info
   roleSlot?: number | null;
   roleLabel?: string | null;
+
+  // Other fields may exist; we keep types lenient on purpose
+  [k: string]: any;
 };
 
 type GlobalExpert = {
@@ -47,6 +50,8 @@ type GlobalExpert = {
     | "BUSY"
     | "UNKNOWN"
     | null;
+
+  [k: string]: any;
 };
 
 type ApiOrgDirectory =
@@ -59,6 +64,10 @@ type ApiExperts =
   | { ok: false; error: string }
   | { items?: GlobalExpert[]; error?: string };
 
+type ApiOrgUsers =
+  | { ok?: boolean; items?: any[]; users?: any[]; error?: string }
+  | { [k: string]: any };
+
 /** ------------------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------------- */
@@ -70,14 +79,12 @@ function getInviteableFlag(x: OrgDirectoryItem): boolean | null {
     return x.flags.inviteable;
   return null;
 }
-
 function getListedInternalFlag(x: OrgDirectoryItem): boolean | null {
   if (typeof x.listed_internal === "boolean") return x.listed_internal;
   if (x.flags && typeof x.flags.listed_internal === "boolean")
     return x.flags.listed_internal;
   return null;
 }
-
 function getAvailabilityStatus(
   a: OrgDirectoryItem["availability"] | GlobalExpert["availability"]
 ): string | null {
@@ -87,7 +94,6 @@ function getAvailabilityStatus(
     return (a as any).status;
   return null;
 }
-
 function displayName(x: OrgDirectoryItem | GlobalExpert): string {
   return (
     ((x as OrgDirectoryItem).displayName as string) ||
@@ -97,22 +103,90 @@ function displayName(x: OrgDirectoryItem | GlobalExpert): string {
   );
 }
 
+/** Heuristics for “pending” on arbitrary shapes (client fallback only). */
+function isPendingLike(p: any): boolean {
+  const toLower = (v: any) => (v ?? "").toString().toLowerCase();
+
+  // Common status-like fields
+  const status = toLower(
+    p?.status ??
+      p?.state ??
+      p?.roleStatus ??
+      p?.membershipStatus ??
+      p?.inviteStatus
+  );
+  if (status.includes("pending") || status.includes("invite")) return true;
+
+  // Boolean-ish flags and nested flags
+  if (p?.isPending === true || p?.pending === true || p?.invited === true)
+    return true;
+  if (p?.flags && (p.flags.pending === true || p.flags.invited === true))
+    return true;
+
+  // Invite lifecycle
+  const invToken = p?.inviteToken ?? p?.token;
+  const invitedAt = p?.invitedAt ?? p?.createdByInviteAt;
+  const acceptedAt = p?.acceptedAt ?? p?.accepted_at ?? p?.activatedAt;
+  if ((invToken || invitedAt) && !acceptedAt) return true;
+
+  // Placeholder password marker used in some flows
+  const hp = p?.hashedPassword;
+  if (typeof hp === "string" && hp.startsWith("invited:")) return true;
+
+  return false;
+}
+
+/** Consider a “Users” row active if it’s not pending/invited/removed (shape-agnostic). */
+function isActiveStaff(u: any): boolean {
+  const toLower = (v: any) => (v ?? "").toString().toLowerCase();
+
+  // Obvious negatives first
+  if (u?.removed === true || u?.removedAt) return false;
+  if (u?.disabled === true) return false;
+  if (u?.suspended === true) return false;
+
+  // Status-like fields
+  const status = toLower(
+    u?.status ??
+      u?.state ??
+      u?.roleStatus ??
+      u?.membershipStatus ??
+      u?.inviteStatus
+  );
+  if (status.includes("pending") || status.includes("invite")) return false;
+
+  // Pending flags
+  if (u?.isPending === true || u?.pending === true || u?.invited === true)
+    return false;
+  if (u?.flags && (u.flags.pending === true || u.flags.invited === true))
+    return false;
+
+  // Invite lifecycle
+  const invitedAt = u?.invitedAt ?? u?.createdByInviteAt;
+  const acceptedAt = u?.acceptedAt ?? u?.accepted_at ?? u?.activatedAt;
+  if (invitedAt && !acceptedAt) return false;
+
+  // Placeholder password marker used in some flows
+  const hp = u?.hashedPassword;
+  if (typeof hp === "string" && hp.startsWith("invited:")) return false;
+
+  return true;
+}
+
 /** ------------------------------------------------------------------------
  * Page
  * ---------------------------------------------------------------------- */
 export default function DirectoryPage() {
   const qs = useSearchParams();
-  const sp = useSearchParams();
-  const orgId = sp.get("orgId");
 
   // Tabs + search
   const [tab, setTab] = React.useState<"internal" | "global">("internal");
   const [q, setQ] = React.useState("");
 
   // Session (for org fallback)
-  const [sessionObj, setSessionObj] = React.useState<any | null | undefined>(
-    undefined
-  ); // undefined=loading, null=failure, object=ok
+  const [sessionObj, setSessionObj] = React.useState<
+    { orgId?: string; user?: { orgId?: string } } | null | undefined
+  >(undefined); // undefined=loading, null=failure, object=ok
   const sessionReady = sessionObj !== undefined;
 
   // Effective org: URL override first (client), else session orgId
@@ -120,7 +194,7 @@ export default function DirectoryPage() {
   const sessionOrgId = sessionReady
     ? sessionObj?.orgId ?? sessionObj?.user?.orgId ?? null
     : null;
-  const effectiveOrgId = overrideOrgId || sessionOrgId;
+  const effectiveOrgId = overrideOrgId || sessionOrgId || null;
 
   // Data state
   const [loading, setLoading] = React.useState(true);
@@ -181,7 +255,6 @@ export default function DirectoryPage() {
       }
       setLoading(true);
       setError(null);
-
       try {
         if (tab === "internal") {
           // INTERNAL tab needs an org context
@@ -193,6 +266,7 @@ export default function DirectoryPage() {
           const sp = new URLSearchParams();
           if (debouncedQ) sp.set("q", debouncedQ);
 
+          // 1) Base directory list (bookable + listed filtering happens client-side below)
           const res = await fetch(
             withOrg(`/api/directory/org?${sp.toString()}`),
             {
@@ -202,20 +276,56 @@ export default function DirectoryPage() {
           );
           const json = (await res.json()) as ApiOrgDirectory;
           if (!alive) return;
-          if (!res.ok)
+          if (!res.ok) {
             throw new Error(
               (json as any)?.error || "Failed to load directory."
             );
+          }
 
-          let items: OrgDirectoryItem[] = ((json as any)?.items ??
-            []) as OrgDirectoryItem[];
+          let items: OrgDirectoryItem[] =
+            (((json as any)?.items ?? []) as OrgDirectoryItem[]) || [];
 
-          // ✅ Show ONLY inviteable users (and never unlisted)
+          // ✅ Keep only inviteable and not explicitly unlisted (as before)
           items = items.filter(
             (x) =>
               getInviteableFlag(x) === true &&
               getListedInternalFlag(x) !== false
           );
+
+          // 2) Attempt a **strong** exclusion using the Users endpoint (source of truth for status)
+          //    We build a set of ACTIVE emails and intersect with directory items.
+          let activeEmailSet: Set<string> | null = null;
+          try {
+            const usersRes = await fetch(withOrg(`/api/org/users?take=500`), {
+              credentials: "include",
+              cache: "no-store",
+            });
+            if (usersRes.ok) {
+              const uj = (await usersRes.json()) as ApiOrgUsers;
+              const rows: any[] = (uj.items ?? uj.users ?? []) as any[];
+              const activeEmails = rows
+                .filter(isActiveStaff)
+                .map((u) =>
+                  (u?.email ?? u?.user?.email ?? u?.member?.email ?? "")
+                    .toString()
+                    .toLowerCase()
+                )
+                .filter(Boolean);
+              activeEmailSet = new Set(activeEmails);
+            }
+          } catch {
+            // ignore; we’ll fall back to heuristic
+            activeEmailSet = null;
+          }
+
+          if (activeEmailSet && activeEmailSet.size > 0) {
+            items = items.filter((x) =>
+              activeEmailSet!.has((x.email ?? "").toString().toLowerCase())
+            );
+          } else {
+            // 3) Fallback: local heuristic (covers dev/staging shapes)
+            items = items.filter((x) => !isPendingLike(x));
+          }
 
           // Backup client-side search if server ignored q
           const needle = debouncedQ.trim().toLowerCase();
@@ -237,12 +347,13 @@ export default function DirectoryPage() {
 
           setOrgItems(items);
         } else {
-          // GLOBAL tab
+          // GLOBAL tab (requires an org context per current product rules)
           if (!effectiveOrgId) {
             setGlobalItems([]);
             setLoading(false);
             return;
           }
+
           const sp = new URLSearchParams({ visibility: "public", take: "30" });
           if (debouncedQ) sp.set("q", debouncedQ);
 
@@ -255,9 +366,13 @@ export default function DirectoryPage() {
           );
           const json = (await res.json()) as ApiExperts;
           if (!alive) return;
-          if (!res.ok)
+          if (!res.ok) {
             throw new Error((json as any)?.error || "Failed to load experts.");
-          setGlobalItems(((json as any)?.items ?? []) as GlobalExpert[]);
+          }
+
+          setGlobalItems(
+            (((json as any)?.items ?? []) as GlobalExpert[]) || []
+          );
         }
 
         setLoading(false);
@@ -267,7 +382,6 @@ export default function DirectoryPage() {
         setLoading(false);
       }
     })();
-
     return () => {
       alive = false;
     };
@@ -275,22 +389,22 @@ export default function DirectoryPage() {
 
   // Banner when no org (either tab)
   const showNoOrgBanner = sessionReady && !effectiveOrgId;
+
+  // Use filtered items for counts/empty-states so UI matches rendered list
   const internalCount = orgItems.length;
   const globalCount = globalItems.length;
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
+    <div className="mx-auto max-w-5xl p-6">
       {/* Header */}
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Directory</h1>
-        <div aria-live="polite" className="mt-1 text-xs text-gray-500">
-          Signed in as {orgId ? "Staff" : "Guest"}
-        </div>
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold">Directory</h1>
+        <p className="mt-1 text-sm text-gray-600">
+          Signed in as {effectiveOrgId ? "Staff" : "Guest"}
+        </p>
+      </div>
 
-        {/* orgId removed from UI per request */}
-      </header>
-
-      {/* Tabs */}
+      {/* Tabs + Search */}
       <div className="mb-4 flex items-center gap-2">
         <button
           onClick={() => setTab("internal")}
@@ -313,7 +427,6 @@ export default function DirectoryPage() {
           Global {globalCount ? `(${globalCount})` : ""}
         </button>
 
-        {/* Search */}
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -328,22 +441,26 @@ export default function DirectoryPage() {
 
       {/* No-org banner (both tabs) */}
       {showNoOrgBanner && (
-        <div className="mb-4 rounded-md border bg-amber-50 p-3 text-sm text-amber-900">
+        <div className="mb-4 rounded-md border bg-yellow-50 p-3 text-sm text-yellow-900">
           No organization selected.{" "}
-          <Link href="/modules/settings/org" className="underline">
+          <Link
+            href="/modules/settings?tab=org"
+            className="underline underline-offset-2 hover:no-underline"
+          >
             Choose org
           </Link>
+          .
         </div>
       )}
 
       {/* Loading / Error */}
       {loading && (
-        <div className="rounded-md border p-6 text-sm text-neutral-700">
+        <div className="mt-8 text-sm text-gray-600" role="status">
           Loading…
         </div>
       )}
       {error && (
-        <div className="rounded-md border p-6 text-sm text-red-700">
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
           {error}
         </div>
       )}
@@ -363,116 +480,98 @@ export default function DirectoryPage() {
         !error &&
         tab === "internal" &&
         effectiveOrgId &&
-        orgItems.length === 0 && (
-          <div className="mt-4 rounded-md border border-dashed p-8 text-center text-sm text-neutral-600">
-            No inviteable members to show.
-            <div className="mt-1 text-xs">
+        internalCount === 0 && (
+          <div className="mt-8 rounded-md border p-6 text-center text-sm text-gray-600">
+            <p className="font-medium">No inviteable members to show.</p>
+            <p className="mt-1">
               Toggle “Bookable Talent” in{" "}
-              <Link href="/modules/settings/users" className="underline">
+              <Link
+                href="/modules/settings/users"
+                className="underline underline-offset-2 hover:no-underline"
+              >
                 Users &amp; Roles
               </Link>
               .
-            </div>
+            </p>
           </div>
         )}
       {!loading &&
         !error &&
         tab === "global" &&
         effectiveOrgId &&
-        globalItems.length === 0 && (
-          <div className="mt-4 rounded-md border border-dashed p-8 text-center text-sm text-neutral-600">
-            No public experts match your search.
+        globalCount === 0 && (
+          <div className="mt-8 rounded-md border p-6 text-center text-sm text-gray-600">
+            <p className="font-medium">No public experts match your search.</p>
           </div>
         )}
-    </main>
+    </div>
   );
 }
 
 /** ------------------------------------------------------------------------
  * Lists
  * ---------------------------------------------------------------------- */
+
 function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
   return (
     <ul className="divide-y rounded-md border">
-      {items
-        .filter((p) => {
-          const s = ((p as any)?.status ?? (p as any)?.state ?? "")
-            .toString()
-            .toLowerCase();
-          if (s === "pending" || s === "invited") return false;
-          if ((p as any)?.isPending === true) return false;
-          const hp = (p as any)?.hashedPassword;
-          if (typeof hp === "string" && hp.startsWith("invited:")) return false;
-          return true;
-        })
-        .map((p) => {
-          const name = displayName(p);
-          const availability = getAvailabilityStatus(p.availability);
+      {items.map((p) => {
+        const name = displayName(p);
+        const availability = getAvailabilityStatus(p.availability);
+        const availBadge =
+          availability === "AVAILABLE"
+            ? "bg-green-100 text-green-800"
+            : availability === "BUSY"
+            ? "bg-red-100 text-red-800"
+            : "bg-gray-100 text-gray-700";
 
-          const availBadge =
-            availability === "AVAILABLE"
-              ? "bg-green-100 text-green-800"
-              : availability === "BUSY"
-              ? "bg-red-100 text-red-800"
-              : "bg-gray-100 text-gray-700";
-
-          return (
-            <li key={p.id} className="grid grid-cols-12 items-center gap-2 p-3">
-              <div className="col-span-4">
-                <div className="font-medium">{name}</div>
-                <div className="mt-0.5 text-xs text-neutral-500">
+        return (
+          <li key={p.id} className="flex items-center gap-4 p-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="truncate font-medium">{name}</span>
+                <span className="truncate text-xs text-gray-500">
                   {p.email ?? p.id}
-                </div>
-
-                {/* Role & status badges */}
-                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                  {p.roleLabel && (
-                    <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-800">
-                      {/* Hide role number; show label only */}
-                      {p.roleLabel}
-                    </span>
-                  )}
-                  {availability && (
-                    <span
-                      className={clsx(
-                        "inline-flex rounded-md px-2 py-0.5 text-xs",
-                        availBadge
-                      )}
-                    >
-                      {availability}
-                    </span>
-                  )}
-                </div>
+                </span>
               </div>
 
-              <div className="col-span-5 text-sm text-neutral-700">
-                {p.city && <span className="mr-2">{p.city}</span>}
-                {p.countryCode && (
-                  <span className="text-neutral-500">({p.countryCode})</span>
-                )}
-                {(p.tags || []).length > 0 && (
-                  <span className="ml-2 text-xs text-neutral-500">
-                    {(p.tags || []).slice(0, 3).map((t) => (
-                      <span key={t} className="mr-1">
-                        #{t}
-                      </span>
-                    ))}
+              {/* Role & status badges */}
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                {p.roleLabel && (
+                  <span className="rounded bg-gray-100 px-2 py-0.5 text-gray-800">
+                    {p.roleLabel}
                   </span>
                 )}
+                {availability && (
+                  <span className={clsx("rounded px-2 py-0.5", availBadge)}>
+                    {availability}
+                  </span>
+                )}
+                {p.city && <span className="text-gray-500">{p.city}</span>}
+                {p.countryCode && (
+                  <span className="text-gray-400">({p.countryCode})</span>
+                )}
+                {(p.tags || []).slice(0, 3).map((t) => (
+                  <span
+                    key={t}
+                    className="rounded bg-gray-50 px-1.5 py-0.5 text-gray-600"
+                  >
+                    #{t}
+                  </span>
+                ))}
               </div>
+            </div>
 
-              <div className="col-span-3 flex items-center justify-end">
-                {/* Invite button (now always enabled here; enforcement will be in booking picker) */}
-                <button
-                  className="h-9 rounded-md border px-3 text-sm hover:bg-gray-50"
-                  title="Invite"
-                >
-                  Invite
-                </button>
-              </div>
-            </li>
-          );
-        })}
+            {/* Invite button (always enabled here; booking picker enforces rules) */}
+            <Link
+              href="#"
+              className="whitespace-nowrap rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+            >
+              Invite
+            </Link>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -491,40 +590,37 @@ function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
             : "bg-gray-100 text-gray-700";
 
         return (
-          <li key={e.id} className="grid grid-cols-12 items-center gap-2 p-3">
-            <div className="col-span-7">
-              <div className="font-medium">{name}</div>
-              <div className="mt-0.5 text-xs text-neutral-500">
-                Expert • {e.id}
+          <li
+            key={e.id}
+            className="flex items-center justify-between gap-4 p-3"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="truncate font-medium">{name}</span>
+                <span className="truncate text-xs text-gray-500">
+                  Expert • {e.id}
+                </span>
               </div>
-              {status && (
-                <div className="mt-1">
-                  <span
-                    className={clsx(
-                      "inline-flex rounded-md px-2 py-0.5 text-xs",
-                      availBadge
-                    )}
-                  >
+
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                {status && (
+                  <span className={clsx("rounded px-2 py-0.5", availBadge)}>
                     {status}
                   </span>
-                </div>
-              )}
-            </div>
-
-            <div className="col-span-5 text-sm text-neutral-700">
-              {e.city && <span className="mr-2">{e.city}</span>}
-              {e.countryCode && (
-                <span className="text-neutral-500">({e.countryCode})</span>
-              )}
-              {(e.tags || []).length > 0 && (
-                <span className="ml-2 text-xs text-neutral-500">
-                  {(e.tags || []).slice(0, 3).map((t) => (
-                    <span key={t} className="mr-1">
-                      #{t}
-                    </span>
-                  ))}
-                </span>
-              )}
+                )}
+                {e.city && <span className="text-gray-500">{e.city}</span>}
+                {e.countryCode && (
+                  <span className="text-gray-400">({e.countryCode})</span>
+                )}
+                {(e.tags || []).slice(0, 3).map((t) => (
+                  <span
+                    key={t}
+                    className="rounded bg-gray-50 px-1.5 py-0.5 text-gray-600"
+                  >
+                    #{t}
+                  </span>
+                ))}
+              </div>
             </div>
           </li>
         );

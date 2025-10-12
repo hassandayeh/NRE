@@ -8,7 +8,7 @@ import { PrismaClient, Prisma } from "@prisma/client";
  *
  * Source of truth:
  * - "UserRole" (userId, orgId, slot, assignedAt)
- * - "User" (id, displayName, email, city, countryCode, ...)
+ * - "User" (id, displayName, email, city, countryCode, hashedPassword, ...)
  * - "OrgRole" (orgId, slot, label, isActive, ...)
  *
  * Behavior:
@@ -17,6 +17,11 @@ import { PrismaClient, Prisma } from "@prisma/client";
  * - Non-admins only see users whose role has directory:listed_internal=allow.
  * - ?q= filters on name/email/id/city/country/roleLabel.
  * - ?debug=1 adds { source, countPre, countPost, roles, admin, filtered }.
+ *
+ * 2025-10-12:
+ * - Exclude pending/invited staff:
+ *   (A) Intersect with ACTIVE members from /api/org/users.
+ *   (B) Fallback: exclude users whose User.hashedPassword starts with "invited:".
  */
 
 // ---------- prisma singleton ----------
@@ -105,6 +110,43 @@ function isAdminFromSession(session: any, roles: Set<string>) {
   return false;
 }
 
+/** Shape-agnostic detector for "active" staff rows returned by /api/org/users. */
+function isActiveStaff(u: any): boolean {
+  const toLower = (v: any) => (v ?? "").toString().toLowerCase();
+
+  // Obvious negatives first
+  if (u?.removed === true || u?.removedAt) return false;
+  if (u?.disabled === true) return false;
+  if (u?.suspended === true) return false;
+
+  // Status-like fields
+  const status = toLower(
+    u?.status ??
+      u?.state ??
+      u?.roleStatus ??
+      u?.membershipStatus ??
+      u?.inviteStatus
+  );
+  if (status.includes("pending") || status.includes("invite")) return false;
+
+  // Pending flags
+  if (u?.isPending === true || u?.pending === true || u?.invited === true)
+    return false;
+  if (u?.flags && (u.flags.pending === true || u.flags.invited === true))
+    return false;
+
+  // Invite lifecycle
+  const invitedAt = u?.invitedAt ?? u?.createdByInviteAt;
+  const acceptedAt = u?.acceptedAt ?? u?.accepted_at ?? u?.activatedAt;
+  if (invitedAt && !acceptedAt) return false;
+
+  // Placeholder password marker used in some flows
+  const hp = u?.hashedPassword;
+  if (typeof hp === "string" && hp.startsWith("invited:")) return false;
+
+  return true;
+}
+
 // ---------- handler ----------
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
@@ -145,21 +187,22 @@ export async function GET(req: NextRequest) {
 
   // Parameterized raw SQL (uses actual column names in DB):
   // - "UserRole": userId, orgId, slot, assignedAt
-  // - "User": displayName, email, city, countryCode
+  // - "User": displayName, email, city, countryCode, hashedPassword
   // - "OrgRole": label, isActive (join on (orgId, slot))
   const sql = Prisma.sql`
     SELECT
-      ur."userId"       AS "userId",
-      ur."orgId"        AS "orgId",
-      ur."slot"         AS "slot",
-      ur."assignedAt"   AS "assignedAt",
-      u."id"            AS "u_id",
-      u."displayName"   AS "u_displayName",
-      u."email"         AS "u_email",
-      u."city"          AS "u_city",
-      u."countryCode"   AS "u_countryCode",
-      r."label"         AS "role_label",
-      r."isActive"      AS "role_active"
+      ur."userId"         AS "userId",
+      ur."orgId"          AS "orgId",
+      ur."slot"           AS "slot",
+      ur."assignedAt"     AS "assignedAt",
+      u."id"              AS "u_id",
+      u."displayName"     AS "u_displayName",
+      u."email"           AS "u_email",
+      u."city"            AS "u_city",
+      u."countryCode"     AS "u_countryCode",
+      u."hashedPassword"  AS "u_hashedPassword",
+      r."label"           AS "role_label",
+      r."isActive"        AS "role_active"
     FROM "public"."UserRole" ur
     JOIN "public"."User" u
       ON u."id" = ur."userId"
@@ -176,6 +219,15 @@ export async function GET(req: NextRequest) {
   } catch (e: any) {
     errMsg = e?.message || String(e);
     rows = [];
+  }
+
+  // Build a set of users who look "invited but not yet activated" (DB fallback)
+  const invitedIdSet = new Set<string>();
+  for (const r of rows) {
+    const hp = r?.u_hashedPassword;
+    if (typeof hp === "string" && hp.startsWith("invited:")) {
+      invitedIdSet.add(String(r.u_id ?? r.userId));
+    }
   }
 
   // Normalize rows → items
@@ -196,7 +248,7 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // Client-side search (pre-flagging, but that’s fine)
+  // Client-side search (pre-flagging, fine)
   if (q) {
     const needle = q.toLowerCase();
     items = items.filter((x) =>
@@ -247,6 +299,66 @@ export async function GET(req: NextRequest) {
     it.inviteable = inviteSlots.has(slot);
   }
 
+  // === (A) Intersect with ACTIVE users from /api/org/users (excludes pending/invited) ===
+  let activeIdSet: Set<string> | null = null;
+  let activeEmailSet: Set<string> | null = null;
+  let usersFetchError: string | null = null;
+  try {
+    const usersRes = await fetch(
+      new URL(
+        `/api/org/users?orgId=${encodeURIComponent(orgId)}&take=500`,
+        url
+      ).toString(),
+      { headers: { cookie }, cache: "no-store" }
+    );
+    if (usersRes.ok) {
+      const uj: any = await usersRes.json();
+      const rowsU: any[] = (uj.items ?? uj.users ?? []) as any[];
+
+      const activeRows = rowsU.filter(isActiveStaff);
+
+      activeIdSet = new Set(
+        activeRows
+          .map((u) =>
+            String(u?.userId ?? u?.id ?? u?.user?.id ?? u?.member?.id ?? "")
+          )
+          .filter(Boolean)
+      );
+      activeEmailSet = new Set(
+        activeRows
+          .map((u) =>
+            (u?.email ?? u?.user?.email ?? u?.member?.email ?? "")
+              .toString()
+              .toLowerCase()
+          )
+          .filter(Boolean)
+      );
+    } else {
+      usersFetchError = `${usersRes.status} ${usersRes.statusText}`;
+    }
+  } catch (e: any) {
+    usersFetchError = e?.message || "fetch-failed";
+  }
+
+  // Apply active-set filter when we have data
+  if (
+    (activeIdSet && activeIdSet.size > 0) ||
+    (activeEmailSet && activeEmailSet.size > 0)
+  ) {
+    items = items.filter((x) => {
+      const idOk = activeIdSet?.has(String(x.id)) ?? false;
+      const emailOk = x.email
+        ? activeEmailSet?.has(String(x.email).toLowerCase()) ?? false
+        : false;
+      return idOk || emailOk;
+    });
+  }
+
+  // === (B) Fallback: exclude users clearly marked as invited in DB
+  if (invitedIdSet.size > 0) {
+    items = items.filter((x) => !invitedIdSet.has(String(x.id)));
+  }
+
   // Non-admin viewers: hide non-listed members
   const isAdmin = isAdminFromSession(session, roles);
   const countPre = items.length;
@@ -270,9 +382,11 @@ export async function GET(req: NextRequest) {
             countPre,
             countPost,
             rolesFetchError,
+            usersFetchError,
             source:
-              'sql:public."UserRole" → public."User" (+public."OrgRole") + derive(/api/org/roles)',
+              'sql:public."UserRole" → public."User"(+hashedPassword) + public."OrgRole" + roles(/api/org/roles) + active(/api/org/users) + invited(hp)',
             error: errMsg ?? null,
+            invitedCount: invitedIdSet.size,
           },
         }
       : {}),
