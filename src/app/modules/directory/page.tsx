@@ -370,8 +370,11 @@ export default function DirectoryPage() {
             throw new Error((json as any)?.error || "Failed to load experts.");
           }
 
+          const rawExperts = ((json as any)?.items ?? []) as GlobalExpert[];
           setGlobalItems(
-            (((json as any)?.items ?? []) as GlobalExpert[]) || []
+            rawExperts.filter(
+              (e) => typeof e?.name === "string" && e.name.trim().length > 0
+            )
           );
         }
 
@@ -580,7 +583,10 @@ function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
   return (
     <ul className="divide-y rounded-md border">
       {items.map((e) => {
-        const name = displayName(e);
+        const name =
+          typeof e.name === "string" && e.name.trim() ? e.name : null;
+        if (!name) return null;
+
         const status = getAvailabilityStatus(e.availability);
         const availBadge =
           status === "AVAILABLE"
@@ -598,7 +604,7 @@ function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
               <div className="flex items-center gap-2">
                 <span className="truncate font-medium">{name}</span>
                 <span className="truncate text-xs text-gray-500">
-                  Expert • {e.id}
+                  {/* id hidden by design (display-name only) */}
                 </span>
               </div>
 

@@ -354,6 +354,30 @@ function SettingsInner() {
           </section>
         ) : null}
 
+        {/* ────────────────────────────────────────────────────────────
+   Your account (not admin-gated)
+   Shown to all users; the Privacy page itself already handles
+   guest-only logic gracefully.
+   ──────────────────────────────────────────────────────────── */}
+        <section className="mt-10">
+          <h2 className="text-sm font-semibold tracking-wide text-gray-700">
+            Your account
+          </h2>
+
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {/* Privacy (guest visibility) */}
+            <a
+              href="/modules/settings/privacy"
+              className="block rounded-xl border border-gray-200 p-4 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-black"
+            >
+              <div className="text-sm font-medium">Privacy</div>
+              <div className="mt-1 text-xs text-gray-500">
+                Control your public listing & visibility.
+              </div>
+            </a>
+          </div>
+        </section>
+
         {/* ========== Theme (local) ========== */}
         <section className="rounded-lg border bg-white p-4 shadow-sm">
           <h2 className="mb-2 text-lg font-medium">Appearance</h2>

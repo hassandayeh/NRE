@@ -11,9 +11,11 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-/* =========================
-   Enums
-   ========================= */
+/**
+ * =========================
+ * Enums
+ * =========================
+ */
 enum BookingStatus {
   PENDING
   CONFIRMED
@@ -33,24 +35,26 @@ enum InviteStatus {
   CANCELLED
 }
 
-/* =========================
-   Tenancy & Users
-   ========================= */
+/**
+ * =========================
+ * Tenancy & Users
+ * =========================
+ */
 model Organization {
-  id        String   @id @default(cuid())
-  name      String   @db.VarChar(200)
+  id   String @id @default(cuid())
+  name String @db.VarChar(200)
 
   // Access control
-  orgRoles   OrgRole[]
-  userRoles  UserRole[]
+  orgRoles  OrgRole[]
+  userRoles UserRole[]
 
   // Modes & access (additive)
-  modes              OrganizationMode[]
-  modePresets        OrganizationModePreset[]
-  accessPresets      OrganizationAccessPreset[]
+  modes         OrganizationMode[]
+  modePresets   OrganizationModePreset[]
+  accessPresets OrganizationAccessPreset[]
 
   // Domain
-  bookings  Booking[]
+  bookings Booking[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -59,13 +63,13 @@ model Organization {
 }
 
 model User {
-  id               String   @id @default(cuid())
-  email            String   @unique @db.VarChar(320)
-  hashedPassword   String   @db.VarChar(255)
+  id             String @id @default(cuid())
+  email          String @unique @db.VarChar(320)
+  hashedPassword String @db.VarChar(255)
 
-  displayName      String?  @db.VarChar(200)
-  avatarUrl        String?  @db.Text
-  bio              String?  @db.Text
+  displayName String? @db.VarChar(200)
+  avatarUrl   String? @db.Text
+  bio         String? @db.Text
 
   languages        String[] @default([])
   tags             String[] @default([])
@@ -75,62 +79,65 @@ model User {
   countryCode      String?  @db.VarChar(2)
   timeZone         String?  @db.VarChar(64)
 
-  userRoles        UserRole[]
+  userRoles           UserRole[]
   bookingParticipants BookingParticipant[]
   notes               BookingNote[]
 
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([displayName])
   @@index([countryCode])
 }
 
-/* =========================
-   Access Control (Roles 1–10)
-   ========================= */
+/**
+ * =========================
+ * Access Control (Roles 1–10)
+ * =========================
+ */
 model PermissionKey {
-  id            String   @id @default(cuid())
-  key           String   @unique @db.VarChar(120)
-  description   String?  @db.Text
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id            String                   @id @default(cuid())
+  key           String                   @unique @db.VarChar(120)
+  description   String?                  @db.Text
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
   templateLinks RoleTemplatePermission[]
   orgLinks      OrgRolePermission[]
 }
 
 model RoleTemplate {
-  id                 String   @id @default(cuid())
-  slot               Int      @unique
-  defaultLabel       String   @db.VarChar(100)
-  isActiveByDefault  Boolean  @default(false)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  permissions        RoleTemplatePermission[]
+  id                String                   @id @default(cuid())
+  slot              Int                      @unique
+  defaultLabel      String                   @db.VarChar(100)
+  isActiveByDefault Boolean                  @default(false)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  permissions       RoleTemplatePermission[]
 }
 
 model RoleTemplatePermission {
   roleTemplateId  String
   permissionKeyId String
-  roleTemplate  RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
-  permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
+  roleTemplate    RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
+  permissionKey   PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
+
   @@id([roleTemplateId, permissionKeyId])
 }
 
 model OrgRole {
-  id        String   @id @default(cuid())
-  orgId     String
-  slot      Int
-  label     String   @db.VarChar(100)
-  isActive  Boolean  @default(false)
+  id       String  @id @default(cuid())
+  orgId    String
+  slot     Int
+  label    String  @db.VarChar(100)
+  isActive Boolean @default(false)
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   permissions OrgRolePermission[]
-  assignments UserRole[] @relation("OrgRoleAssignments")
+  assignments UserRole[]          @relation("OrgRoleAssignments")
 
   @@unique([orgId, slot])
   @@index([orgId])
@@ -163,27 +170,30 @@ model UserRole {
   @@index([orgId, slot])
 }
 
-/* =========================
-   Modes (per org) + Presets & Access (additive)
-   ========================= */
+/**
+ * =========================
+ * Modes (per org) + Presets & Access (additive)
+ * =========================
+ */
 
-/** OrganizationMode
+/**
+ * OrganizationMode
  * Route writes: { orgId, slot, active, label, accessFieldLabel }
  * We expose `active` but map it to the existing DB column `isActive`.
  */
 model OrganizationMode {
-  id        String   @id @default(cuid())
-  orgId     String
-  slot      Int
-  label     String   @db.VarChar(120)
-  active    Boolean  @map("isActive") @default(false)   // maps to existing column
+  id               String  @id @default(cuid())
+  orgId            String
+  slot             Int
+  label            String  @db.VarChar(120)
+  active           Boolean @default(false) @map("isActive") // maps to existing column
   accessFieldLabel String?
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // *** Back-relations required by Prisma (additive, no DB changes) ***
-  presets        OrganizationModePreset[]
-  accessPresets  OrganizationAccessPreset[]
+  presets       OrganizationModePreset[]
+  accessPresets OrganizationAccessPreset[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -192,7 +202,9 @@ model OrganizationMode {
   @@index([orgId])
 }
 
-/** Catalog of access fields toggled per mode */
+/**
+ * Catalog of access fields toggled per mode
+ */
 model OrganizationAccessField {
   id          String   @id @default(cuid())
   key         String   @unique @db.VarChar(120)
@@ -202,119 +214,123 @@ model OrganizationAccessField {
   updatedAt   DateTime @updatedAt
 
   // Two different relations from AccessPreset -> AccessField need names
-  presetsByAccessId  OrganizationAccessPreset[] @relation("AccessPresetByAccessFieldId")
-  presetsByLegacyId  OrganizationAccessPreset[] @relation("AccessPresetByLegacyFieldId")
+  presetsByAccessId OrganizationAccessPreset[] @relation("AccessPresetByAccessFieldId")
+  presetsByLegacyId OrganizationAccessPreset[] @relation("AccessPresetByLegacyFieldId")
 }
 
-/** Mode presets (per OrganizationMode).
+/**
+ * Mode presets (per OrganizationMode).
  * Route sends arrays like: [{ orgModeId, value }]
  * Legacy orgId/slot/label/active kept OPTIONAL (no drops).
  */
 model OrganizationModePreset {
-  id         String   @id @default(cuid())
-  orgModeId  String
-  value      String
+  id        String @id @default(cuid())
+  orgModeId String
+  value     String
 
   // legacy/optional (kept for compatibility)
-  orgId      String?
-  slot       Int?
-  label      String?
-  active     Boolean? @default(false)
+  orgId  String?
+  slot   Int?
+  label  String?
+  active Boolean? @default(false)
 
   organizationMode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
   organization     Organization?    @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  @@unique([orgId, slot]) // legacy uniqueness (null-friendly)
   @@index([orgModeId])
   @@index([orgId])
-  @@unique([orgId, slot]) // legacy uniqueness (null-friendly)
 }
 
-/** Access presets (per OrganizationMode + AccessField).
+/**
+ * Access presets (per OrganizationMode + AccessField).
  * Route sends arrays like: [{ orgModeId, accessFieldId, value }]
  * Legacy orgId/modeSlot/fieldId/allowed kept OPTIONAL (no drops).
  */
 model OrganizationAccessPreset {
-  id            String   @id @default(cuid())
+  id            String  @id @default(cuid())
   orgModeId     String
   accessFieldId String
   value         String?
 
   // legacy/optional (kept for compatibility)
-  orgId     String?
-  modeSlot  Int?
-  fieldId   String?
-  allowed   Boolean? @default(true)
+  orgId    String?
+  modeSlot Int?
+  fieldId  String?
+  allowed  Boolean? @default(true)
 
-  organizationMode OrganizationMode       @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
+  organizationMode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
 
   // *** disambiguated relations ***
-  accessField     OrganizationAccessField @relation("AccessPresetByAccessFieldId", fields: [accessFieldId], references: [id], onDelete: Cascade)
-  field           OrganizationAccessField?@relation("AccessPresetByLegacyFieldId", fields: [fieldId], references: [id], onDelete: SetNull)
+  accessField OrganizationAccessField  @relation("AccessPresetByAccessFieldId", fields: [accessFieldId], references: [id], onDelete: Cascade)
+  field       OrganizationAccessField? @relation("AccessPresetByLegacyFieldId", fields: [fieldId], references: [id], onDelete: SetNull)
 
-  organization    Organization?           @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  @@unique([orgId, modeSlot, fieldId]) // legacy uniqueness (null-friendly)
   @@index([orgModeId])
   @@index([accessFieldId])
   @@index([orgId])
-  @@unique([orgId, modeSlot, fieldId]) // legacy uniqueness (null-friendly)
 }
 
-/* =========================
-   Bookings & Participation
-   ========================= */
+/**
+ * =========================
+ * Bookings & Participation
+ * =========================
+ */
 model Booking {
-  id            String   @id @default(cuid())
-  orgId         String
-  organization  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id           String       @id @default(cuid())
+  orgId        String
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  subject       String   @db.VarChar(300)
-  status        BookingStatus @default(PENDING)
-  startAt       DateTime
-  durationMins  Int
+  subject      String        @db.VarChar(300)
+  status       BookingStatus @default(PENDING)
+  startAt      DateTime
+  durationMins Int
 
   appearanceType  AppearanceType?
   locationUrl     String?
-  locationName    String? @db.VarChar(300)
+  locationName    String?         @db.VarChar(300)
   locationAddress String?
   dialInfo        String?
 
-  participants  BookingParticipant[]
-  notes         BookingNote[]
+  participants BookingParticipant[]
+  notes        BookingNote[]
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([orgId])
   @@index([startAt])
 }
 
 model BookingParticipant {
-  id         String   @id @default(cuid())
-  bookingId  String
-  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        String  @id @default(cuid())
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  userId     String?
-  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  roleSlot   Int
+  roleSlot          Int
   roleLabelSnapshot String? @db.VarChar(100)
 
-  inviteStatus  InviteStatus @default(PENDING)
+  inviteStatus InviteStatus @default(PENDING)
 
   invitedByUserId String?
   invitedAt       DateTime?
   respondedAt     DateTime?
 
-  notes       String? @db.Text
+  notes String? @db.Text
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([bookingId, userId])
   @@index([bookingId])
@@ -323,13 +339,13 @@ model BookingParticipant {
 }
 
 model BookingNote {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   bookingId String
-  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   authorId  String
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  author    User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
-  body      String   @db.Text
+  body String @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -341,10 +357,10 @@ model GuestProfile {
   id            String   @id @default(cuid())
   personalEmail String   @unique
   passwordHash  String?  @db.VarChar(255) // ← NEW: hashed password for guest sign-in
-  displayName   String?  // optional; future-friendly
-  avatarUrl     String?  // optional
+  displayName   String? // optional; future-friendly
+  avatarUrl     String? // optional
+  listedPublic  Boolean  @default(false)
   inviteable    Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }
-
