@@ -3,21 +3,23 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { createHmac, timingSafeEqual } from "crypto";
 
 export const runtime = "nodejs";
 
 /**
  * POST /api/guest/complete
  *
- * Validates the short-lived "guest_verify" cookie (set by /api/guest/verify-code),
- * then creates or reuses a GuestProfile (by personalEmail) and returns its id.
- * Optionally accepts { password } to set a guest password (hashed).
+ * Primary: validates short-lived "guest_verify" cookie (ticket set by /api/guest/verify-code).
+ * Fallback: if no ticket cookie, accept { token } (HS256 from /api/guest/prepare) and verify it.
+ * Then creates or reuses a GuestProfile by personalEmail and optionally sets a password.
  *
  * Status:
  * - 200: { ok: true, email, guestProfileId }
- * - 401: { ok: false, reason: "no_ticket" }
+ * - 401: { ok: false, reason: "no_ticket" | "invalid_token" }
  * - 404: { ok: false, reason: "not_found" }
  * - 410: { ok: false, reason: "expired" }
+ * - 400: { ok: false, reason: "use_personal_email" }   // domain policy
  * - 500: { ok: false, reason: "db_error" | "prisma_client_out_of_date", message }
  */
 
@@ -77,12 +79,121 @@ function emailDomain(e: string) {
   return at > 0 ? e.slice(at + 1).toLowerCase() : "";
 }
 
+// --- HS256 helpers (match prepare/verify) ---
+function b64urlToBuf(s: string): Buffer {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
+  if (pad) s += "=".repeat(pad);
+  return Buffer.from(s, "base64");
+}
+function verifyHs256(token: string, secret: string) {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("bad_token_format");
+  const [h, p, s] = parts;
+  const data = `${h}.${p}`;
+  const expected = createHmac("sha256", secret).update(data).digest();
+  const got = b64urlToBuf(s);
+  if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
+    throw new Error("bad_signature");
+  }
+  const payloadJson = b64urlToBuf(p).toString("utf8");
+  const payload = JSON.parse(payloadJson) as {
+    email?: string;
+    code?: string;
+    iat?: number;
+    exp?: number;
+    v?: number;
+  };
+  if (!payload || typeof payload !== "object") throw new Error("bad_payload");
+  return payload;
+}
+
 // ---------------- Handler ----------------
 export async function POST(req: Request) {
   const jar = cookies();
   const ticket = jar.get("guest_verify")?.value || "";
 
-  if (!ticket) {
+  // parse body once (password + optional token)
+  let providedPassword: string | undefined;
+  let providedToken: string | null = null;
+  try {
+    const body = (await req.json().catch(() => null)) as {
+      password?: string;
+      token?: string;
+      email?: string;
+    } | null;
+    if (body?.password && typeof body.password === "string") {
+      const p = body.password.trim();
+      if (p.length >= 6 && p.length <= 200) providedPassword = p;
+    }
+    if (body?.token && typeof body.token === "string") {
+      providedToken = body.token.trim();
+    }
+  } catch {
+    // ignore malformed; keep defaults
+  }
+
+  let email = "";
+  const tickets = getTicketStore();
+
+  if (ticket) {
+    // --- Primary path: ticket cookie ---
+    const entry = tickets.get(ticket);
+    if (!entry) {
+      devLog("not_found", {});
+      return clearCookie(
+        NextResponse.json({ ok: false, reason: "not_found" }, { status: 404 })
+      );
+    }
+    if (Date.now() >= entry.exp) {
+      tickets.delete(ticket);
+      devLog("expired", { email: entry.email });
+      return clearCookie(
+        NextResponse.json({ ok: false, reason: "expired" }, { status: 410 })
+      );
+    }
+    // consume & use
+    tickets.delete(ticket);
+    email = entry.email.toLowerCase().trim();
+  } else if (providedToken) {
+    // --- Fallback path: verify prepare token directly ---
+    try {
+      const secret = process.env.NEXTAUTH_SECRET || "dev-secret-only";
+      const payload = verifyHs256(providedToken, secret);
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (!payload.exp || nowSec >= payload.exp) {
+        return NextResponse.json(
+          {
+            ok: false,
+            reason: "expired",
+            message: "Invalid or expired token.",
+          },
+          { status: 410 }
+        );
+      }
+      email = (payload.email || "").toLowerCase().trim();
+      if (!email || !email.includes("@")) {
+        return NextResponse.json(
+          {
+            ok: false,
+            reason: "invalid_token",
+            message: "Invalid token payload.",
+          },
+          { status: 401 }
+        );
+      }
+    } catch {
+      return NextResponse.json(
+        {
+          ok: false,
+          reason: "invalid_token",
+          message: "Invalid or expired token.",
+        },
+        { status: 401 }
+      );
+    }
+  } else {
+    // no cookie, no token
     devLog("no_ticket", {});
     return NextResponse.json(
       { ok: false, reason: "no_ticket" },
@@ -90,33 +201,11 @@ export async function POST(req: Request) {
     );
   }
 
-  const tickets = getTicketStore();
-  const entry = tickets.get(ticket);
-
-  if (!entry) {
-    devLog("not_found", {});
-    return clearCookie(
-      NextResponse.json({ ok: false, reason: "not_found" }, { status: 404 })
-    );
-  }
-
-  if (Date.now() >= entry.exp) {
-    tickets.delete(ticket);
-    devLog("expired", { email: entry.email });
-    return clearCookie(
-      NextResponse.json({ ok: false, reason: "expired" }, { status: 410 })
-    );
-  }
-
-  // Consume the ticket so it can't be replayed
-  tickets.delete(ticket);
-  const email = entry.email.toLowerCase().trim();
-
   // Platform-level policy: the personal (guest) email must not share the same domain
   // as the currently signed-in email. We fetch the session with the forwarded cookie.
   try {
     const base = new URL(req.url);
-    const cookieHeader = req.headers.get("cookie") || "";
+    const cookieHeader = (req.headers as any).get?.("cookie") || "";
     const sessRes = await fetch(new URL("/api/auth/session", base).toString(), {
       headers: { cookie: cookieHeader },
       cache: "no-store",
@@ -141,21 +230,6 @@ export async function POST(req: Request) {
     }
   } catch {
     // If session fetch fails, proceed; other guards exist in the flow.
-  }
-
-  // Optional password from body
-  let providedPassword: string | undefined;
-  try {
-    const body = (await req.json().catch(() => null)) as {
-      password?: string;
-    } | null;
-    if (body && typeof body.password === "string") {
-      const p = body.password.trim();
-      // keep len minimal; you can harden later if needed
-      if (p.length >= 6 && p.length <= 200) providedPassword = p;
-    }
-  } catch {
-    // ignore malformed bodies; password remains undefined
   }
 
   devLog("start", { email, hasPassword: Boolean(providedPassword) });
@@ -199,7 +273,7 @@ export async function POST(req: Request) {
       profile =
         (await gp.findFirst({ where: { personalEmail: email } })) ??
         (await gp.create({ data: baseData }));
-      created = !("id" in (profile ?? {})) ? false : true;
+      created = Boolean(profile?.id);
     } else if (providedPassword) {
       // Update password when provided
       await gp.update({
@@ -224,7 +298,6 @@ export async function POST(req: Request) {
       })
     );
   } catch (e) {
-    // Log for dev; return helpful message to the client.
     devLog("db_error", { email, message: asMsg(e) });
     // eslint-disable-next-line no-console
     console.error("[/api/guest/complete] DB error:", e);

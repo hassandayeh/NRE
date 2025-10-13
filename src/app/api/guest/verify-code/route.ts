@@ -1,147 +1,133 @@
 // src/app/api/guest/verify-code/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "crypto";
+
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-/**
- * POST /api/guest/verify-code
- *
- * Body: { email: string, code: string }
- *
- * Validates a 6-digit code previously created by /api/guest/send-code.
- * On success:
- *   - Deletes the code entry to prevent reuse.
- *   - Mints a short-lived, HttpOnly cookie ("guest_verify") that carries a random ticket.
- *   - Stores the ticket -> { email, exp } in a module-global map for the follow-up step.
- *
- * Status codes:
- * - 200: { ok: true }
- * - 400: { ok: false, reason:"invalid_input" }
- * - 404: { ok: false, reason:"not_found" }
- * - 410: { ok: false, reason:"expired" }
- * - 401: { ok: false, reason:"invalid_code", attemptsRemaining:number }
- * - 429: { ok: false, reason:"too_many_attempts" }
- */
+type Ok = { ok: true };
+type Err = { ok: false; reason?: string; message?: string };
 
-type Json = Record<string, unknown>;
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CODE_RE = /^\d{6}$/;
-const MAX_VERIFY_ATTEMPTS = 6;
-const TICKET_TTL_SEC = 10 * 60; // 10 minutes
-
-type CodeEntry = { code: string; exp: number; attempts: number };
-type TicketEntry = { email: string; exp: number };
-
-declare global {
-  // created by /api/guest/send-code
-  // eslint-disable-next-line no-var
-  var __guestCodeStore: Map<string, CodeEntry> | undefined;
-
-  // created/used here and by the upcoming /api/guest/complete
-  // eslint-disable-next-line no-var
-  var __guestVerifyTickets: Map<string, TicketEntry> | undefined;
+function json(status: number, body: Ok | Err) {
+  return NextResponse.json(body, { status });
 }
 
-function getCodeStore(): Map<string, CodeEntry> {
-  if (!globalThis.__guestCodeStore) {
-    globalThis.__guestCodeStore = new Map<string, CodeEntry>();
+function b64urlToBuf(s: string): Buffer {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
+  if (pad) s += "=".repeat(pad);
+  return Buffer.from(s, "base64");
+}
+
+function b64url(input: Buffer | string) {
+  const base = Buffer.isBuffer(input)
+    ? input.toString("base64")
+    : Buffer.from(input).toString("base64");
+  return base.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function verifyHs256(token: string, secret: string) {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("bad_token_format");
+
+  const [h, p, s] = parts;
+  const data = `${h}.${p}`;
+  const expected = createHmac("sha256", secret).update(data).digest();
+  const got = b64urlToBuf(s);
+
+  if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
+    throw new Error("bad_signature");
   }
-  return globalThis.__guestCodeStore;
-}
-function getTicketStore(): Map<string, TicketEntry> {
-  if (!globalThis.__guestVerifyTickets) {
-    globalThis.__guestVerifyTickets = new Map<string, TicketEntry>();
-  }
-  return globalThis.__guestVerifyTickets;
+
+  const payloadJson = b64urlToBuf(p).toString("utf8");
+  const payload = JSON.parse(payloadJson) as {
+    email?: string;
+    code?: string;
+    iat?: number;
+    exp?: number;
+    v?: number;
+  };
+
+  if (!payload || typeof payload !== "object") throw new Error("bad_payload");
+  return payload;
 }
 
-function json(status: number, body: Json, init?: ResponseInit) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-    ...init,
-  });
-}
-
-function randomTicket(): string {
-  // 32 hex chars
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export async function POST(req: Request) {
-  let email = "";
+export async function POST(req: NextRequest) {
+  let token = "";
   let code = "";
 
-  // ---- Parse body
   try {
-    const body = (await req.json()) as
-      | { email?: string; code?: string }
-      | undefined;
-    email = (body?.email || "").trim().toLowerCase();
-    code = (body?.code || "").trim();
+    const j = await req.json();
+    token = (j?.token ?? "").toString();
+    code = (j?.code ?? "").toString().trim();
   } catch {
-    // fallthrough to invalid input
-  }
-
-  // ---- Validate formats
-  if (!EMAIL_RE.test(email) || !CODE_RE.test(code)) {
-    return json(400, { ok: false, reason: "invalid_input" });
-  }
-
-  // ---- Lookup entry
-  const store = getCodeStore();
-  const entry = store.get(email);
-  if (!entry) {
-    return json(404, { ok: false, reason: "not_found" });
-  }
-
-  // ---- Expiry
-  if (Date.now() >= entry.exp) {
-    store.delete(email);
-    return json(410, { ok: false, reason: "expired" });
-  }
-
-  // ---- Attempts lockout
-  if (entry.attempts >= MAX_VERIFY_ATTEMPTS) {
-    return json(429, { ok: false, reason: "too_many_attempts" });
-  }
-
-  // ---- Check code
-  if (code !== entry.code) {
-    entry.attempts += 1;
-    const remaining = Math.max(0, MAX_VERIFY_ATTEMPTS - entry.attempts);
-    return json(401, {
+    return json(400, {
       ok: false,
-      reason: "invalid_code",
-      attemptsRemaining: remaining,
+      reason: "invalid_json",
+      message: "Invalid request body.",
     });
   }
 
-  // ---- Success: consume code and mint a short-lived verification ticket
-  store.delete(email);
+  if (!token) {
+    return json(400, {
+      ok: false,
+      reason: "token_required",
+      message: "Missing verification token.",
+    });
+  }
+  if (!/^\d{6}$/.test(code)) {
+    return json(400, {
+      ok: false,
+      reason: "invalid_code",
+      message: "Code must be 6 digits.",
+    });
+  }
 
-  const ticket = randomTicket();
-  const exp = Math.floor(Date.now() / 1000) + TICKET_TTL_SEC;
+  const secret = process.env.NEXTAUTH_SECRET || "dev-secret-only";
+  let payload: {
+    email?: string;
+    code?: string;
+    iat?: number;
+    exp?: number;
+    v?: number;
+  };
 
-  const tickets = getTicketStore();
-  tickets.set(ticket, { email, exp: exp * 1000 });
+  try {
+    payload = verifyHs256(token, secret);
+  } catch (e: any) {
+    const reason =
+      e?.message === "bad_signature"
+        ? "invalid_token"
+        : e?.message === "bad_token_format"
+        ? "invalid_token"
+        : "invalid_token";
+    return json(400, {
+      ok: false,
+      reason,
+      message: "Invalid or expired code.",
+    });
+  }
 
-  // Set HttpOnly cookie with the ticket so the next step can create the GuestProfile securely.
-  const res = NextResponse.json({ ok: true });
-  res.cookies.set("guest_verify", ticket, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: TICKET_TTL_SEC,
-  });
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!payload.exp || nowSec >= payload.exp) {
+    return json(400, {
+      ok: false,
+      reason: "expired",
+      message: "Invalid or expired code.",
+    });
+  }
 
-  return res;
+  // Compare codes safely (they are 6-digit strings)
+  const a = Buffer.from(payload.code ?? "", "utf8");
+  const b = Buffer.from(code, "utf8");
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return json(400, {
+      ok: false,
+      reason: "mismatch",
+      message: "Invalid or expired code.",
+    });
+  }
+
+  // All good
+  return json(200, { ok: true });
 }
-
-// (Optional) Keep this GET helper if you found it useful during bring-up.
-// export async function GET() {
-//   return new Response("verify-code route is alive (POST only)", { status: 405 });
-// }

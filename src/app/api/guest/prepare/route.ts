@@ -1,200 +1,163 @@
 // src/app/api/guest/prepare/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "node:crypto";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../../../lib/auth";
+import { createHmac, randomInt } from "crypto";
 
-/**
- * POST /api/guest/prepare
- * Body: { email: string }
- *
- * Platform-level policy:
- * - Signed-in only (no role gate).
- * - "Personal email" must NOT share the same domain as the current sign-in email.
- * - No org data is copied; this endpoint only issues a short-lived, signed token.
- * - Throttle to prevent abuse; generic errors to avoid enumeration.
- *
- * Response: { ok: true, token: string }  (no code is returned)
- */
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// ---- session helper (reuse cookie) ----
-async function getSession(req: NextRequest) {
-  const url = new URL(req.url);
-  const cookie = req.headers.get("cookie") || "";
-  const res = await fetch(new URL("/api/auth/session", url).toString(), {
-    headers: { cookie },
-    cache: "no-store",
-  });
-  if (!res.ok) return null;
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
+type Ok = { ok: true; token: string; devCode?: string; retryAfter?: number };
+type Err = {
+  ok: false;
+  reason?: string;
+  message?: string;
+  retryAfter?: number;
+};
+
+function json(status: number, body: Ok | Err) {
+  return NextResponse.json(body, { status });
 }
 
-// ---- simple in-memory throttle (per process) ----
-type Hit = { t: number; n: number };
-const RATE_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const RATE_LIMIT = 5; // 5 attempts per window
-const g = globalThis as unknown as { __nre_rate?: Map<string, Hit> };
-const rate = g.__nre_rate ?? new Map<string, Hit>();
-if (!g.__nre_rate) g.__nre_rate = rate;
-
-function throttleKey(ip: string, email: string) {
-  return `${ip}::${email.toLowerCase()}`;
+function b64url(buf: Buffer | string) {
+  const base = Buffer.isBuffer(buf)
+    ? buf.toString("base64")
+    : Buffer.from(buf).toString("base64");
+  return base.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
-function recordAndCheck(ip: string, email: string) {
-  const k = throttleKey(ip, email);
+
+function sign(payload: object, secret: string) {
+  const header = { alg: "HS256", typ: "JWT" };
+  const p1 = b64url(JSON.stringify(header));
+  const p2 = b64url(JSON.stringify(payload));
+  const data = `${p1}.${p2}`;
+  const sig = createHmac("sha256", secret).update(data).digest();
+  return `${data}.${b64url(sig)}`;
+}
+
+function domainOf(email: string) {
+  const m = (email || "")
+    .trim()
+    .toLowerCase()
+    .match(/^[^\s@]+@([^\s@]+\.[^\s@]+)$/);
+  return m?.[1] || null;
+}
+
+/** Simple in-memory rate limiter (per IP+email): 5 reqs / 15 min. */
+const WINDOW_MS = 15 * 60 * 1000;
+const LIMIT = 5;
+const bucket = new Map<string, number[]>();
+const keyFor = (ip: string, email: string) =>
+  `${ip}::${email.toLowerCase().trim()}`;
+function rateLimit(ip: string, email: string) {
   const now = Date.now();
-  const prev = rate.get(k);
-  if (!prev || now - prev.t > RATE_WINDOW_MS) {
-    rate.set(k, { t: now, n: 1 });
-    return true;
+  const k = keyFor(ip, email);
+  const arr = (bucket.get(k) || []).filter((t) => now - t < WINDOW_MS);
+  if (arr.length >= LIMIT) {
+    const retryAfter = Math.ceil((WINDOW_MS - (now - arr[0])) / 1000);
+    return { limited: true, retryAfter };
   }
-  if (prev.n >= RATE_LIMIT) return false;
-  prev.n += 1;
-  return true;
+  arr.push(now);
+  bucket.set(k, arr);
+  return { limited: false, retryAfter: 0 };
 }
 
-// ---- token helpers (HMAC; no DB) ----
-const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const TOKEN_TTL_MS = 12 * 60 * 1000; // token lives slightly longer than code
-
-function getSecret() {
-  // Prefer your NextAuth secret if present; otherwise dev-only fallback
-  return process.env.NEXTAUTH_SECRET || "dev-only-secret-do-not-use-in-prod";
-}
-
-function b64url(buf: Buffer) {
-  return buf
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function sign(payload: object) {
-  const json = JSON.stringify(payload);
-  const body = Buffer.from(json, "utf8");
-  const sig = crypto.createHmac("sha256", getSecret()).update(body).digest();
-  return `${b64url(body)}.${b64url(sig)}`;
-}
-
-function verify(token: string) {
-  const [b, s] = token.split(".");
-  if (!b || !s) return null;
-  const body = Buffer.from(b.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-  const expect = crypto.createHmac("sha256", getSecret()).update(body).digest();
-  const got = Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-  if (!crypto.timingSafeEqual(expect, got)) return null;
-  try {
-    return JSON.parse(body.toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function sha256(s: string) {
-  return b64url(crypto.createHash("sha256").update(s).digest());
-}
-
-function emailDomain(e: string) {
-  const at = e.indexOf("@");
-  return at > 0 ? e.slice(at + 1).toLowerCase() : "";
+/** Parse env CLAIMED_ORG_DOMAINS=acme.com,widgets.co.uk */
+function envClaimedDomains(): Set<string> {
+  const raw = process.env.CLAIMED_ORG_DOMAINS || "";
+  const list = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(list);
 }
 
 export async function POST(req: NextRequest) {
-  // 1) Auth required
-  const session = await getSession(req);
-  const currentEmail: string | null =
-    (session?.email as string) ?? (session?.user?.email as string) ?? null;
-
-  if (!currentEmail) {
-    // generic to avoid enumeration
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
-
-  // 2) Parse input
-  let body: any;
+  // 1) Parse input
+  let email = "";
   try {
-    body = await req.json();
+    const j = await req.json();
+    email = (j?.email ?? "").toString().trim().toLowerCase();
   } catch {
-    return NextResponse.json(
-      { ok: false, error: "bad_request" },
-      { status: 400 }
-    );
-  }
-  const targetEmail = String(body?.email || "")
-    .trim()
-    .toLowerCase();
-
-  // Minimal email sanity
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_email" },
-      { status: 400 }
-    );
+    return json(400, {
+      ok: false,
+      reason: "invalid_json",
+      message: "Invalid request body.",
+    });
   }
 
-  // 3) Platform policy: domain separation
-  const dCurrent = emailDomain(currentEmail);
-  const dTarget = emailDomain(targetEmail);
-  if (dCurrent && dTarget && dCurrent === dTarget) {
-    return NextResponse.json(
-      { ok: false, error: "use_personal_email" },
-      { status: 400 }
-    );
+  // 2) Basic email validation
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (!emailValid) {
+    return json(400, {
+      ok: false,
+      reason: "invalid_email",
+      message: "Enter a valid email address.",
+    });
   }
 
-  // 4) Throttle (IP + email)
+  // 3) Domain separation policy
+  const inputDomain = domainOf(email);
+  const claimed = envClaimedDomains();
+
+  // Check against session domain if available (but DO NOT 401 if no session)
+  let sessionDomain: string | null = null;
+  try {
+    const session = await getServerSession(authOptions);
+    const sEmail =
+      ((session as any)?.email as string) ||
+      ((session as any)?.user?.email as string) ||
+      null;
+    sessionDomain = sEmail ? domainOf(sEmail) : null;
+  } catch {
+    // swallow — lack of session MUST NOT 401 this endpoint
+  }
+
+  // Block when input domain equals either the current session domain or any claimed org domain from env.
+  if (
+    inputDomain &&
+    ((sessionDomain && inputDomain === sessionDomain) ||
+      (claimed.size > 0 && claimed.has(inputDomain)))
+  ) {
+    return json(400, {
+      ok: false,
+      reason: "use_personal_email",
+      message: "Use a personal email for guest access.",
+    });
+  }
+
+  // 4) Rate limit
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip")?.trim() ||
-    "0.0.0.0";
-  if (!recordAndCheck(ip, targetEmail)) {
-    // Generic message; do not leak enumeration signals
-    return NextResponse.json(
-      { ok: false, error: "try_later" },
-      { status: 429 }
-    );
+    req.ip ||
+    "127.0.0.1";
+  const rl = rateLimit(ip, email);
+  if (rl.limited) {
+    return json(429, {
+      ok: false,
+      reason: "too_many",
+      message: "Too many requests.",
+      retryAfter: rl.retryAfter,
+    });
   }
 
-  // 5) Generate code and issue a **signed** short-lived token (no DB writes)
-  const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-  const now = Date.now();
-  const payload = {
-    v: 1,
-    type: "guest-prepare",
-    email: targetEmail,
-    codeHash: sha256(code),
-    iat: now,
-    exp: now + TOKEN_TTL_MS,
-    codeExp: now + CODE_TTL_MS,
-    jti: crypto.randomUUID(),
-  };
-  const token = sign(payload);
+  // 5) Build token + code (no DB writes)
+  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expSec = nowSec + 15 * 60; // 15 minutes
+  const secret = process.env.NEXTAUTH_SECRET || "dev-secret-only";
 
-  // TODO: integrate your mailer; for now we just acknowledge.
-  // IMPORTANT: do NOT return the code — that’s sent via email.
+  const token = sign({ v: 1, email, code, iat: nowSec, exp: expSec }, secret);
 
-  return NextResponse.json({ ok: true, token });
+  // 6) TODO: send the code via your email provider (next slice).
+  const body: Ok = { ok: true, token };
+  if (process.env.NODE_ENV !== "production") {
+    body.devCode = code;
+  }
+  return json(200, body);
 }
 
-// Optional: lightweight checker if you need to verify a token (not required by UI)
-export async function GET(req: NextRequest) {
-  const token = new URL(req.url).searchParams.get("token") || "";
-  const parsed = verify(token);
-  if (
-    !parsed ||
-    parsed.type !== "guest-prepare" ||
-    Date.now() > (parsed.exp || 0)
-  ) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_token" },
-      { status: 400 }
-    );
-  }
-  return NextResponse.json({ ok: true, email: parsed.email, exp: parsed.exp });
+// Optional hardening: disallow GET.
+export async function GET() {
+  return new Response("prepare route is POST-only", { status: 405 });
 }

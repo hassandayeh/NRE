@@ -8,12 +8,12 @@ type PolicyResp =
   | { ok: true; allow: true }
   | { ok: false; allow: false; reason?: string };
 
-type SendCodeResp =
+type PrepareResp =
   | {
       ok: true;
-      message?: string;
+      token: string; // <-- capture this
       devCode?: string | number;
-      ttlSeconds?: number;
+      retryAfter?: number;
     }
   | { ok: false; reason?: string; message?: string; retryAfter?: number };
 
@@ -30,10 +30,12 @@ export default function PrepareGuestPage() {
   const [sending, setSending] = React.useState(false);
   const [devCode, setDevCode] = React.useState<string | null>(null);
   const [tooManyMsg, setTooManyMsg] = React.useState<string | null>(null);
+  const [prepareToken, setPrepareToken] = React.useState<string | null>(null); // <-- NEW
 
   const [code, setCode] = React.useState("");
   const [verified, setVerified] = React.useState(false);
   const [verifyBusy, setVerifyBusy] = React.useState(false);
+  const [verifyMsg, setVerifyMsg] = React.useState<string | null>(null);
 
   const [password, setPassword] = React.useState("");
   const [submitBusy, setSubmitBusy] = React.useState(false);
@@ -53,7 +55,8 @@ export default function PrepareGuestPage() {
       setPolicy(j);
       return j;
     } catch {
-      setPolicy({ ok: false, allow: false, reason: "network" } as any);
+      // Treat network as "unknown" — do not block UI while typing.
+      setPolicy(null);
       return null;
     }
   }
@@ -63,34 +66,54 @@ export default function PrepareGuestPage() {
     setDevCode(null);
     setSending(true);
     setSubmitMsg(null);
+    setPrepareToken(null); // reset previous token on new attempt
+    setVerified(false);
 
-    // Re-check policy synchronously and gate only when explicitly blocked.
+    // Gate ONLY when explicitly blocked with use_personal_email
     const p = await fetchPolicy(normEmail);
-    if (p && (p as any).allow === false) {
+    if (
+      p &&
+      (p as any).allow === false &&
+      (p as any).reason === "use_personal_email"
+    ) {
+      setPolicy(p as any); // show banner as a RESULT of clicking Send
       setSending(false);
       return;
     }
 
     try {
-      const r = await fetch("/api/guest/send-code", {
+      const r = await fetch("/api/guest/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: normEmail }),
       });
-      const j = (await r.json()) as SendCodeResp;
+      const j = (await r.json()) as PrepareResp;
 
       if (!r.ok || !("ok" in j) || !j.ok) {
-        if ((j as any)?.reason === "too_many") {
+        if (r.status === 400 && (j as any)?.reason === "use_personal_email") {
+          setPolicy({
+            ok: false,
+            allow: false,
+            reason: "use_personal_email",
+          } as any);
+          setTooManyMsg(null);
+        } else if (r.status === 429 || (j as any)?.reason === "too_many") {
           const wait = (j as any)?.retryAfter ?? 300;
           setTooManyMsg(`Too many requests. Try again in ~${wait}s.`);
         } else {
-          setTooManyMsg(j.message || "Could not send code. Try again.");
+          setTooManyMsg(
+            (j as any)?.message || "Could not send code. Try again."
+          );
         }
       } else {
-        // Always surface the dev code in dev builds if provided by the API.
+        // Capture the token for verification
+        setPrepareToken(j.token);
+
+        // Surface dev code in dev if provided by the API
         if ("devCode" in j && j.devCode != null) {
           setDevCode(String(j.devCode));
         }
+        setTooManyMsg(null);
       }
     } catch {
       setTooManyMsg("Network error. Try again.");
@@ -101,18 +124,40 @@ export default function PrepareGuestPage() {
 
   async function verifyCode() {
     setVerifyBusy(true);
-    setSubmitMsg(null);
+    setVerifyMsg(null);
+    setSubmitMsg(null); // keep Step-2 area clean
     try {
       const r = await fetch("/api/guest/verify-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: normEmail, code: code.trim() }),
+        body: JSON.stringify({
+          token: prepareToken, // required
+          code: code.trim(),
+        }),
       });
-      const j = (await r.json()) as VerifyResp;
-      setVerified(Boolean(j?.ok));
-      if (!j?.ok) setSubmitMsg("Invalid or expired code.");
+      const j = (await r.json().catch(() => ({}))) as any;
+
+      if (r.ok && j?.ok) {
+        setVerified(true);
+        setVerifyMsg(null);
+        return;
+      }
+
+      // Map common server reasons to concise messages near the code input
+      if (r.status === 400 && j?.reason === "invalid_code") {
+        setVerifyMsg("Code must be 6 digits.");
+      } else if (
+        r.status === 400 &&
+        (j?.reason === "expired" || j?.reason === "invalid_token")
+      ) {
+        setVerifyMsg("Invalid or expired code.");
+      } else {
+        setVerifyMsg(j?.message || "Invalid or expired code.");
+      }
+      setVerified(false);
     } catch {
-      setSubmitMsg("Network error while verifying code.");
+      setVerifyMsg("Network error while verifying code.");
+      setVerified(false);
     } finally {
       setVerifyBusy(false);
     }
@@ -125,7 +170,15 @@ export default function PrepareGuestPage() {
 
     const pass = (password || "").trim();
     const body: Record<string, any> = {};
+
+    // include password if present
     if (pass.length >= 6) body.password = pass;
+
+    // include the prepare token so /api/guest/complete can finalize the flow
+    if (prepareToken) body.token = prepareToken;
+
+    // include normalized email for server-side convenience (token already embeds it)
+    body.email = normEmail;
 
     try {
       const r = await fetch("/api/guest/complete", {
@@ -150,7 +203,6 @@ export default function PrepareGuestPage() {
         password: pass,
         callbackUrl: "/",
       });
-      // NextAuth will navigate; no further UI updates.
     } catch {
       setSubmitMsg("Network error while saving.");
     } finally {
@@ -158,25 +210,26 @@ export default function PrepareGuestPage() {
     }
   }
 
-  // Re-check policy whenever the normalized email changes (debounced)
+  // Only do a CLIENT plausibility check while typing — no server call.
   React.useEffect(() => {
     const id = setTimeout(() => {
-      if (normEmail) {
-        fetchPolicy(normEmail);
-      } else {
-        setPolicy(null);
-      }
+      const plausible = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail);
+      setPolicy(plausible ? ({ ok: true, allow: true } as any) : null);
     }, 250);
     return () => clearTimeout(id);
   }, [normEmail]);
 
-  const allowed =
-    policy?.ok && (policy as any).allow !== false && normEmail.includes("@");
+  const plausible = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail);
+  const allowed = policy?.ok && (policy as any).allow !== false && plausible;
+  const showManaged =
+    !!policy &&
+    (policy as any).allow === false &&
+    (policy as any).reason === "use_personal_email";
 
   const canSend = allowed && normEmail.length >= 6 && !sending;
-  const canVerify = normEmail && code.trim().length >= 4 && !verifyBusy;
+  const canVerify =
+    Boolean(prepareToken) && code.trim().length === 6 && !verifyBusy; // <-- require token & 6 digits
 
-  // One-button intent: must have verified email + a password ≥ 6 chars
   const canSaveAndSignIn =
     verified && password.trim().length >= 6 && !submitBusy;
 
@@ -225,7 +278,7 @@ export default function PrepareGuestPage() {
             <span className="rounded bg-green-50 px-2 py-1 text-green-700">
               Allowed as guest ✓
             </span>
-          ) : policy && (policy as any).allow === false ? (
+          ) : showManaged ? (
             <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
               This email domain is managed by an organization here. Use a
               personal email for guest access, or choose “I was invited” to join
@@ -253,7 +306,11 @@ export default function PrepareGuestPage() {
             inputMode="numeric"
             maxLength={6}
             value={code}
-            onChange={(e) => setCode(e.target.value)}
+            onChange={(e) => {
+              setCode(e.target.value);
+              setVerified(false);
+              setVerifyMsg(null);
+            }}
             placeholder="6-digit code"
             className="flex-1 rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/20"
             disabled={!email}
@@ -272,6 +329,12 @@ export default function PrepareGuestPage() {
           <div className="mt-2 text-xs">
             <span className="rounded bg-green-50 px-2 py-1 text-green-700">
               Verified ✓ Your guest email is confirmed.
+            </span>
+          </div>
+        ) : verifyMsg ? (
+          <div className="mt-2 text-xs">
+            <span className="rounded bg-rose-50 px-2 py-1 text-rose-700">
+              {verifyMsg}
             </span>
           </div>
         ) : null}
