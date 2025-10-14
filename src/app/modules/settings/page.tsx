@@ -198,7 +198,14 @@ function SettingsInner() {
               href={`/modules/settings/modes-access${orgQ}`}
               className="mr-2 inline-flex h-9 items-center rounded-md border px-3 text-sm hover:bg-gray-50"
             >
-              Modes &amp; access
+              Modes &amp; Access
+            </Link>
+            {/* Claimed domains */}
+            <Link
+              href={`/modules/settings/org-domains${orgQ}`}
+              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+            >
+              Claimed Domains
             </Link>
 
             <div className="mt-3">
