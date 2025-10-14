@@ -197,7 +197,7 @@ export default function GuestProfileSettingsPage() {
               : "View public profile (private preview)"}
           </a>
           <a
-            href="/modules/profile/edit"
+            href="/modules/profile/guest"
             className="text-sm underline underline-offset-2"
           >
             Edit profile
