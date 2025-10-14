@@ -12,10 +12,10 @@ import * as React from "react";
 import Link from "next/link";
 
 // Reuse shared UI (supports both named/default exports)
-import * as ButtonModule from "../../../components/ui/Button";
+import * as ButtonModule from "../../../../components/ui/Button";
 const Button: React.ElementType =
   (ButtonModule as any).Button ?? (ButtonModule as any).default;
-import * as AlertModule from "../../../components/ui/Alert";
+import * as AlertModule from "../../../../components/ui/Alert";
 const Alert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
 
