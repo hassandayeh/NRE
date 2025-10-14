@@ -35,6 +35,13 @@ enum InviteStatus {
   CANCELLED
 }
 
+/// Used by OrganizationDomain (dev-friendly domain claiming)
+enum DomainStatus {
+  PENDING
+  VERIFIED
+  REVOKED
+}
+
 /**
  * =========================
  * Tenancy & Users
@@ -55,6 +62,8 @@ model Organization {
 
   // Domain
   bookings Booking[]
+  // NEW: claimed domains (DB-backed, replaces any .env usage)
+  domains  OrganizationDomain[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -96,10 +105,13 @@ model User {
  * =========================
  */
 model PermissionKey {
-  id            String                   @id @default(cuid())
-  key           String                   @unique @db.VarChar(120)
-  description   String?                  @db.Text
-  createdAt     DateTime                 @default(now())
+  id          String               @id @default(cuid())
+  key         String               @unique @db.VarChar(120)
+  description String?              @db.Text
+  createdAt   DateTime             @default(now())
+  // NEW: claimed domains (DB-backed, replaces any .env usage)
+  domains     OrganizationDomain[]
+
   updatedAt     DateTime                 @updatedAt
   templateLinks RoleTemplatePermission[]
   orgLinks      OrgRolePermission[]
@@ -363,4 +375,29 @@ model GuestProfile {
   inviteable    Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+}
+
+/// OrganizationDomain — dev-friendly domain claiming (no SMTP/DNS yet)
+model OrganizationDomain {
+  id           String       @id @default(cuid())
+  orgId        String
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  /// Stored lowercased by UI; length allows full email domain spec.
+  domain String @db.VarChar(320)
+
+  /// Manual for now (no verification infra yet)
+  status    DomainStatus @default(VERIFIED)
+  isPrimary Boolean      @default(false)
+
+  verifiedAt       DateTime?
+  verifiedByUserId String?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  PermissionKey   PermissionKey? @relation(fields: [permissionKeyId], references: [id])
+  permissionKeyId String?
+
+  @@unique([orgId, domain]) // unique per org
+  @@index([domain])
 }
