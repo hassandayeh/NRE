@@ -10,36 +10,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
-
-/* ---------- Types ---------- */
-type Toggles = {
-  showProgramName: boolean;
-  showHostName: boolean;
-  showTalkingPoints: boolean;
-  allowInPerson: boolean;
-  allowOnline: boolean;
-};
-type PartialTogglesFromApi = Partial<Toggles> & { [k: string]: unknown };
-
-/* ---------- Toast ---------- */
-function ToastBox(props: { children: React.ReactNode; onClose?: () => void }) {
-  return (
-    <div className="fixed right-4 top-4 z-50 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800 shadow">
-      {props.children}
-      {props.onClose && (
-        <button
-          onClick={props.onClose}
-          className="ml-3 rounded border px-2 py-0.5 text-xs text-emerald-900 hover:bg-emerald-100"
-          aria-label="Dismiss"
-        >
-          ✕
-        </button>
-      )}
-    </div>
-  );
-}
 
 function ForbiddenCard() {
   return (
@@ -47,17 +18,6 @@ function ForbiddenCard() {
       {/* ...contents... */}
     </section>
   );
-}
-
-/* ---------- helpers ---------- */
-function toBool(v: unknown, fallback: boolean): boolean {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "string") {
-    const t = v.toLowerCase();
-    if (t === "true") return true;
-    if (t === "false") return false;
-  }
-  return fallback;
 }
 
 /* =========================================================
@@ -91,23 +51,6 @@ function SettingsInner() {
   const hasGuestProfile = Boolean(
     (session as any)?.guestProfileId ?? (session as any)?.user?.guestProfileId
   );
-
-  const [loading, setLoading] = React.useState(true);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-
-  const [toggles, setToggles] = React.useState<Toggles>({
-    showProgramName: true,
-    showHostName: true,
-    showTalkingPoints: true,
-    allowInPerson: true,
-    allowOnline: true,
-  });
-
-  // Green toast for successful change
-  const [toast, setToast] = React.useState<string | null>(null);
-
-  // Prevent double-submit per key
-  const savingRef = React.useRef<Set<keyof Toggles>>(new Set());
 
   // ========== OrgId discovery (fast) ==========
   const searchParams = useSearchParams();
@@ -179,53 +122,7 @@ function SettingsInner() {
     };
   }, [orgIdForProbe]);
 
-  // ============================================================
-  // Load toggles (accepts flat or { toggles } shapes)
-  React.useEffect(() => {
-    let ignore = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const res = await fetch("/api/toggles", { cache: "no-store" });
-        if (!res.ok) throw new Error("Failed to load toggles");
-        const raw = await res.json();
-        const data: PartialTogglesFromApi =
-          (raw && typeof raw === "object" && "toggles" in raw
-            ? (raw as any).toggles
-            : raw) ?? {};
-        const next: Toggles = {
-          showProgramName: toBool(data.showProgramName, true),
-          showHostName: toBool(data.showHostName, true),
-          showTalkingPoints: toBool(data.showTalkingPoints, true),
-          allowInPerson: toBool((data as any).allowInPerson, true),
-          allowOnline: toBool((data as any).allowOnline, true),
-        };
-        if (!ignore) {
-          setToggles(next);
-          setLoadError(null);
-          applyBodyDatasets(next);
-        }
-      } catch (e: any) {
-        if (!ignore) setLoadError(e?.message || "Failed to load toggles");
-      } finally {
-        if (!ignore) setLoading(false);
-      }
-    })();
-    return () => {
-      ignore = true;
-    };
-  }, []);
-
   // Sync after a successful save
-  function applyBodyDatasets(next: Toggles) {
-    if (typeof document === "undefined") return;
-    const ds = document.body.dataset as DOMStringMap;
-    ds.showProgramName = String(next.showProgramName);
-    ds.showHostName = String(next.showHostName);
-    ds.showTalkingPoints = String(next.showTalkingPoints);
-    ds.allowInPerson = String(next.allowInPerson);
-    ds.allowOnline = String(next.allowOnline);
-  }
 
   // Local theme switch without a provider
   function chooseTheme(next: "light" | "dark") {
@@ -240,45 +137,6 @@ function SettingsInner() {
   }
 
   // Autosave a single key (optimistic)
-  async function saveToggle<K extends keyof Toggles>(
-    key: K,
-    value: Toggles[K]
-  ) {
-    if (savingRef.current.has(key)) return;
-    savingRef.current.add(key);
-
-    // Optimistic UI
-    setToggles((t) => ({ ...t, [key]: value }));
-
-    try {
-      const res = await fetch("/api/toggles", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: value }),
-      });
-      const ok = res.ok;
-      try {
-        await res.json();
-      } catch {
-        /* empty body ok */
-      }
-      if (!ok) throw new Error("Failed to save");
-
-      // Success → sync body dataset + toast
-      const next = { ...toggles, [key]: value } as Toggles;
-      applyBodyDatasets(next);
-      setToast("Saved!");
-    } catch {
-      // Revert if failed
-      setToggles((t) => ({
-        ...t,
-        [key]: !value as unknown as Toggles[typeof key],
-      }));
-      setToast(null);
-    } finally {
-      savingRef.current.delete(key);
-    }
-  }
 
   const [portalReady, setPortalReady] = React.useState(false);
   React.useEffect(() => setPortalReady(true), []);
@@ -405,58 +263,6 @@ function SettingsInner() {
           </p>
         </section>
       </main>
-
-      {/* Green toast only */}
-      {portalReady && toast
-        ? createPortal(
-            <ToastBox onClose={() => setToast(null)}>{toast}</ToastBox>,
-            document.body
-          )
-        : null}
     </>
-  );
-}
-
-/* ---------- Toggle row ---------- */
-function ToggleRow(props: {
-  label: string;
-  description?: string;
-  checked: boolean;
-  onChange: (val: boolean) => void;
-}) {
-  const id = React.useId();
-  const [local, setLocal] = React.useState(props.checked);
-  React.useEffect(() => setLocal(props.checked), [props.checked]);
-
-  return (
-    <div className="mb-3 flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-      <div className="min-w-0">
-        <label htmlFor={id} className="block text-sm font-medium">
-          {props.label}
-        </label>
-        {props.description && (
-          <p className="mt-0.5 text-xs text-neutral-600">{props.description}</p>
-        )}
-      </div>
-
-      <button
-        id={id}
-        onClick={() => {
-          const next = !local;
-          setLocal(next);
-          props.onChange(next);
-        }}
-        className={`h-6 w-11 rounded-full border transition ${
-          local ? "bg-emerald-500" : "bg-gray-200"
-        }`}
-        aria-pressed={local}
-      >
-        <span
-          className={`block h-5 w-5 translate-x-0.5 rounded-full bg-white transition ${
-            local ? "translate-x-5" : ""
-          }`}
-        />
-      </button>
-    </div>
   );
 }
