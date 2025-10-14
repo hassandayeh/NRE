@@ -49,13 +49,26 @@ export default async function RootLayout({
     ? `/modules/settings?orgId=${encodeURIComponent(orgId)}`
     : `/modules/settings`;
 
-  const links: Array<{ href: string; label: string }> = [
+  // Guest = no active staff role in the current org context
+  const isGuest = !orgId || !roleSlot;
+
+  type NavLink = { href: string; label: string };
+
+  // Keep order: Bookings, (Directory if staff), Settings, Profile
+  const links: NavLink[] = [
     { href: "/modules/booking", label: "Bookings" },
-    { href: "/modules/directory", label: "Directory" },
-    // Keep Settings in the main nav; guests are entitled to their personal settings
-    { href: settingsHref, label: "Settings" },
-    { href: "/modules/profile", label: "Profile" },
+    { href: "/modules/settings", label: "Settings" },
+    {
+      href: isGuest ? "/modules/profile/guest" : "/modules/profile/staff",
+      label: "Profile",
+    },
   ];
+
+  // Insert Directory only for staff
+  if (!isGuest) {
+    // place Directory after Bookings
+    links.splice(1, 0, { href: "/modules/directory", label: "Directory" });
+  }
 
   return (
     <html lang="en">
