@@ -2,10 +2,11 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 /**
  * Minimal types that match /api/org/domains
+ * (GET now returns { orgId, canManage, domains })
  */
 type DomainRow = {
   domain: string;
@@ -22,12 +23,13 @@ function normalizeDomain(input: string) {
 
 export default function OrgDomainsPage() {
   const sp = useSearchParams();
-  const router = useRouter();
   const orgId = sp.get("orgId") || "";
 
   const [loading, setLoading] = React.useState(false);
   const [domainInput, setDomainInput] = React.useState("");
   const [domains, setDomains] = React.useState<DomainRow[] | null>(null);
+  const [canManage, setCanManage] = React.useState(false);
+  const [forbidden, setForbidden] = React.useState(false); // lacks org:domains:read
   const [error, setError] = React.useState<string | null>(null);
   const [info, setInfo] = React.useState<string | null>(null);
 
@@ -35,6 +37,7 @@ export default function OrgDomainsPage() {
     if (!orgId) return;
     setLoading(true);
     setError(null);
+    setForbidden(false);
     try {
       const res = await fetch(
         `/api/org/domains?orgId=${encodeURIComponent(orgId)}`,
@@ -43,11 +46,22 @@ export default function OrgDomainsPage() {
         }
       );
       if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          setForbidden(true);
+          setDomains(null);
+          setCanManage(false);
+          return;
+        }
         const j = await safeJson(res);
         throw new Error(j?.error || `Failed to load domains (${res.status})`);
       }
-      const j = (await res.json()) as { orgId: string; domains: DomainRow[] };
+      const j = (await res.json()) as {
+        orgId: string;
+        canManage?: boolean;
+        domains: DomainRow[];
+      };
       setDomains(j.domains || []);
+      setCanManage(!!j.canManage);
     } catch (e: any) {
       setError(e?.message || "Failed to load domains");
     } finally {
@@ -61,7 +75,7 @@ export default function OrgDomainsPage() {
 
   async function onAdd(e: React.FormEvent) {
     e.preventDefault();
-    if (!orgId) return;
+    if (!orgId || !canManage) return;
     const raw = domainInput;
     const domain = normalizeDomain(raw);
     if (!domain) {
@@ -92,7 +106,7 @@ export default function OrgDomainsPage() {
   }
 
   async function onDelete(domain: string) {
-    if (!orgId) return;
+    if (!orgId || !canManage) return;
     setError(null);
     setInfo(null);
     setLoading(true);
@@ -115,7 +129,7 @@ export default function OrgDomainsPage() {
   }
 
   async function onMakePrimary(domain: string) {
-    if (!orgId) return;
+    if (!orgId || !canManage) return;
     setError(null);
     setInfo(null);
     setLoading(true);
@@ -138,119 +152,116 @@ export default function OrgDomainsPage() {
     }
   }
 
+  // ─────────────────────────── UI states ───────────────────────────
   if (!orgId) {
     return (
-      <main className="mx-auto max-w-3xl p-6">
-        <h1 className="text-2xl font-semibold">Claimed domains</h1>
-        <p className="mt-2 text-sm text-gray-600">
-          Add <code>?orgId=&lt;ORG_ID&gt;</code> to the URL to manage domains
-          for a specific org.
+      <div className="mx-auto max-w-2xl p-6">
+        <h1 className="mb-2 text-2xl font-semibold">Claimed domains</h1>
+        <p className="text-sm text-gray-600">
+          Add <code>?orgId=&lt;ORG_ID&gt;</code> to the URL.
         </p>
-      </main>
+      </div>
+    );
+  }
+
+  if (forbidden) {
+    return (
+      <div className="mx-auto max-w-2xl p-6">
+        <h1 className="mb-2 text-2xl font-semibold">Claimed domains</h1>
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          You don’t have permission to view claimed domains for this
+          organization.
+        </div>
+      </div>
     );
   }
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold">Claimed domains</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          Domains owned by this organization. Guests using these domains will be
-          blocked (once enforcement is wired).
-        </p>
-      </header>
+    <div className="mx-auto max-w-2xl p-6">
+      {/* Title */}
+      <h1 className="mb-2 text-2xl font-semibold">Claimed domains</h1>
+      <p className="mb-6 text-sm text-gray-600">
+        Domains owned by this organization. Guests using these domains will be
+        blocked.
+      </p>
 
-      <section aria-labelledby="add-domain" className="rounded-2xl border p-4">
-        <h2 id="add-domain" className="text-lg font-medium">
-          Add a domain
-        </h2>
-        <form onSubmit={onAdd} className="mt-3 flex flex-col gap-3 sm:flex-row">
-          <label className="sr-only" htmlFor="domain">
-            Domain
-          </label>
-          <input
-            id="domain"
-            name="domain"
-            type="text"
-            value={domainInput}
-            onChange={(e) => setDomainInput(e.target.value)}
-            placeholder="acme.com"
-            className="w-full rounded-xl border px-3 py-2 outline-none focus:ring"
-            aria-describedby="domain-help"
-          />
-          <button
-            type="submit"
-            className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-50"
-            disabled={loading}
-            aria-label="Add domain"
-          >
-            {loading ? "Working..." : "Add"}
-          </button>
+      {/* Add form — visible only if org:domains:manage */}
+      {canManage && (
+        <form onSubmit={onAdd} className="mb-8 space-y-2">
+          <h2 className="text-lg font-medium">Add a domain</h2>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={domainInput}
+              onChange={(e) => setDomainInput(e.target.value)}
+              placeholder="acme.com"
+              className="w-full rounded-xl border px-3 py-2 outline-none focus:ring"
+              aria-describedby="domain-help"
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="rounded-xl border bg-white px-4 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-60"
+            >
+              {loading ? "Working..." : "Add"}
+            </button>
+          </div>
+          <p id="domain-help" className="text-xs text-gray-500">
+            We’ll normalize to lowercase and remove a leading “@” if present.
+          </p>
         </form>
-        <p id="domain-help" className="mt-2 text-xs text-gray-500">
-          We’ll normalize to lowercase and remove a leading “@” if present.
-        </p>
-      </section>
+      )}
 
-      <section
-        aria-labelledby="list-domains"
-        className="mt-6 rounded-2xl border p-4"
-      >
-        <h2 id="list-domains" className="text-lg font-medium">
-          Current domains
-        </h2>
+      {/* Feedback */}
+      {error ? (
+        <div className="mb-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {error}
+        </div>
+      ) : null}
+      {info ? (
+        <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+          {info}
+        </div>
+      ) : null}
 
-        {error && (
-          <div
-            role="alert"
-            className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
-          >
-            {error}
-          </div>
-        )}
-        {info && (
-          <div
-            role="status"
-            className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
-          >
-            {info}
-          </div>
-        )}
-
-        <div className="mt-3">
-          {domains === null ? (
-            <p className="text-sm text-gray-500">Loading…</p>
-          ) : domains.length === 0 ? (
-            <p className="text-sm">No domains yet. Add one above.</p>
-          ) : (
-            <ul className="divide-y">
-              {domains.map((d) => (
-                <li
-                  key={d.domain}
-                  className="flex items-center justify-between py-3"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-medium">{d.domain}</span>
-                      {d.isPrimary && (
-                        <span
-                          className="rounded-full border px-2 py-0.5 text-xs"
-                          aria-label="primary-domain-badge"
-                        >
-                          Primary
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-500">
-                      {d.status}{" "}
-                      {d.verifiedAt
-                        ? `• verified ${new Date(
-                            d.verifiedAt
-                          ).toLocaleDateString()}`
-                        : ""}
-                    </p>
+      {/* List */}
+      <h2 className="mb-2 text-lg font-medium">Current domains</h2>
+      {domains === null ? (
+        <div className="text-sm text-gray-600">Loading…</div>
+      ) : domains.length === 0 ? (
+        <div className="text-sm text-gray-600">
+          No domains yet. {canManage ? "Add one above." : ""}
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {domains.map((d) => (
+            <li
+              key={d.domain}
+              className="rounded-xl border bg-white p-3 shadow-sm"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate font-medium">
+                    {d.domain}{" "}
+                    {d.isPrimary ? (
+                      <span className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs">
+                        Primary
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="text-xs text-gray-500">
+                    {d.status}
+                    {d.verifiedAt
+                      ? ` • verified ${new Date(
+                          d.verifiedAt
+                        ).toLocaleDateString()}`
+                      : ""}
+                  </div>
+                </div>
+
+                {/* Actions — visible only if org:domains:manage */}
+                {canManage && (
+                  <div className="flex items-center gap-2">
                     {!d.isPrimary && (
                       <button
                         onClick={() => onMakePrimary(d.domain)}
@@ -270,17 +281,18 @@ export default function OrgDomainsPage() {
                       Remove
                     </button>
                   </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </section>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
 
-      <div className="sr-only" aria-live="polite">
+      {/* Footer: light status line */}
+      <div className="mt-6 text-xs text-gray-500">
         {loading ? "Working" : "Idle"}
       </div>
-    </main>
+    </div>
   );
 }
 

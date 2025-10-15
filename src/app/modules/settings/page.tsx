@@ -95,6 +95,11 @@ function SettingsInner() {
     boolean | null
   >(null);
 
+  // Probe: can the viewer read claimed domains for this org?
+  const [canReadDomains, setCanReadDomains] = React.useState<boolean | null>(
+    null
+  );
+
   React.useEffect(() => {
     let disposed = false;
     (async () => {
@@ -115,6 +120,30 @@ function SettingsInner() {
         else setCanManageSettings(false);
       } catch {
         if (!disposed) setCanManageSettings(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [orgIdForProbe]);
+
+  // Gated link probe (lightweight): 200 → can read; 401/403 → cannot.
+  React.useEffect(() => {
+    let disposed = false;
+    (async () => {
+      if (!orgIdForProbe) {
+        setCanReadDomains(false);
+        return;
+      }
+      try {
+        const r = await fetch(
+          `/api/org/domains?orgId=${encodeURIComponent(orgIdForProbe)}`,
+          { cache: "no-store" }
+        );
+        if (disposed) return;
+        setCanReadDomains(r.status === 200);
+      } catch {
+        if (!disposed) setCanReadDomains(false);
       }
     })();
     return () => {
@@ -201,12 +230,14 @@ function SettingsInner() {
               Modes &amp; Access
             </Link>
             {/* Claimed domains */}
-            <Link
-              href={`/modules/settings/org-domains${orgQ}`}
-              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
-            >
-              Claimed Domains
-            </Link>
+            {canReadDomains ? (
+              <Link
+                href={`/modules/settings/org-domains${orgQ}`}
+                className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+              >
+                Claimed Domains
+              </Link>
+            ) : null}
 
             <div className="mt-3">
               <Link

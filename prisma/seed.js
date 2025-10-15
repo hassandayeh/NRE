@@ -99,6 +99,79 @@ async function main() {
     },
   });
 
+  // ---- 5b) Permissions: Org domains (default → Role 1 only) ----
+  const domReadKey = await prisma.permissionKey.upsert({
+    where: { key: "org:domains:read" },
+    update: {},
+    create: { key: "org:domains:read", description: "View claimed domains" },
+  });
+  const domManageKey = await prisma.permissionKey.upsert({
+    where: { key: "org:domains:manage" },
+    update: {},
+    create: {
+      key: "org:domains:manage",
+      description: "Manage claimed domains",
+    },
+  });
+
+  // Default mapping target: Role 1 (Org Admin)
+  const role1 = await prisma.orgRole.findUnique({
+    where: { orgId_slot: { orgId: org.id, slot: 1 } },
+  });
+  if (role1) {
+    // Role 1 ← read
+    await prisma.orgRolePermission.upsert({
+      where: {
+        orgRoleId_permissionKeyId: {
+          orgRoleId: role1.id,
+          permissionKeyId: domReadKey.id,
+        },
+      },
+      update: { allowed: true },
+      create: {
+        orgRoleId: role1.id,
+        permissionKeyId: domReadKey.id,
+        allowed: true,
+      },
+    });
+    // Role 1 ← manage
+    await prisma.orgRolePermission.upsert({
+      where: {
+        orgRoleId_permissionKeyId: {
+          orgRoleId: role1.id,
+          permissionKeyId: domManageKey.id,
+        },
+      },
+      update: { allowed: true },
+      create: {
+        orgRoleId: role1.id,
+        permissionKeyId: domManageKey.id,
+        allowed: true,
+      },
+    });
+  }
+
+  // Dev convenience: also grant to your seeded Admin (slot 4) so the current admin user can test immediately.
+  // (This does NOT change the "default mapping" policy; remove if you want pure Role 1 only.)
+  if (adminRole) {
+    for (const key of [domReadKey, domManageKey]) {
+      await prisma.orgRolePermission.upsert({
+        where: {
+          orgRoleId_permissionKeyId: {
+            orgRoleId: adminRole.id,
+            permissionKeyId: key.id,
+          },
+        },
+        update: { allowed: true },
+        create: {
+          orgRoleId: adminRole.id,
+          permissionKeyId: key.id,
+          allowed: true,
+        },
+      });
+    }
+  }
+
   console.log("\n✅ Seed complete.");
   console.log("Login with:");
   console.log("  Email   : admin@dev.local");

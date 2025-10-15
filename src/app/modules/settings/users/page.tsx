@@ -1420,13 +1420,21 @@ export default function UsersAndRolesPage() {
                     </div>
 
                     {/* Permissions: single checkbox per key (no inherit) */}
-                    {/* Permissions: single checkbox per key (no inherit) */}
                     {!isAdmin && permOpen[slotNum] && canRolesManage && (
                       <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                         {permissionKeys
                           .filter((k) => !HIDDEN_PERMISSION_KEYS.has(k))
                           .map((k) => {
-                            const checked = !!draft.allow[k];
+                            // Enforce: org:domains:manage ⇒ org:domains:read (checked + disabled)
+                            const READ_KEY = "org:domains:read";
+                            const MANAGE_KEY = "org:domains:manage";
+                            const manageOn = !!draft.allow[MANAGE_KEY];
+                            const isReadKey = k === READ_KEY;
+                            const isManageKey = k === MANAGE_KEY;
+
+                            const checked =
+                              isReadKey && manageOn ? true : !!draft.allow[k];
+
                             return (
                               <label
                                 key={k}
@@ -1435,14 +1443,20 @@ export default function UsersAndRolesPage() {
                                 <input
                                   type="checkbox"
                                   checked={checked}
+                                  disabled={isReadKey && manageOn}
                                   onChange={(e) => {
                                     const v = e.target.checked;
-                                    setRoleDrafts((m) =>
-                                      new Map(m).set(slotNum, {
+                                    setRoleDrafts((m) => {
+                                      const next = {
                                         ...draft,
                                         allow: { ...draft.allow, [k]: v },
-                                      })
-                                    );
+                                      };
+                                      // If turning manage ON, force read ON and lock it (disabled above)
+                                      if (isManageKey && v) {
+                                        next.allow[READ_KEY] = true;
+                                      }
+                                      return new Map(m).set(slotNum, next);
+                                    });
                                     setRoleDirty((d) => ({
                                       ...(d || {}),
                                       [slotNum]: true,

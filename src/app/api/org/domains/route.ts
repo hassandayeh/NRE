@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../lib/auth";
 import prisma from "../../../../lib/prisma";
+import { hasCan } from "../../../../lib/access/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,47 +32,49 @@ function normalizeDomain(input: string) {
   return d;
 }
 
-/**
- * Admin check:
- * - Session required
- * - User must have a UserRole in the org with slot === 1 (admin)
- *   (Matches our Role 1 = Org Admin convention; narrow enough for MVP.)
- */
-async function requireOrgAdmin(orgId: string) {
+/** Resolve current user id from session (email → user.id) */
+async function getSessionUserId(): Promise<string | null> {
   const session = await getServerSession(authOptions);
-  if (!session?.user?.email)
-    return { ok: false as const, status: "unauthorized" as const };
-
-  const email = session.user.email!;
+  const email = session?.user?.email || null;
+  if (!email) return null;
   const me = await prisma.user.findUnique({
     where: { email },
     select: { id: true },
   });
-  if (!me?.id) return { ok: false as const, status: "unauthorized" as const };
-  const userId = me.id;
+  return me?.id ?? null;
+}
 
-  const membership = await prisma.userRole.findFirst({
-    where: { userId, orgId, slot: 1 }, // Admin slot
-    select: { userId: true },
-  });
-
-  if (!membership) return { ok: false as const, status: "forbidden" as const };
+/** Require an org-scoped permission; returns userId on success */
+async function requireCan(orgId: string, permission: string) {
+  const userId = await getSessionUserId();
+  if (!userId) return { ok: false as const, status: "unauthorized" as const };
+  const ok = await hasCan({ userId, orgId, permission });
+  if (!ok) return { ok: false as const, status: "forbidden" as const };
   return { ok: true as const, userId };
 }
 
 /**
  * GET /api/org/domains?orgId=...
+ * Requires: org:domains:read
  * Returns claimed domains for the org.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const orgId = searchParams.get("orgId") || "";
-
   if (!orgId) return badRequest("Missing orgId", "ORG_ID_REQUIRED");
 
-  const adminCheck = await requireOrgAdmin(orgId);
-  if (!adminCheck.ok) {
-    return adminCheck.status === "unauthorized" ? unauthorized() : forbidden();
+  // Read gate: allow if the viewer has read OR manage (manage ⇒ read).
+  const readCheck = await requireCan(orgId, "org:domains:read");
+
+  let userId: string;
+  if (readCheck.ok) {
+    userId = readCheck.userId;
+  } else if (readCheck.status === "unauthorized") {
+    return unauthorized();
+  } else {
+    const manageCheck = await requireCan(orgId, "org:domains:manage");
+    if (!manageCheck.ok) return forbidden();
+    userId = manageCheck.userId;
   }
 
   const rows = await prisma.organizationDomain.findMany({
@@ -85,12 +88,20 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({ orgId, domains: rows });
+  // Also report whether the viewer can manage, so the UI can hide/show action buttons.
+  const canManage = await hasCan({
+    userId,
+    orgId,
+    permission: "org:domains:manage",
+  });
+
+  return NextResponse.json({ orgId, canManage, domains: rows });
 }
 
 /**
  * POST /api/org/domains
  * Body: { orgId: string, domain: string, makePrimary?: boolean }
+ * Requires: org:domains:manage
  * Creates (VERIFIED for now) and optionally marks as primary.
  */
 export async function POST(req: NextRequest) {
@@ -111,10 +122,12 @@ export async function POST(req: NextRequest) {
     return badRequest("Invalid domain", "DOMAIN_INVALID");
   }
 
-  const adminCheck = await requireOrgAdmin(orgId);
-  if (!adminCheck.ok) {
-    return adminCheck.status === "unauthorized" ? unauthorized() : forbidden();
+  // Manage gate (create/update/delete requires manage)
+  const manageCheck = await requireCan(orgId, "org:domains:manage");
+  if (!manageCheck.ok) {
+    return manageCheck.status === "unauthorized" ? unauthorized() : forbidden();
   }
+  const userId = manageCheck.userId;
 
   // Upsert to be idempotent for the same org/domain
   const inserted = await prisma.organizationDomain.upsert({
@@ -123,10 +136,10 @@ export async function POST(req: NextRequest) {
     create: {
       orgId,
       domain,
-      status: "VERIFIED", // Manual verify for MVP (no SMTP/DNS yet)
+      status: "VERIFIED", // MVP: manual verify (no SMTP/DNS yet)
       isPrimary: false,
       verifiedAt: new Date(),
-      verifiedByUserId: adminCheck.userId,
+      verifiedByUserId: userId,
     },
     select: { domain: true, status: true, isPrimary: true, verifiedAt: true },
   });
@@ -150,6 +163,7 @@ export async function POST(req: NextRequest) {
 
 /**
  * DELETE /api/org/domains?orgId=...&domain=...
+ * Requires: org:domains:manage
  * Removes a claimed domain for the org.
  */
 export async function DELETE(req: NextRequest) {
@@ -160,17 +174,17 @@ export async function DELETE(req: NextRequest) {
   if (!orgId) return badRequest("Missing orgId", "ORG_ID_REQUIRED");
   if (!domain) return badRequest("Missing domain", "DOMAIN_REQUIRED");
 
-  const adminCheck = await requireOrgAdmin(orgId);
-  if (!adminCheck.ok) {
-    return adminCheck.status === "unauthorized" ? unauthorized() : forbidden();
+  const manageCheck = await requireCan(orgId, "org:domains:manage");
+  if (!manageCheck.ok) {
+    return manageCheck.status === "unauthorized" ? unauthorized() : forbidden();
   }
+  const userId = manageCheck.userId;
 
   // Guard: do not allow deleting the only primary if it is the only domain
   const existing = await prisma.organizationDomain.findMany({
     where: { orgId },
     select: { domain: true, isPrimary: true },
   });
-
   const target = existing.find((d) => d.domain === domain);
   if (!target) return badRequest("Domain not found", "DOMAIN_NOT_FOUND");
 

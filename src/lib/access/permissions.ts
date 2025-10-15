@@ -33,6 +33,10 @@ export const PERMISSIONS = [
   "staff:delete",
   "billing:manage",
 
+  // Org domains
+  "org:domains:read",
+  "org:domains:manage",
+
   // Lists
   "favorites:manage",
 ] as const;
@@ -139,9 +143,12 @@ export async function hasCan(args: {
   const slot = await getUserSlot(userId, orgId);
   if (slot == null) return false;
 
+  // Superuser rule: Role 1 (Org Admin) has all permissions by default.
+  // This bypasses template/overrides/active flags for maximum safety.
+  if (slot === 1) return true;
+
   const eff = await getEffectiveRole(orgId, slot);
   if (!eff.isActive) return false;
-
   return eff.perms.has(permission as string);
 }
 
