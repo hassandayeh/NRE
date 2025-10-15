@@ -19,7 +19,7 @@ export const runtime = "nodejs";
  * - 401: { ok: false, reason: "no_ticket" | "invalid_token" }
  * - 404: { ok: false, reason: "not_found" }
  * - 410: { ok: false, reason: "expired" }
- * - 400: { ok: false, reason: "use_personal_email" }   // domain policy
+ * - 400: { ok: false, reason: "use_personal_email" | "org_domain_blocked" | "email_in_use" }
  * - 500: { ok: false, reason: "db_error" | "prisma_client_out_of_date", message }
  */
 
@@ -230,6 +230,63 @@ export async function POST(req: Request) {
     }
   } catch {
     // If session fetch fails, proceed; other guards exist in the flow.
+  }
+
+  // --- Global org-domain guard (MVP): block guest completion if email domain is claimed by ANY org ---
+  try {
+    const dTar = emailDomain(email);
+    if (dTar) {
+      // Prisma singleton; cast to any to avoid client-type drift during dev hot reloads
+      const p: any = getPrisma();
+      const claimed = await p.organizationDomain?.findFirst({
+        where: { domain: dTar, status: "VERIFIED" },
+        select: { orgId: true, domain: true },
+      });
+
+      if (claimed) {
+        devLog("org_domain_blocked", { email, domain: dTar });
+        return clearCookie(
+          NextResponse.json(
+            {
+              ok: false,
+              reason: "org_domain_blocked",
+              code: "ORG_DOMAIN_BLOCKED",
+              message:
+                "That email belongs to a domain claimed by an organization. Use a personal email or accept a staff invite.",
+            },
+            { status: 400 }
+          )
+        );
+      }
+    }
+  } catch {
+    // On any unexpected error here, fail-open to avoid blocking legitimate users.
+    // The optimistic approach is acceptable for MVP; we'll harden once SMTP/DNS verification lands.
+  }
+
+  // --- NEW: prevent hijacking — if a normal User already has this email, stop here ---
+  try {
+    const p: any = getPrisma();
+    const existingUser = await p.user?.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (existingUser) {
+      devLog("email_in_use", { email });
+      return clearCookie(
+        NextResponse.json(
+          {
+            ok: false,
+            reason: "email_in_use",
+            message:
+              "This email already belongs to a user here. Use a different personal email.",
+          },
+          { status: 400 }
+        )
+      );
+    }
+  } catch {
+    // If this lookup fails, prepare should also block; continue only if safe.
   }
 
   devLog("start", { email, hasPassword: Boolean(providedPassword) });

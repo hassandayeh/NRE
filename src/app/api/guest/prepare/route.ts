@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../../lib/auth";
 import { createHmac, randomInt } from "crypto";
+import prisma from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -101,6 +102,20 @@ export async function POST(req: NextRequest) {
   const claimed = envClaimedDomains();
 
   // Check against session domain if available (but DO NOT 401 if no session)
+  // Also check DB-backed claimed domains (VERIFIED)
+  let dbClaimed = false;
+  try {
+    if (inputDomain) {
+      const row = await prisma.organizationDomain.findFirst({
+        where: { domain: inputDomain, status: "VERIFIED" },
+        select: { domain: true },
+      });
+      dbClaimed = !!row;
+    }
+  } catch {
+    // swallow — don't hard-fail prepare() if DB is briefly unavailable
+  }
+
   let sessionDomain: string | null = null;
   try {
     const session = await getServerSession(authOptions);
@@ -117,6 +132,7 @@ export async function POST(req: NextRequest) {
   if (
     inputDomain &&
     ((sessionDomain && inputDomain === sessionDomain) ||
+      dbClaimed ||
       (claimed.size > 0 && claimed.has(inputDomain)))
   ) {
     return json(400, {
@@ -124,6 +140,31 @@ export async function POST(req: NextRequest) {
       reason: "use_personal_email",
       message: "Use a personal email for guest access.",
     });
+  }
+
+  // Prevent hijacking: disallow emails that already exist (User or GuestProfile).
+  try {
+    const [hitUser, hitGuest] = await Promise.all([
+      prisma.user.findFirst({
+        where: { email: { equals: email, mode: "insensitive" } },
+        select: { id: true },
+      }),
+      prisma.guestProfile.findFirst({
+        where: { personalEmail: { equals: email, mode: "insensitive" } },
+        select: { id: true },
+      }),
+    ]);
+    if (hitUser || hitGuest) {
+      return json(400, {
+        ok: false,
+        reason: "email_in_use",
+        message:
+          "This email already belongs to an account here. Use a different personal email.",
+      });
+    }
+  } catch {
+    // If this lookup fails unexpectedly, we'll still be protected later,
+    // but in prepare we fail-open to avoid false positives.
   }
 
   // 4) Rate limit

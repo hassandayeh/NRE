@@ -2,7 +2,7 @@
 "use client";
 
 import React from "react";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 
 type PolicyResp =
   | { ok: true; allow: true }
@@ -30,7 +30,7 @@ export default function PrepareGuestPage() {
   const [sending, setSending] = React.useState(false);
   const [devCode, setDevCode] = React.useState<string | null>(null);
   const [tooManyMsg, setTooManyMsg] = React.useState<string | null>(null);
-  const [prepareToken, setPrepareToken] = React.useState<string | null>(null); // <-- NEW
+  const [prepareToken, setPrepareToken] = React.useState<string | null>(null);
 
   const [code, setCode] = React.useState("");
   const [verified, setVerified] = React.useState(false);
@@ -43,22 +43,28 @@ export default function PrepareGuestPage() {
 
   const normEmail = (email || "").trim().toLowerCase();
 
-  // ----- Helpers -------------------------------------------------------------
+  // ==== Session (for instant local block check) ===============================
+  const [sessionEmail, setSessionEmail] = React.useState("");
+  const [sessionLoaded, setSessionLoaded] = React.useState(false);
+  React.useEffect(() => {
+    let active = true;
+    getSession().then((s) => {
+      if (!active) return;
+      setSessionEmail((s?.user?.email || "").trim().toLowerCase());
+      setSessionLoaded(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  async function fetchPolicy(forEmail: string): Promise<PolicyResp | null> {
-    try {
-      const r = await fetch(
-        `/api/policy/guest-email?email=${encodeURIComponent(forEmail)}`,
-        { cache: "no-store" }
-      );
-      const j = (await r.json()) as PolicyResp;
-      setPolicy(j);
-      return j;
-    } catch {
-      // Treat network as "unknown" — do not block UI while typing.
-      setPolicy(null);
-      return null;
-    }
+  // ----- Helpers -------------------------------------------------------------
+  function domainOf(e?: string | null): string | null {
+    if (!e) return null;
+    const m = String(e)
+      .toLowerCase()
+      .match(/@([^@\s>]+)$/);
+    return m ? m[1] : null;
   }
 
   async function sendCode() {
@@ -66,17 +72,14 @@ export default function PrepareGuestPage() {
     setDevCode(null);
     setSending(true);
     setSubmitMsg(null);
-    setPrepareToken(null); // reset previous token on new attempt
+    setPrepareToken(null);
     setVerified(false);
 
-    // Gate ONLY when explicitly blocked with use_personal_email
-    const p = await fetchPolicy(normEmail);
-    if (
-      p &&
-      (p as any).allow === false &&
-      (p as any).reason === "use_personal_email"
-    ) {
-      setPolicy(p as any); // show banner as a RESULT of clicking Send
+    // Local guard: if input domain matches staff/org domain, block immediately.
+    const inputDomain = domainOf(normEmail);
+    const sessionDomain = domainOf(sessionEmail);
+    if (inputDomain && sessionDomain && inputDomain === sessionDomain) {
+      setPolicy({ ok: false, allow: false, reason: "use_personal_email" });
       setSending(false);
       return;
     }
@@ -91,11 +94,7 @@ export default function PrepareGuestPage() {
 
       if (!r.ok || !("ok" in j) || !j.ok) {
         if (r.status === 400 && (j as any)?.reason === "use_personal_email") {
-          setPolicy({
-            ok: false,
-            allow: false,
-            reason: "use_personal_email",
-          } as any);
+          setPolicy({ ok: false, allow: false, reason: "use_personal_email" });
           setTooManyMsg(null);
         } else if (r.status === 429 || (j as any)?.reason === "too_many") {
           const wait = (j as any)?.retryAfter ?? 300;
@@ -125,13 +124,13 @@ export default function PrepareGuestPage() {
   async function verifyCode() {
     setVerifyBusy(true);
     setVerifyMsg(null);
-    setSubmitMsg(null); // keep Step-2 area clean
+    setSubmitMsg(null);
     try {
       const r = await fetch("/api/guest/verify-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token: prepareToken, // required
+          token: prepareToken,
           code: code.trim(),
         }),
       });
@@ -143,7 +142,6 @@ export default function PrepareGuestPage() {
         return;
       }
 
-      // Map common server reasons to concise messages near the code input
       if (r.status === 400 && j?.reason === "invalid_code") {
         setVerifyMsg("Code must be 6 digits.");
       } else if (
@@ -171,13 +169,8 @@ export default function PrepareGuestPage() {
     const pass = (password || "").trim();
     const body: Record<string, any> = {};
 
-    // include password if present
     if (pass.length >= 6) body.password = pass;
-
-    // include the prepare token so /api/guest/complete can finalize the flow
     if (prepareToken) body.token = prepareToken;
-
-    // include normalized email for server-side convenience (token already embeds it)
     body.email = normEmail;
 
     try {
@@ -197,7 +190,6 @@ export default function PrepareGuestPage() {
         return;
       }
 
-      // Require a password to auto sign in (one-button flow by design).
       await signIn("credentials", {
         email: normEmail,
         password: pass,
@@ -210,26 +202,38 @@ export default function PrepareGuestPage() {
     }
   }
 
-  // Only do a CLIENT plausibility check while typing — no server call.
+  // ===== Inline policy while typing (no green label) =========================
+  // If input domain === staff domain => set blocked state.
+  // Otherwise show nothing (server still enforces claimed domains on submit).
   React.useEffect(() => {
     const id = setTimeout(() => {
       const plausible = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail);
-      setPolicy(plausible ? ({ ok: true, allow: true } as any) : null);
+      if (!plausible || !sessionLoaded) {
+        setPolicy(null);
+        return;
+      }
+      const inputDomain = domainOf(normEmail);
+      const sessionDomain = domainOf(sessionEmail);
+      if (inputDomain && sessionDomain && inputDomain === sessionDomain) {
+        setPolicy({ ok: false, allow: false, reason: "use_personal_email" });
+      } else {
+        // Do NOT set an "allowed" policy — we purposely show nothing.
+        setPolicy(null);
+      }
     }, 250);
     return () => clearTimeout(id);
-  }, [normEmail]);
+  }, [normEmail, sessionEmail, sessionLoaded]);
 
   const plausible = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail);
-  const allowed = policy?.ok && (policy as any).allow !== false && plausible;
   const showManaged =
-    !!policy &&
-    (policy as any).allow === false &&
-    (policy as any).reason === "use_personal_email";
+    policy?.ok === false && policy.reason === "use_personal_email";
 
-  const canSend = allowed && normEmail.length >= 6 && !sending;
+  // Enable Send if email looks valid and we are not in a blocked state.
+  const canSend =
+    plausible && normEmail.length >= 6 && !sending && !showManaged;
+
   const canVerify =
-    Boolean(prepareToken) && code.trim().length === 6 && !verifyBusy; // <-- require token & 6 digits
-
+    Boolean(prepareToken) && code.trim().length === 6 && !verifyBusy;
   const canSaveAndSignIn =
     verified && password.trim().length >= 6 && !submitBusy;
 
@@ -274,12 +278,8 @@ export default function PrepareGuestPage() {
 
         {/* Policy / status line */}
         <div className="mt-2 text-xs">
-          {allowed ? (
-            <span className="rounded bg-green-50 px-2 py-1 text-green-700">
-              Allowed as guest ✓
-            </span>
-          ) : showManaged ? (
-            <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+          {showManaged ? (
+            <span className="block rounded bg-amber-50 px-2 py-1 text-amber-700 leading-5 break-words">
               This email domain is managed by an organization here. Use a
               personal email for guest access, or choose “I was invited” to join
               as staff.
@@ -313,8 +313,9 @@ export default function PrepareGuestPage() {
             }}
             placeholder="6-digit code"
             className="flex-1 rounded-xl border border-neutral-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/20"
-            disabled={!email}
+            disabled={!canSend}
           />
+
           <button
             type="button"
             onClick={verifyCode}
