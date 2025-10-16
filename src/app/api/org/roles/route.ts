@@ -169,6 +169,24 @@ export async function GET(req: NextRequest) {
     }
 
     const canManage = await canManageSettingsForOrg(viewer.userId, orgId);
+    // Also allow read-only access for listing roles if the user has directory:view
+    let canDirectory = false;
+    if (!canManage) {
+      const ur = await prisma.userRole.findUnique({
+        where: { userId_orgId: { userId: viewer.userId, orgId } },
+        select: { slot: true },
+      });
+      if (ur) {
+        const [shell2, tmpl2, over2] = await Promise.all([
+          readOrgRoleShell(orgId, ur.slot),
+          readTemplate(ur.slot),
+          readOrgOverrides(orgId, ur.slot),
+        ]);
+        const eff2 = computeEffective(tmpl2, over2, shell2.isActive);
+        const has = (k: string) => eff2.has(k) || eff2.has(k.replace(":", ""));
+        canDirectory = has("directory:view");
+      }
+    }
 
     if (probe === "1" || probe.toLowerCase() === "true") {
       if (!canManage)
@@ -189,7 +207,7 @@ export async function GET(req: NextRequest) {
       return res;
     }
 
-    if (!canManage)
+    if (!canManage && !canDirectory)
       return NextResponse.json(
         { ok: false, error: "Forbidden" },
         { status: 403 }

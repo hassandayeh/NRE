@@ -151,8 +151,10 @@ export async function GET(req: NextRequest) {
   const orgId = await resolveOrgForUser(requestedOrgId, userId);
   if (!orgId) return json400("Missing or invalid orgId");
 
-  const ok = await hasPermission(orgId, userId, "settings:manage");
-  if (!ok) return json403();
+  // Allow read access for either settings:manage (admin) OR directory:view (Directory page)
+  const okManage = await hasPermission(orgId, userId, "settings:manage");
+  const okDirectory = await hasPermission(orgId, userId, "directory:view");
+  if (!okManage && !okDirectory) return json403();
 
   const q = (searchParams.get("q") || "").trim();
   const slotParam = searchParams.get("slot");

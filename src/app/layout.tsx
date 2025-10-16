@@ -51,6 +51,18 @@ export default async function RootLayout({
 
   // Guest = no active staff role in the current org context
   const isGuest = !orgId || !roleSlot;
+  // Staff must also have explicit permission to see Directory
+  let canViewDirectory = false;
+  if (!isGuest && orgId && roleSlot) {
+    try {
+      const effDir = await getEffectiveRole(orgId, roleSlot);
+      // Require active role + permission
+      canViewDirectory =
+        !!effDir?.isActive && effDir?.perms?.has("directory:view");
+    } catch {
+      canViewDirectory = false;
+    }
+  }
 
   type NavLink = { href: string; label: string };
 
@@ -64,8 +76,8 @@ export default async function RootLayout({
     },
   ];
 
-  // Insert Directory only for staff
-  if (!isGuest) {
+  // Insert Directory only for staff WITH permission
+  if (!isGuest && canViewDirectory) {
     // place Directory after Bookings
     links.splice(1, 0, { href: "/modules/directory", label: "Directory" });
   }

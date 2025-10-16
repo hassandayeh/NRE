@@ -1,6 +1,9 @@
 // src/app/api/experts/search/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "../../../../lib/prisma";
+import { hasCan } from "../../../../lib/access/permissions";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +22,48 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get("q") || "").trim();
+
+  // ── Permission guard: require orgId + signed-in staff with directory:view ──
+  const orgId = (searchParams.get("orgId") || "").trim();
+  if (!orgId) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  const session = await getServerSession(authOptions).catch(() => null);
+  const email = (session?.user as any)?.email as string | undefined;
+  let userId = (session?.user as any)?.id as string | undefined;
+
+  if (!userId && email) {
+    const u = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    userId = u?.id;
+  }
+  if (!userId) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  const allowed = await hasCan({
+    userId,
+    orgId,
+    permission: "directory:view",
+  });
+
+  if (!allowed) {
+    return NextResponse.json(
+      { ok: false, error: "DIRECTORY_FORBIDDEN" },
+      { status: 403 }
+    );
+  }
+  // ───────────────────────────────────────────────────────────────────────────
+
   const take = Math.min(
     50,
     Math.max(1, parseInt(searchParams.get("take") || "30", 10) || 30)

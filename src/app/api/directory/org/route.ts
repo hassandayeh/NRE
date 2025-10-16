@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { PrismaClient, Prisma } from "@prisma/client";
+import { hasCan } from "../../../../lib/access/permissions";
 
 /**
  * GET /api/directory/org?orgId=...&q=...&debug=1
@@ -183,6 +184,36 @@ export async function GET(req: NextRequest) {
           }
         : {}),
     });
+  }
+
+  // ---- Permission guard: STAFF + directory:view (403 on miss) ----
+  let userId = (session?.user as any)?.id as string | undefined;
+  const email = (session?.user as any)?.email as string | undefined;
+
+  if (!userId && email) {
+    const u = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    userId = u?.id;
+  }
+  if (!userId) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  const allowed = await hasCan({
+    userId,
+    orgId: orgId as string, // safe: non-null past the early return above
+    permission: "directory:view",
+  });
+  if (!allowed) {
+    return NextResponse.json(
+      { ok: false, error: "DIRECTORY_FORBIDDEN" },
+      { status: 403 }
+    );
   }
 
   // Parameterized raw SQL (uses actual column names in DB):

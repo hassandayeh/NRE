@@ -3,7 +3,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 
 /** ------------------------------------------------------------------------
  * Types (kept loose to avoid regressions across API shapes)
@@ -178,6 +178,7 @@ function isActiveStaff(u: any): boolean {
  * ---------------------------------------------------------------------- */
 export default function DirectoryPage() {
   const qs = useSearchParams();
+  const router = useRouter();
 
   // Tabs + search
   const [tab, setTab] = React.useState<"internal" | "global">("internal");
@@ -188,6 +189,10 @@ export default function DirectoryPage() {
     { orgId?: string; user?: { orgId?: string } } | null | undefined
   >(undefined); // undefined=loading, null=failure, object=ok
   const sessionReady = sessionObj !== undefined;
+
+  // Gate: only STAFF with `directory:view` may access the page.
+  // undefined = not checked yet, true = blocked, false = allowed
+  const [blocked, setBlocked] = React.useState<undefined | boolean>(undefined);
 
   // Effective org: URL override first (client), else session orgId
   const overrideOrgId = qs.get("orgId");
@@ -244,6 +249,41 @@ export default function DirectoryPage() {
     return () => clearTimeout(t);
   }, [q]);
 
+  // Permission check — block guests or staff without `directory:view`
+  // We rely on the server enforcing this on /api/directory/org; a 401/403 means blocked.
+  React.useEffect(() => {
+    if (!sessionReady) return;
+    // No org context → treat as guest → blocked
+    if (!effectiveOrgId) {
+      setBlocked(true);
+      return;
+    }
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(withOrg("/api/directory/org?take=1"), {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!alive) return;
+        if (res.status === 401 || res.status === 403) setBlocked(true);
+        else setBlocked(false);
+      } catch {
+        if (alive) setBlocked(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sessionReady, effectiveOrgId, withOrg]);
+
+  // Redirect to home when access is blocked (STAFF + directory:view required)
+  React.useEffect(() => {
+    if (sessionReady && blocked === true) {
+      router.replace("/");
+    }
+  }, [sessionReady, blocked, router]);
+
   // Fetch when tab/org/search/session changes
   React.useEffect(() => {
     let alive = true;
@@ -253,6 +293,14 @@ export default function DirectoryPage() {
         setError(null);
         return;
       }
+
+      // Wait until the guard resolves; only proceed when blocked === false
+      if (blocked !== false) {
+        setLoading(true);
+        setError(null);
+        return;
+      }
+
       setLoading(true);
       setError(null);
       try {
@@ -388,7 +436,7 @@ export default function DirectoryPage() {
     return () => {
       alive = false;
     };
-  }, [tab, debouncedQ, effectiveOrgId, sessionReady, withOrg]);
+  }, [sessionReady, effectiveOrgId, withOrg]);
 
   // Banner when no org (either tab)
   const showNoOrgBanner = sessionReady && !effectiveOrgId;
@@ -396,6 +444,15 @@ export default function DirectoryPage() {
   // Use filtered items for counts/empty-states so UI matches rendered list
   const internalCount = orgItems.length;
   const globalCount = globalItems.length;
+
+  // Do not render until we know access (prevents any flash)
+  if (!sessionReady || blocked === undefined) {
+    return null;
+  }
+  // Blocked → redirect effect handles nav; keep DOM empty
+  if (blocked === true) {
+    return null;
+  }
 
   return (
     <div className="mx-auto max-w-5xl p-6">

@@ -172,6 +172,51 @@ async function main() {
     }
   }
 
+  // ---- 5c) Permissions: Directory (NEW) ----
+  // Seed `directory:view`, grant to Role 1 (policy clarity) and Admin (slot 4) for dev convenience.
+  const dirViewKey = await prisma.permissionKey.upsert({
+    where: { key: "directory:view" },
+    update: {},
+    create: {
+      key: "directory:view",
+      description: "See Directory tab and access the Directory page",
+    },
+  });
+
+  if (role1) {
+    await prisma.orgRolePermission.upsert({
+      where: {
+        orgRoleId_permissionKeyId: {
+          orgRoleId: role1.id,
+          permissionKeyId: dirViewKey.id,
+        },
+      },
+      update: { allowed: true },
+      create: {
+        orgRoleId: role1.id,
+        permissionKeyId: dirViewKey.id,
+        allowed: true,
+      },
+    });
+  }
+
+  if (adminRole) {
+    await prisma.orgRolePermission.upsert({
+      where: {
+        orgRoleId_permissionKeyId: {
+          orgRoleId: adminRole.id,
+          permissionKeyId: dirViewKey.id,
+        },
+      },
+      update: { allowed: true },
+      create: {
+        orgRoleId: adminRole.id,
+        permissionKeyId: dirViewKey.id,
+        allowed: true,
+      },
+    });
+  }
+
   console.log("\n✅ Seed complete.");
   console.log("Login with:");
   console.log("  Email   : admin@dev.local");

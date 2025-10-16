@@ -19,6 +19,7 @@ export const PERMISSIONS = [
   "participant:remove",
 
   // Directory / “Bookable Talent” bundle
+  "directory:view",
   "directory:listed_internal",
   "booking:inviteable",
 
