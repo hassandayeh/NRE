@@ -32,6 +32,8 @@ export default function OrgDomainsPage() {
   const [forbidden, setForbidden] = React.useState(false); // lacks org:domains:read
   const [error, setError] = React.useState<string | null>(null);
   const [info, setInfo] = React.useState<string | null>(null);
+  // Hide “Make primary” when there’s only one domain
+  const canMakePrimary = Array.isArray(domains) && domains.length > 1;
 
   const load = React.useCallback(async () => {
     if (!orgId) return;
@@ -262,7 +264,7 @@ export default function OrgDomainsPage() {
                 {/* Actions — visible only if org:domains:manage */}
                 {canManage && (
                   <div className="flex items-center gap-2">
-                    {!d.isPrimary && (
+                    {!d.isPrimary && canMakePrimary && (
                       <button
                         onClick={() => onMakePrimary(d.domain)}
                         className="rounded-lg border px-3 py-1 text-sm"
@@ -290,7 +292,15 @@ export default function OrgDomainsPage() {
 
       {/* Footer: light status line */}
       <div className="mt-6 text-xs text-gray-500">
-        {loading ? "Working" : "Idle"}
+        {loading && (
+          <div
+            className="mt-6 text-xs text-gray-500"
+            role="status"
+            aria-live="polite"
+          >
+            Working
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1463,8 +1463,17 @@ export default function UsersAndRolesPage() {
                                     }));
                                   }}
                                   className="h-5 w-5"
-                                />
+                                />{" "}
                                 {k}
+                                {isManageKey && (
+                                  <span
+                                    className="ml-2 text-xs text-gray-500"
+                                    title="Manage implies Read."
+                                    aria-label="Manage implies Read."
+                                  >
+                                    ⓘ
+                                  </span>
+                                )}
                               </label>
                             );
                           })}
