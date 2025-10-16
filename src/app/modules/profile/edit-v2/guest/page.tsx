@@ -99,6 +99,32 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
   );
 }
 
+/** Required-field heuristics — module scope (stable, not captured by hooks) */
+const REQUIRED_RULES: Array<{
+  key: keyof FormState | string;
+  bad: (s: FormState) => boolean;
+  msg: string;
+}> = [
+  { key: "displayName", bad: (s) => !s.displayName?.trim(), msg: "Required" },
+  {
+    key: "languages",
+    bad: (s) => !Array.isArray(s.languages) || s.languages.length === 0,
+
+    msg: "Select at least one language",
+  },
+];
+
+function enrichErrors(draft: FormState, base: Record<string, string>) {
+  const map = { ...base };
+  const hasFieldKeys = Object.keys(map).some((k) => k && k !== "_form");
+  if (!hasFieldKeys) {
+    for (const r of REQUIRED_RULES) {
+      if (r.bad(draft)) map[r.key as string] = r.msg;
+    }
+  }
+  return map;
+}
+
 export default function Page() {
   const [saving, setSaving] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
@@ -122,33 +148,6 @@ export default function Page() {
       .replace(/^./, (s) => s.toUpperCase())
       .replace(/\bId\b/, "ID")
       .trim();
-  }
-
-  // If Zod issues lack a path (generic "Invalid value"), infer the most likely
-  // missing fields. Centralized (not per-input) and easy to adjust.
-  const REQUIRED_RULES: Array<{
-    key: keyof FormState | string;
-    bad: (s: FormState) => boolean;
-    msg: string;
-  }> = [
-    { key: "displayName", bad: (s) => !s.displayName?.trim(), msg: "Required" },
-    {
-      key: "languages",
-      bad: (s) => !Array.isArray(s.languages) || s.languages.length === 0,
-      msg: "Select at least one language",
-    },
-  ];
-
-  function enrichErrors(draft: FormState, base: Record<string, string>) {
-    const map = { ...base };
-    // If we already have field-specific keys, keep them; otherwise infer.
-    const hasFieldKeys = Object.keys(map).some((k) => k && k !== "_form");
-    if (!hasFieldKeys) {
-      for (const r of REQUIRED_RULES) {
-        if (r.bad(draft)) map[r.key as string] = r.msg;
-      }
-    }
-    return map;
   }
 
   const [isValid, setIsValid] = React.useState(true);
@@ -182,33 +181,37 @@ export default function Page() {
   });
 
   const validate = React.useCallback(
-    (draft: any = state) => {
+    (draft: FormState = state) => {
       try {
+        // Run schema validator (supports both { ok, errors } and { success, error.issues })
         const res: any = safeParseGuestProfileV2(draft as any);
 
-        if ((res as any)?.ok === true || (res as any)?.success === true) {
+        const success = res?.ok === true || res?.success === true;
+        if (success) {
           setErrors({});
           setIsValid(true);
           return true;
         }
 
+        // Collect Zod issues robustly
+        const issues: any[] =
+          res?.errors || res?.error?.issues || res?.issues || [];
         const map: Record<string, string> = {};
-        const issues =
-          (res as any)?.errors ||
-          (res as any)?.error?.issues ||
-          (res as any)?.issues ||
-          [];
         for (const issue of issues) {
-          const key = (
-            issue?.path?.length ? issue.path.join(".") : "_form"
-          ) as string;
+          const key =
+            Array.isArray(issue?.path) && issue.path.length
+              ? issue.path.map((p: string | number) => String(p)).join(".")
+              : "_form";
           if (!map[key]) map[key] = issue?.message || "Invalid value";
         }
-        const finalMap = enrichErrors(draft as FormState, map);
+
+        // Enrich when Zod returns only generic errors (e.g., add required field hints)
+        const finalMap = enrichErrors(draft, map);
         setErrors(finalMap);
-        const ok = Object.keys(finalMap).length === 0;
-        setIsValid(ok);
-        return ok;
+
+        const valid = Object.keys(finalMap).length === 0;
+        setIsValid(valid);
+        return valid;
       } catch {
         // Never block the UI on unexpected errors
         setErrors({});
