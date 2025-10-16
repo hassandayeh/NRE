@@ -2,6 +2,7 @@
 "use client";
 
 import * as React from "react";
+import { safeParseGuestProfileV2 } from "../../../../../lib/profile/guestSchema";
 
 /**
  * G-Profile V2 — Guest Editor shell (UI-only slice)
@@ -100,9 +101,65 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
 
 export default function Page() {
   const [saving, setSaving] = React.useState(false);
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [submitted, setSubmitted] = React.useState(false);
+
+  // Friendly labels for a few keys; anything else falls back to a prettified key.
+  const FIELD_LABELS: Record<string, string> = {
+    displayName: "Display name",
+    localName: "Name (local script / pronunciation)",
+    countryCode: "Country",
+    additionalEmails: "Additional emails",
+    languages: "Languages",
+    timezone: "Timezone",
+  };
+
+  function prettyKey(k: string) {
+    if (FIELD_LABELS[k]) return FIELD_LABELS[k];
+    return k
+      .replace(/\.(\d+)/g, " $1")
+      .replace(/([A-Z])/g, " $1")
+      .replace(/^./, (s) => s.toUpperCase())
+      .replace(/\bId\b/, "ID")
+      .trim();
+  }
+
+  // If Zod issues lack a path (generic "Invalid value"), infer the most likely
+  // missing fields. Centralized (not per-input) and easy to adjust.
+  const REQUIRED_RULES: Array<{
+    key: keyof FormState | string;
+    bad: (s: FormState) => boolean;
+    msg: string;
+  }> = [
+    { key: "displayName", bad: (s) => !s.displayName?.trim(), msg: "Required" },
+    {
+      key: "languages",
+      bad: (s) => !Array.isArray(s.languages) || s.languages.length === 0,
+      msg: "Select at least one language",
+    },
+  ];
+
+  function enrichErrors(draft: FormState, base: Record<string, string>) {
+    const map = { ...base };
+    // If we already have field-specific keys, keep them; otherwise infer.
+    const hasFieldKeys = Object.keys(map).some((k) => k && k !== "_form");
+    if (!hasFieldKeys) {
+      for (const r of REQUIRED_RULES) {
+        if (r.bad(draft)) map[r.key as string] = r.msg;
+      }
+    }
+    return map;
+  }
+
+  const [isValid, setIsValid] = React.useState(true);
+
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const disabled = saving || loading;
+  const [saveNotice, setSaveNotice] = React.useState<string | null>(null);
+  const noticeTimer = React.useRef<number | null>(null);
+
+  const disabled =
+    saving || loading || !isValid || Object.keys(errors).length > 0;
 
   const [state, setState] = React.useState<FormState>({
     displayName: "",
@@ -123,6 +180,44 @@ export default function Page() {
     visibility: "PRIVATE",
     inviteable: false,
   });
+
+  const validate = React.useCallback(
+    (draft: any = state) => {
+      try {
+        const res: any = safeParseGuestProfileV2(draft as any);
+
+        if ((res as any)?.ok === true || (res as any)?.success === true) {
+          setErrors({});
+          setIsValid(true);
+          return true;
+        }
+
+        const map: Record<string, string> = {};
+        const issues =
+          (res as any)?.errors ||
+          (res as any)?.error?.issues ||
+          (res as any)?.issues ||
+          [];
+        for (const issue of issues) {
+          const key = (
+            issue?.path?.length ? issue.path.join(".") : "_form"
+          ) as string;
+          if (!map[key]) map[key] = issue?.message || "Invalid value";
+        }
+        const finalMap = enrichErrors(draft as FormState, map);
+        setErrors(finalMap);
+        const ok = Object.keys(finalMap).length === 0;
+        setIsValid(ok);
+        return ok;
+      } catch {
+        // Never block the UI on unexpected errors
+        setErrors({});
+        setIsValid(true);
+        return true;
+      }
+    },
+    [state]
+  );
 
   React.useEffect(() => {
     let cancelled = false;
@@ -175,6 +270,16 @@ export default function Page() {
     };
   }, []);
 
+  React.useEffect(() => {
+    if (!loading) validate(state);
+  }, [state, loading, validate]);
+
+  React.useEffect(() => {
+    return () => {
+      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    };
+  }, []);
+
   function toggleArrayValue<K extends keyof FormState>(key: K, value: string) {
     setState((prev) => {
       const existing = new Set((prev[key] as unknown as string[]) || []);
@@ -216,6 +321,16 @@ export default function Page() {
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setSubmitted(true);
+    const ok = validate(state);
+    if (!ok) {
+      // Show the specific field list (summary box above); no generic message
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch {}
+      return;
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -229,7 +344,9 @@ export default function Page() {
         throw new Error(json?.message || "Failed to save profile");
       }
       // Optimistic: state already reflects what we sent
-      alert("Saved ✓");
+      setSaveNotice("Saved ✓");
+      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+      noticeTimer.current = window.setTimeout(() => setSaveNotice(null), 2500);
     } catch (err: any) {
       setError(err?.message || "Failed to save profile");
     } finally {
@@ -262,6 +379,31 @@ export default function Page() {
       )}
 
       <form onSubmit={onSubmit} className="space-y-8">
+        {submitted && Object.keys(errors).length > 0 && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+          >
+            <p className="font-medium mb-1">
+              Please fix the highlighted fields:
+            </p>
+            <ul className="list-disc pl-4">
+              {Object.entries(errors)
+                .filter(([k]) => k !== "_form")
+                .map(([k, msg]) => (
+                  <li key={k}>
+                    <strong>{prettyKey(k)}</strong>
+                    {msg ? ` — ${msg}` : ""}
+                  </li>
+                ))}
+            </ul>
+            {"_form" in errors ? (
+              <p className="mt-2">{errors["_form"]}</p>
+            ) : null}
+          </div>
+        )}
+
         {/* Basics */}
         <section
           aria-labelledby="sec-basics"
@@ -697,13 +839,22 @@ export default function Page() {
           </p>
           <button
             type="submit"
-            disabled={disabled}
+            //disabled={disabled}
             className="rounded-2xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
           >
             {saving ? "Saving…" : "Save changes"}
           </button>
         </div>
       </form>
+      {saveNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-4 right-4 z-50 rounded-lg bg-green-600 px-3 py-2 text-sm text-white shadow-lg"
+        >
+          {saveNotice}
+        </div>
+      )}
     </main>
   );
 }
