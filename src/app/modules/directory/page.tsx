@@ -440,7 +440,7 @@ export default function DirectoryPage() {
     return () => {
       alive = false;
     };
-  }, [sessionReady, effectiveOrgId, withOrg]);
+  }, [tab, debouncedQ, effectiveOrgId, sessionReady, withOrg, blocked]);
 
   // Banner when no org (either tab)
   const showNoOrgBanner = sessionReady && !effectiveOrgId;
