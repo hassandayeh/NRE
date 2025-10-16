@@ -71,7 +71,9 @@ export default async function RootLayout({
     { href: "/modules/booking", label: "Bookings" },
     { href: "/modules/settings", label: "Settings" },
     {
-      href: isGuest ? "/modules/profile/guest" : "/modules/profile/staff",
+      href: isGuest
+        ? "/modules/profile/view-v2/guest"
+        : "/modules/profile/staff",
       label: "Profile",
     },
   ];

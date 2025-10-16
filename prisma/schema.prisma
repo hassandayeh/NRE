@@ -401,3 +401,57 @@ model OrganizationDomain {
   @@unique([orgId, domain]) // unique per org
   @@index([domain])
 }
+
+/// ─────────────────────────────────────────────────────────
+/// G-Profile V2 (Guest) — additive model (MVP)
+/// Safe defaults, no breaking changes to existing models.
+/// ─────────────────────────────────────────────────────────
+model GuestProfileV2 {
+  id     String @id @default(cuid())
+  // One guest profile per account (the same user can be staff in orgs)
+  userId String @unique
+
+  // Basics
+  displayName String
+  localName   String? // local script / pronunciation
+  pronouns    String?
+  timezone    String
+  city        String?
+  countryCode String // ISO-2 (uppercased in API)
+
+  // Selectable lists
+  languages String[] // ["Arabic","English",...]
+  regions   String[] // ["MENA","Europe",...]
+
+  // Topics & formats
+  topics        String[] // up to 20
+  formatsTv     Boolean  @default(true)
+  formatsRadio  Boolean  @default(true)
+  formatsOnline Boolean  @default(true)
+  formatsPhone  Boolean  @default(true)
+
+  // Bio & links
+  bio   String?
+  links String[] // normalized https URLs
+
+  // Contact & private notes
+  additionalEmails String[] // normalized lowercase
+  phone            String?
+  feeNote          String?
+
+  // Visibility & inviteability
+  visibility Visibility @default(PRIVATE)
+  inviteable Boolean    @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([countryCode])
+}
+
+/// Keep enum tiny for now; map to your UI's "PUBLIC"/"PRIVATE"
+enum Visibility {
+  PUBLIC
+  PRIVATE
+}
