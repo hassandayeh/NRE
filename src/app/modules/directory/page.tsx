@@ -261,13 +261,15 @@ export default function DirectoryPage() {
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(withOrg("/api/directory/org?take=1"), {
+        const url = `/api/directory/org?take=1&orgId=${encodeURIComponent(
+          effectiveOrgId
+        )}`;
+        const res = await fetch(url, {
           credentials: "include",
           cache: "no-store",
         });
         if (!alive) return;
-        if (res.status === 401 || res.status === 403) setBlocked(true);
-        else setBlocked(false);
+        setBlocked(res.status === 401 || res.status === 403 ? true : false);
       } catch {
         if (alive) setBlocked(true);
       }
@@ -275,7 +277,9 @@ export default function DirectoryPage() {
     return () => {
       alive = false;
     };
-  }, [sessionReady, effectiveOrgId, withOrg]);
+    // Only depends on session readiness & orgId (intentionally not tied to tab/search).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionReady, effectiveOrgId]);
 
   // Redirect to home when access is blocked (STAFF + directory:view required)
   React.useEffect(() => {
