@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth";
 import { ZodError } from "zod";
 import { authOptions } from "../../../../../lib/auth";
 import prisma from "../../../../../lib/prisma";
+import { del as blobDel } from "@vercel/blob";
 import {
   validateGuestProfileV2,
   type GuestProfileV2DTO,
@@ -26,6 +27,17 @@ function getUserId(session: unknown): string | null {
 function getUserEmail(session: unknown): string | null {
   const s = session as any;
   return (s?.user?.email as string | undefined) || null;
+}
+
+function keyFromBlobUrl(u?: string | null): string | null {
+  if (!u) return null;
+  try {
+    const key = decodeURIComponent(new URL(u).pathname).replace(/^\/+/, "");
+    // Safety: only allow deleting keys we own
+    return key.startsWith("avatars/") ? key : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -98,10 +110,11 @@ export async function POST(req: NextRequest) {
     feeNote: dto.feeNote || null,
     visibility: dto.visibility as any, // enum: PUBLIC | PRIVATE
     inviteable: dto.inviteable,
+    headshotUrl: dto.headshotUrl ?? null,
   };
 
   try {
-    // Guard: some environments cache an older Prisma Client and don't expose guestProfileV2 yet.
+    // Guard: ensure model exists on generated client
     const repo = (prisma as any).guestProfileV2;
     if (!repo) {
       console.error(
@@ -114,11 +127,34 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // 1) Read previous avatar (if any)
+    const prev = await repo.findUnique({
+      where: { userId: uid },
+      select: { headshotUrl: true },
+    });
+
+    // 2) Upsert new data
     await repo.upsert({
       where: { userId: uid },
       create: data,
       update: { ...data },
     });
+
+    // 3) Best-effort cleanup: delete old blob if URL changed or photo removed
+    try {
+      const oldUrl = prev?.headshotUrl ?? null;
+      const newUrl = dto.headshotUrl ?? null;
+      if (oldUrl && oldUrl !== newUrl) {
+        const key = keyFromBlobUrl(oldUrl);
+        const token = process.env.BLOB_READ_WRITE_TOKEN;
+        if (key && token) {
+          await blobDel(key, { token });
+        }
+      }
+    } catch (delErr) {
+      console.warn("[blob] old avatar cleanup failed:", delErr);
+      // Non-fatal: we don't block the save
+    }
 
     return json(200, { ok: true, profile: dto });
   } catch (e: any) {

@@ -4,6 +4,103 @@
 import * as React from "react";
 import { safeParseGuestProfileV2 } from "../../../../../lib/profile/guestSchema";
 
+async function uploadHeadshot(file: File): Promise<string> {
+  const fd = new FormData();
+  // server accepts either "file" or "headshot" — use "file"
+  fd.append("file", file);
+  const res = await fetch("/api/uploads/profile-photo", {
+    method: "POST",
+    body: fd,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json?.ok || !json?.url) {
+    throw new Error(json?.message || "Upload failed");
+  }
+  return json.url as string;
+}
+
+function bytesReadable(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ImagePicker(props: {
+  valueUrl?: string | null;
+  previewUrl?: string | null;
+  onPick: (file: File | null) => void;
+  maxBytes?: number; // default 5 MB
+}) {
+  const { valueUrl, previewUrl, onPick, maxBytes = 5 * 1024 * 1024 } = props;
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const imgSrc = previewUrl || valueUrl || null;
+
+  return (
+    <div className="flex items-start gap-4">
+      <div className="h-24 w-24 shrink-0 overflow-hidden rounded-xl bg-gray-100 ring-1 ring-gray-200">
+        {imgSrc ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imgSrc}
+            alt="Profile photo preview"
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-gray-400">
+            No photo
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/20"
+            onClick={() => inputRef.current?.click()}
+          >
+            Choose photo…
+          </button>
+          {(previewUrl || valueUrl) && (
+            <button
+              type="button"
+              className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/20"
+              onClick={() => onPick(null)}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+
+        <p className="mt-2 text-xs text-gray-500">
+          JPG/PNG, up to {bytesReadable(maxBytes)}.
+        </p>
+
+        <input
+          ref={inputRef}
+          id="headshot"
+          name="headshot"
+          type="file"
+          accept="image/*"
+          className="sr-only"
+          onChange={(e) => {
+            const file = e.target.files?.[0] || null;
+            if (!file) return onPick(null);
+            if (file.size > maxBytes) {
+              alert(
+                `Selected file is too large (${bytesReadable(file.size)}).`
+              );
+              e.currentTarget.value = "";
+              return;
+            }
+            onPick(file);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /**
  * G-Profile V2 — Guest Editor shell (UI-only slice)
  * ------------------------------------------------------------
@@ -34,6 +131,11 @@ type FormState = {
   feeNote: string; // private
   visibility: "PUBLIC" | "PRIVATE";
   inviteable: boolean;
+
+  // Photo (UI-only for now)
+  headshotUrl?: string; // CDN URL (legacy / after upload)
+  headshotFile?: File | null; // chosen file (not yet uploaded)
+  headshotPreview?: string | null; // local preview (Object URL)
 };
 
 const LANGUAGE_OPTIONS = [
@@ -127,6 +229,9 @@ function enrichErrors(draft: FormState, base: Record<string, string>) {
 
 export default function Page() {
   const [saving, setSaving] = React.useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = React.useState(false);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitted, setSubmitted] = React.useState(false);
 
@@ -178,13 +283,21 @@ export default function Page() {
     feeNote: "",
     visibility: "PRIVATE",
     inviteable: false,
+    headshotUrl: "",
+    headshotFile: null,
+    headshotPreview: null,
   });
 
   const validate = React.useCallback(
     (draft: FormState = state) => {
       try {
-        // Run schema validator (supports both { ok, errors } and { success, error.issues })
-        const res: any = safeParseGuestProfileV2(draft as any);
+        // Run schema validator on a sanitized payload (exclude transient file fields)
+        const payload: any = { ...draft };
+        // Exclude transient/unknown fields from schema validation (UI-only for now)
+        delete payload.headshotFile;
+        delete payload.headshotPreview;
+
+        const res: any = safeParseGuestProfileV2(payload);
 
         const success = res?.ok === true || res?.success === true;
         if (success) {
@@ -259,6 +372,9 @@ export default function Page() {
             feeNote: p.feeNote || "",
             visibility: p.visibility || "PRIVATE",
             inviteable: !!p.inviteable,
+            headshotUrl: p.headshotUrl || "",
+            headshotFile: null,
+            headshotPreview: null,
           });
         }
       } catch (e: any) {
@@ -282,6 +398,17 @@ export default function Page() {
       if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
     };
   }, []);
+
+  React.useEffect(() => {
+    return () => {
+      if (state.headshotPreview) {
+        try {
+          URL.revokeObjectURL(state.headshotPreview);
+        } catch {}
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.headshotPreview]);
 
   function toggleArrayValue<K extends keyof FormState>(key: K, value: string) {
     setState((prev) => {
@@ -337,11 +464,18 @@ export default function Page() {
     setSaving(true);
     setError(null);
     try {
+      // Exclude transient fields from the payload for now
+      const payload: any = { ...state };
+      // Exclude transient/unknown fields until upload is wired
+      delete payload.headshotFile;
+      delete payload.headshotPreview;
+
       const res = await fetch("/api/profile/guest/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(state),
+        body: JSON.stringify(payload),
       });
+
       const json = await res.json();
       if (!res.ok || !json?.ok) {
         throw new Error(json?.message || "Failed to save profile");
@@ -415,6 +549,83 @@ export default function Page() {
           <h2 id="sec-basics" className="text-lg font-medium">
             Basics
           </h2>
+          <div className="mt-3">
+            <fieldset className="rounded-2xl border p-4">
+              <legend className="px-1 text-sm font-medium text-gray-700">
+                Profile photo
+              </legend>
+              <div className="mt-3">
+                <ImagePicker
+                  valueUrl={state.headshotUrl || null}
+                  previewUrl={state.headshotPreview || null}
+                  onPick={async (file) => {
+                    // clear last error
+                    setUploadError(null);
+
+                    // Revoke previous preview if any
+                    if (state.headshotPreview) {
+                      try {
+                        URL.revokeObjectURL(state.headshotPreview);
+                      } catch {}
+                    }
+
+                    if (!file) {
+                      setState((s) => ({
+                        ...s,
+                        headshotFile: null,
+                        headshotPreview: null,
+                      }));
+                      return;
+                    }
+
+                    // Show instant local preview
+                    const localUrl = URL.createObjectURL(file);
+                    setState((s) => ({
+                      ...s,
+                      headshotFile: file,
+                      headshotPreview: localUrl,
+                    }));
+
+                    // Start upload
+                    setUploadingPhoto(true);
+                    try {
+                      const remoteUrl = await uploadHeadshot(file);
+                      // Replace preview with the real URL
+                      try {
+                        URL.revokeObjectURL(localUrl);
+                      } catch {}
+                      setState((s) => ({
+                        ...s,
+                        headshotUrl: remoteUrl,
+                        headshotFile: null,
+                        headshotPreview: null,
+                      }));
+                    } catch (err: any) {
+                      setUploadError(err?.message || "Upload failed");
+                      // keep the preview so the user can retry
+                    } finally {
+                      setUploadingPhoto(false);
+                    }
+                  }}
+                />
+
+                <div className="mt-2 text-xs">
+                  {uploadingPhoto ? (
+                    <span className="text-gray-600">Uploading…</span>
+                  ) : uploadError ? (
+                    <span className="text-red-600">{uploadError}</span>
+                  ) : state.headshotUrl ? (
+                    <span className="text-green-600">Uploaded ✓</span>
+                  ) : (
+                    <span className="text-gray-500">
+                      JPG/PNG up to 5 MB. We’ll auto-crop to a square.
+                    </span>
+                  )}
+                </div>
+              </div>
+            </fieldset>
+          </div>
+
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="flex flex-col gap-1">
               <span className="text-sm">Display name</span>

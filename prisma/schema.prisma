@@ -367,6 +367,7 @@ model BookingNote {
 
 model GuestProfile {
   id            String   @id @default(cuid())
+  headshotUrl   String?  @db.VarChar(1024)
   personalEmail String   @unique
   passwordHash  String?  @db.VarChar(255) // ← NEW: hashed password for guest sign-in
   displayName   String? // optional; future-friendly
@@ -431,8 +432,10 @@ model GuestProfileV2 {
   formatsPhone  Boolean  @default(true)
 
   // Bio & links
-  bio   String?
-  links String[] // normalized https URLs
+  bio         String?
+  links       String[] // normalized https URLs
+  /// Public URL of the uploaded avatar
+  headshotUrl String?  @db.VarChar(1024)
 
   // Contact & private notes
   additionalEmails String[] // normalized lowercase

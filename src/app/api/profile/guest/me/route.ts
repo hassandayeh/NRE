@@ -55,11 +55,9 @@ export async function GET(_req: NextRequest) {
       code: "PRISMA_CLIENT_OUTDATED",
     });
   }
-  const row: any = await repo.findUnique({
-    where: { userId },
-  });
 
-  // Build a candidate DTO from DB (if present) or sensible defaults
+  const row: any = await repo.findUnique({ where: { userId } });
+
   const candidate: GuestProfileV2DTO = row
     ? {
         displayName: row?.displayName || fallbackDisplay(session),
@@ -87,9 +85,9 @@ export async function GET(_req: NextRequest) {
         feeNote: row?.feeNote || "",
         visibility: (row?.visibility as any) || "PRIVATE",
         inviteable: row?.inviteable ?? false,
+        headshotUrl: row?.headshotUrl || "",
       }
     : {
-        // Defaults when no record exists yet (valid per schema)
         displayName: fallbackDisplay(session),
         localName: "",
         pronouns: "",
@@ -107,14 +105,13 @@ export async function GET(_req: NextRequest) {
         feeNote: "",
         visibility: "PRIVATE",
         inviteable: false,
+        headshotUrl: "",
       };
 
-  // Normalize/validate to ensure consistent DTO back to the client
   try {
     const dto = validateGuestProfileV2(candidate);
     return json(200, { ok: true, profile: dto });
-  } catch (e) {
-    // If normalization unexpectedly fails, fall back to minimal safe payload
+  } catch {
     const fallback: GuestProfileV2DTO = {
       displayName: fallbackDisplay(session),
       localName: "",
@@ -133,6 +130,7 @@ export async function GET(_req: NextRequest) {
       feeNote: "",
       visibility: "PRIVATE",
       inviteable: false,
+      headshotUrl: "",
     };
     return json(200, { ok: true, profile: fallback });
   }

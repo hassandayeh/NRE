@@ -131,6 +131,17 @@ export const zGuestProfileV2 = z
 
     formats: zFormats,
 
+    // Optional public URL of the uploaded avatar (treat "" as unset)
+    headshotUrl: z
+      .preprocess((v) => {
+        if (typeof v === "string") {
+          const s = v.trim();
+          return s.length ? s : undefined; // empty string => undefined
+        }
+        return v;
+      }, z.string().url("Invalid image URL").max(2048))
+      .optional(),
+
     links: z
       .array(
         z.preprocess(
