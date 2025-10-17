@@ -2,1073 +2,938 @@
 "use client";
 
 import * as React from "react";
-import { safeParseGuestProfileV2 } from "../../../../../lib/profile/guestSchema";
+import { useState, useEffect, useRef } from "react";
+import {
+  type GuestProfileV2DTO,
+  AppearanceTypeLiterals,
+  ContactTypeLiterals,
+  ContactVisibilityLiterals,
+  HonorificLiterals,
+  PronounsLiterals,
+  TravelReadinessLiterals,
+  CEFRLiterals,
+  // Optional: we can validate on the client before POST
+  safeParseGuestProfileV2,
+} from "../../../../../lib/profile/guestSchema";
 
-async function uploadHeadshot(file: File): Promise<string> {
-  const fd = new FormData();
-  // server accepts either "file" or "headshot" — use "file"
-  fd.append("file", file);
-  const res = await fetch("/api/uploads/profile-photo", {
-    method: "POST",
-    body: fd,
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok || !json?.ok || !json?.url) {
-    throw new Error(json?.message || "Upload failed");
-  }
-  return json.url as string;
-}
+/**
+ * G-Profile V2 — Guest Editor (wired to API)
+ * Scope in this slice: guest-owned fields only (S1–S3, S6, S7.F1–F3).
+ * Excludes org overlay (assistant, disclosures) and advanced sections (S4/S5 UI).
+ *
+ * Endpoints:
+ *  - GET  /api/profile/guest/me
+ *  - POST /api/profile/guest/update
+ *  - POST /api/uploads/profile-photo (multipart; returns { ok, url })
+ *  - DELETE /api/uploads/profile-photo (deletes current blob)
+ */
 
-function bytesReadable(n: number) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
+type Status =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "saving" }
+  | { kind: "success"; msg?: string }
+  | { kind: "error"; msg: string };
 
-function ImagePicker(props: {
-  valueUrl?: string | null;
-  previewUrl?: string | null;
-  onPick: (file: File | null) => void;
-  maxBytes?: number; // default 5 MB
-}) {
-  const { valueUrl, previewUrl, onPick, maxBytes = 5 * 1024 * 1024 } = props;
-  const inputRef = React.useRef<HTMLInputElement | null>(null);
-  const imgSrc = previewUrl || valueUrl || null;
+const initialForm: GuestProfileV2DTO = {
+  // Identity
+  displayName: "",
+  nativeName: "",
+  pronouns: undefined,
+  headshotUrl: "",
 
+  // Headline & Summary
+  headline: "",
+  shortBio: "",
+  fullBio: "",
+
+  // Expertise & Coverage
+  topicKeys: [],
+  regionCodes: [],
+  languages: [{ isoCode: "en", level: "B2" }],
+
+  // Experience & Credentials (required arrays in DTO)
+  experience: [],
+  education: [],
+
+  // Publications & Media (required arrays in DTO)
+  publications: [],
+  media: [],
+
+  // Logistics
+  countryCode: "",
+  city: "",
+  timezone: "",
+  appearanceTypes: [],
+  travelReadiness: undefined,
+
+  // Contacts
+  additionalEmails: [],
+  contacts: [],
+
+  // Flags
+  listedPublic: false,
+  inviteable: false,
+};
+
+function Section({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
-    <div className="flex items-start gap-4">
-      <div className="h-24 w-24 shrink-0 overflow-hidden rounded-xl bg-gray-100 ring-1 ring-gray-200">
-        {imgSrc ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={imgSrc}
-            alt="Profile photo preview"
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-xs text-gray-400">
-            No photo
-          </div>
-        )}
-      </div>
-
-      <div className="flex-1">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/20"
-            onClick={() => inputRef.current?.click()}
-          >
-            Choose photo…
-          </button>
-          {(previewUrl || valueUrl) && (
-            <button
-              type="button"
-              className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/20"
-              onClick={() => onPick(null)}
-            >
-              Remove
-            </button>
-          )}
-        </div>
-
-        <p className="mt-2 text-xs text-gray-500">
-          JPG/PNG, up to {bytesReadable(maxBytes)}.
-        </p>
-
-        <input
-          ref={inputRef}
-          id="headshot"
-          name="headshot"
-          type="file"
-          accept="image/*"
-          className="sr-only"
-          onChange={(e) => {
-            const file = e.target.files?.[0] || null;
-            if (!file) return onPick(null);
-            if (file.size > maxBytes) {
-              alert(
-                `Selected file is too large (${bytesReadable(file.size)}).`
-              );
-              e.currentTarget.value = "";
-              return;
-            }
-            onPick(file);
-          }}
-        />
-      </div>
+    <div className="mb-6">
+      <h2 className="text-lg font-semibold">{title}</h2>
+      {subtitle ? (
+        <p className="text-sm text-gray-600 mt-1">{subtitle}</p>
+      ) : null}
     </div>
   );
 }
 
-/**
- * G-Profile V2 — Guest Editor shell (UI-only slice)
- * ------------------------------------------------------------
- * Goals for this first slice:
- * - Ship a clean, sectioned editor UI for GUEST profiles.
- * - Keep it dependency-free (no custom components, no API calls yet).
- * - Accessible by default: labels, fieldsets, keyboard-friendly.
- * - Zero regression: new route only, not linked yet.
- *
- * Next slices will wire real data (session load, save -> API, Prisma).
- */
+export default function GuestEditorPage() {
+  const [status, setStatus] = useState<Status>({ kind: "loading" });
+  const [form, setForm] = useState<GuestProfileV2DTO>(initialForm);
 
-type FormState = {
-  displayName: string;
-  localName: string; // name in local script / pronunciation hint
-  pronouns: string;
-  languages: string[];
-  timezone: string;
-  city: string;
-  countryCode: string;
-  regions: string[];
-  bio: string;
-  topics: string[];
-  formats: { tv: boolean; radio: boolean; online: boolean; phone: boolean };
-  links: string[];
-  additionalEmails: string[];
-  phone: string; // private
-  feeNote: string; // private
-  visibility: "PUBLIC" | "PRIVATE";
-  inviteable: boolean;
+  // Headshot upload/remove state
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingHeadshot, setUploadingHeadshot] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
-  // Photo (UI-only for now)
-  headshotUrl?: string; // CDN URL (legacy / after upload)
-  headshotFile?: File | null; // chosen file (not yet uploaded)
-  headshotPreview?: string | null; // local preview (Object URL)
-};
-
-const LANGUAGE_OPTIONS = [
-  "Arabic",
-  "English",
-  "French",
-  "Spanish",
-  "German",
-  "Italian",
-  "Turkish",
-  "Kurdish",
-];
-
-const REGION_OPTIONS = [
-  "MENA",
-  "Europe",
-  "North America",
-  "Sub-Saharan Africa",
-  "South Asia",
-  "East Asia",
-];
-
-const COUNTRY_OPTIONS = [
-  { code: "EG", name: "Egypt" },
-  { code: "SA", name: "Saudi Arabia" },
-  { code: "AE", name: "United Arab Emirates" },
-  { code: "US", name: "United States" },
-  { code: "GB", name: "United Kingdom" },
-  { code: "FR", name: "France" },
-];
-
-const TIMEZONES = [
-  "Africa/Cairo",
-  "Europe/Paris",
-  "Europe/London",
-  "Asia/Dubai",
-  "America/New_York",
-];
-
-const TOPIC_SUGGESTIONS = [
-  "Politics",
-  "Economy",
-  "Tech",
-  "Health",
-  "Climate",
-  "Culture",
-  "Security",
-];
-
-function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-full border px-2 py-1 text-xs">
-      {label}
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove ${label}`}
-        className="rounded-full p-1 hover:bg-gray-100 focus:outline-none focus:ring"
-      >
-        ×
-      </button>
-    </span>
-  );
-}
-
-/** Required-field heuristics — module scope (stable, not captured by hooks) */
-const REQUIRED_RULES: Array<{
-  key: keyof FormState | string;
-  bad: (s: FormState) => boolean;
-  msg: string;
-}> = [
-  { key: "displayName", bad: (s) => !s.displayName?.trim(), msg: "Required" },
-  {
-    key: "languages",
-    bad: (s) => !Array.isArray(s.languages) || s.languages.length === 0,
-
-    msg: "Select at least one language",
-  },
-];
-
-function enrichErrors(draft: FormState, base: Record<string, string>) {
-  const map = { ...base };
-  const hasFieldKeys = Object.keys(map).some((k) => k && k !== "_form");
-  if (!hasFieldKeys) {
-    for (const r of REQUIRED_RULES) {
-      if (r.bad(draft)) map[r.key as string] = r.msg;
-    }
-  }
-  return map;
-}
-
-export default function Page() {
-  const [saving, setSaving] = React.useState(false);
-  const [uploadingPhoto, setUploadingPhoto] = React.useState(false);
-  const [uploadError, setUploadError] = React.useState<string | null>(null);
-
-  const [errors, setErrors] = React.useState<Record<string, string>>({});
-  const [submitted, setSubmitted] = React.useState(false);
-
-  // Friendly labels for a few keys; anything else falls back to a prettified key.
-  const FIELD_LABELS: Record<string, string> = {
-    displayName: "Display name",
-    localName: "Name (local script / pronunciation)",
-    countryCode: "Country",
-    additionalEmails: "Additional emails",
-    languages: "Languages",
-    timezone: "Timezone",
-  };
-
-  function prettyKey(k: string) {
-    if (FIELD_LABELS[k]) return FIELD_LABELS[k];
-    return k
-      .replace(/\.(\d+)/g, " $1")
-      .replace(/([A-Z])/g, " $1")
-      .replace(/^./, (s) => s.toUpperCase())
-      .replace(/\bId\b/, "ID")
-      .trim();
-  }
-
-  const [isValid, setIsValid] = React.useState(true);
-
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-  const [saveNotice, setSaveNotice] = React.useState<string | null>(null);
-  const noticeTimer = React.useRef<number | null>(null);
-
-  const disabled =
-    saving || loading || !isValid || Object.keys(errors).length > 0;
-
-  const [state, setState] = React.useState<FormState>({
-    displayName: "",
-    localName: "",
-    pronouns: "",
-    languages: [],
-    timezone: "Africa/Cairo",
-    city: "",
-    countryCode: "EG",
-    regions: [],
-    bio: "",
-    topics: [],
-    formats: { tv: true, radio: true, online: true, phone: true },
-    links: [""],
-    additionalEmails: [""],
-    phone: "",
-    feeNote: "",
-    visibility: "PRIVATE",
-    inviteable: false,
-    headshotUrl: "",
-    headshotFile: null,
-    headshotPreview: null,
-  });
-
-  const validate = React.useCallback(
-    (draft: FormState = state) => {
-      try {
-        // Run schema validator on a sanitized payload (exclude transient file fields)
-        const payload: any = { ...draft };
-        // Exclude transient/unknown fields from schema validation (UI-only for now)
-        delete payload.headshotFile;
-        delete payload.headshotPreview;
-
-        const res: any = safeParseGuestProfileV2(payload);
-
-        const success = res?.ok === true || res?.success === true;
-        if (success) {
-          setErrors({});
-          setIsValid(true);
-          return true;
-        }
-
-        // Collect Zod issues robustly
-        const issues: any[] =
-          res?.errors || res?.error?.issues || res?.issues || [];
-        const map: Record<string, string> = {};
-        for (const issue of issues) {
-          const key =
-            Array.isArray(issue?.path) && issue.path.length
-              ? issue.path.map((p: string | number) => String(p)).join(".")
-              : "_form";
-          if (!map[key]) map[key] = issue?.message || "Invalid value";
-        }
-
-        // Enrich when Zod returns only generic errors (e.g., add required field hints)
-        const finalMap = enrichErrors(draft, map);
-        setErrors(finalMap);
-
-        const valid = Object.keys(finalMap).length === 0;
-        setIsValid(valid);
-        return valid;
-      } catch {
-        // Never block the UI on unexpected errors
-        setErrors({});
-        setIsValid(true);
-        return true;
-      }
-    },
-    [state]
-  );
-
-  React.useEffect(() => {
+  // Load
+  useEffect(() => {
     let cancelled = false;
-
-    (async () => {
+    async function load() {
+      setStatus({ kind: "loading" });
       try {
-        setLoading(true);
-        setError(null);
         const res = await fetch("/api/profile/guest/me", { cache: "no-store" });
-        if (!res.ok) throw new Error("Failed to load profile");
-        const json = await res.json();
-        const p = json?.profile;
-        if (!cancelled && p) {
-          setState({
-            displayName: p.displayName || "",
-            localName: p.localName || "",
-            pronouns: p.pronouns || "",
-            languages: Array.isArray(p.languages) ? p.languages : [],
-            timezone: p.timezone || "Africa/Cairo",
-            city: p.city || "",
-            countryCode: p.countryCode || "EG",
-            regions: Array.isArray(p.regions) ? p.regions : [],
-            bio: p.bio || "",
-            topics: Array.isArray(p.topics) ? p.topics : [],
-            formats: p.formats || {
-              tv: true,
-              radio: true,
-              online: true,
-              phone: true,
-            },
-            links: Array.isArray(p.links) ? p.links : [],
-            additionalEmails: Array.isArray(p.additionalEmails)
-              ? p.additionalEmails
-              : [],
-            phone: p.phone || "",
-            feeNote: p.feeNote || "",
-            visibility: p.visibility || "PRIVATE",
-            inviteable: !!p.inviteable,
-            headshotUrl: p.headshotUrl || "",
-            headshotFile: null,
-            headshotPreview: null,
-          });
-        }
+        if (!res.ok) throw new Error(`Load failed (${res.status})`);
+        const data = (await res.json()) as {
+          ok: true;
+          profile: GuestProfileV2DTO;
+        };
+        if (cancelled) return;
+        setForm({
+          ...initialForm,
+          ...data.profile, // server already normalized
+        });
+        setStatus({ kind: "idle" });
       } catch (e: any) {
-        if (!cancelled) setError(e?.message || "Failed to load profile");
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        setStatus({
+          kind: "error",
+          msg: e?.message ?? "Failed to load profile",
+        });
       }
-    })();
-
+    }
+    load();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  React.useEffect(() => {
-    if (!loading) validate(state);
-  }, [state, loading, validate]);
+  // Helpers
+  const update = <K extends keyof GuestProfileV2DTO>(
+    key: K,
+    value: GuestProfileV2DTO[K]
+  ) => setForm((f) => ({ ...f, [key]: value }));
 
-  React.useEffect(() => {
-    return () => {
-      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+  const onCommaList = (s: string) =>
+    s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+  // Build normalized payload (client-side) matching DTO
+  function buildPayload(next?: GuestProfileV2DTO): GuestProfileV2DTO {
+    const src = next ?? form;
+    return {
+      ...src,
+      countryCode: src.countryCode
+        ? src.countryCode.trim().toUpperCase()
+        : undefined,
+      regionCodes: (src.regionCodes || []).map((r) => r.trim().toUpperCase()),
+      topicKeys: (src.topicKeys || []).map((t) => t.trim()).filter(Boolean),
+      languages: (src.languages || []).map((l) => ({
+        isoCode: l.isoCode.trim().toLowerCase(),
+        level: l.level,
+      })),
+      additionalEmails: (src.additionalEmails || []).map((e) => ({
+        email: e.email.trim().toLowerCase(),
+        visibility: e.visibility,
+        verified: e.verified,
+      })),
+      contacts: (src.contacts || []).map((c) => ({
+        type: c.type,
+        value: c.value.trim(),
+        visibility: c.visibility,
+      })),
     };
-  }, []);
+  }
 
-  React.useEffect(() => {
-    return () => {
-      if (state.headshotPreview) {
-        try {
-          URL.revokeObjectURL(state.headshotPreview);
-        } catch {}
+  // Save NOW (used by upload/remove flows and the form submit)
+  async function saveNow(next?: GuestProfileV2DTO) {
+    const payload = buildPayload(next);
+    const parsed = safeParseGuestProfileV2(payload);
+    if (!parsed.success) {
+      setStatus({
+        kind: "error",
+        msg: parsed.error.issues.map((i) => i.message).join(" · "),
+      });
+      return false;
+    }
+    try {
+      setStatus({ kind: "saving" });
+      const res = await fetch("/api/profile/guest/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.message || `Save failed (${res.status})`);
       }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.headshotPreview]);
-
-  function toggleArrayValue<K extends keyof FormState>(key: K, value: string) {
-    setState((prev) => {
-      const existing = new Set((prev[key] as unknown as string[]) || []);
-      existing.has(value) ? existing.delete(value) : existing.add(value);
-      return { ...prev, [key]: Array.from(existing) } as FormState;
-    });
+      setStatus({ kind: "success", msg: "Saved" });
+      return true;
+    } catch (e: any) {
+      setStatus({ kind: "error", msg: e?.message ?? "Failed to save" });
+      return false;
+    }
   }
 
-  function updateArrayAt(
-    key: keyof FormState,
-    index: number,
-    value: string,
-    min = 1
-  ) {
-    setState((prev) => {
-      const arr = [...((prev as any)[key] as string[])];
-      arr[index] = value;
-      if (arr.length < min) arr.push("");
-      return { ...prev, [key]: arr } as FormState;
-    });
+  // Headshot: open file dialog
+  function pickHeadshot() {
+    setUploadError(null);
+    fileInputRef.current?.click();
   }
 
-  function addArraySlot(key: keyof FormState) {
-    setState((prev) => {
-      const arr = [...((prev as any)[key] as string[])];
-      arr.push("");
-      return { ...prev, [key]: arr } as FormState;
-    });
-  }
+  // Headshot: upload to Blob (auto-saves new url)
+  async function onHeadshotSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.currentTarget.value = ""; // allow re-picking same file
+    if (!file) return;
 
-  function removeArraySlot(key: keyof FormState, index: number) {
-    setState((prev) => {
-      const arr = [...((prev as any)[key] as string[])];
-      arr.splice(index, 1);
-      if (arr.length === 0) arr.push("");
-      return { ...prev, [key]: arr } as FormState;
-    });
-  }
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSubmitted(true);
-    const ok = validate(state);
-    if (!ok) {
-      // Show the specific field list (summary box above); no generic message
-      try {
-        window.scrollTo({ top: 0, behavior: "smooth" });
-      } catch {}
+    // light client guardrails
+    const maxBytes = 5 * 1024 * 1024; // 5MB
+    if (!file.type.startsWith("image/")) {
+      setUploadError("Please select an image file.");
+      return;
+    }
+    if (file.size > maxBytes) {
+      setUploadError("Image too large (max 5MB).");
       return;
     }
 
-    setSaving(true);
-    setError(null);
+    setUploadingHeadshot(true);
+    setUploadError(null);
     try {
-      // Exclude transient fields from the payload for now
-      const payload: any = { ...state };
-      // Exclude transient/unknown fields until upload is wired
-      delete payload.headshotFile;
-      delete payload.headshotPreview;
+      const fd = new FormData();
+      fd.append("file", file, file.name);
 
+      const res = await fetch("/api/uploads/profile-photo", {
+        method: "POST",
+        body: fd,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.message || `Upload failed (${res.status})`);
+      }
+      const data = (await res.json()) as
+        | { ok: true; url: string }
+        | { ok: false; message: string };
+      if ((data as any).ok !== true || !(data as any).url) {
+        throw new Error((data as any).message || "Upload failed");
+      }
+
+      const next = {
+        ...form,
+        headshotUrl: (data as any).url,
+      } as GuestProfileV2DTO;
+      setForm(next);
+      await saveNow(next); // persist immediately
+    } catch (err: any) {
+      setUploadError(err?.message || "Upload failed");
+    } finally {
+      setUploadingHeadshot(false);
+    }
+  }
+
+  // Headshot: remove from Blob (auto-saves cleared url)
+  async function removeHeadshot() {
+    try {
+      setUploadError(null);
+      setUploadingHeadshot(true);
+
+      await fetch("/api/uploads/profile-photo", { method: "DELETE" });
+
+      const next = { ...form, headshotUrl: "" } as GuestProfileV2DTO;
+      setForm(next);
+      await saveNow(next);
+    } catch (e: any) {
+      setUploadError(e?.message || "Failed to remove photo");
+    } finally {
+      setUploadingHeadshot(false);
+    }
+  }
+
+  // Save (form submit)
+  async function onSave(e: React.FormEvent) {
+    e.preventDefault();
+    setStatus({ kind: "saving" });
+
+    // Client-side normalization: keep it light, server will validate again
+    const payload: GuestProfileV2DTO = {
+      ...form,
+      countryCode: form.countryCode
+        ? form.countryCode.trim().toUpperCase()
+        : undefined,
+      regionCodes: (form.regionCodes || []).map((r) => r.trim().toUpperCase()),
+      topicKeys: (form.topicKeys || []).map((t) => t.trim()).filter(Boolean),
+      languages: (form.languages || []).map((l) => ({
+        isoCode: l.isoCode.trim().toLowerCase(),
+        level: l.level,
+      })),
+      additionalEmails: (form.additionalEmails || []).map((e) => ({
+        email: e.email.trim().toLowerCase(),
+        visibility: e.visibility,
+        verified: e.verified, // server stamps time if true
+      })),
+      contacts: (form.contacts || []).map((c) => ({
+        type: c.type,
+        value: c.value.trim(),
+        visibility: c.visibility,
+      })),
+    };
+
+    // Optional Zod check on client for instant feedback
+    const parsed = safeParseGuestProfileV2(payload);
+    if (!parsed.success) {
+      setStatus({
+        kind: "error",
+        msg: parsed.error.issues.map((i) => i.message).join(" · "),
+      });
+      return;
+    }
+
+    try {
       const res = await fetch("/api/profile/guest/update", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(parsed.data),
       });
-
-      const json = await res.json();
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.message || "Failed to save profile");
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.message || `Save failed (${res.status})`);
       }
-      // Optimistic: state already reflects what we sent
-      setSaveNotice("Saved ✓");
-      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
-      noticeTimer.current = window.setTimeout(() => setSaveNotice(null), 2500);
-    } catch (err: any) {
-      setError(err?.message || "Failed to save profile");
-    } finally {
-      setSaving(false);
+      setStatus({ kind: "success", msg: "Saved" });
+    } catch (e: any) {
+      setStatus({ kind: "error", msg: e?.message ?? "Failed to save" });
     }
   }
 
   return (
-    <main className="mx-auto max-w-4xl p-6">
-      <header className="mb-6">
-        <p className="text-xs uppercase tracking-wide text-gray-500">
-          Profile · Guest · Edit
-        </p>
-        <h1 className="text-2xl font-semibold">Edit Guest Profile (V2)</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          Build a great profile for a great directory. Changes here will power
-          search & inviteability.
-        </p>
-      </header>
+    <main className="max-w-3xl mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold mb-8">Edit guest profile</h1>
 
-      {loading && (
-        <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-          Loading profile…
-        </div>
-      )}
-      {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
-          {error}
-        </div>
-      )}
+      {/* Status bar */}
+      <div
+        role="status"
+        className={`mb-6 rounded-md border px-3 py-2 text-sm ${
+          status.kind === "error"
+            ? "border-red-300 bg-red-50 text-red-700"
+            : status.kind === "success"
+            ? "border-green-300 bg-green-50 text-green-700"
+            : "border-gray-200 bg-gray-50 text-gray-600"
+        }`}
+      >
+        {status.kind === "loading" && "Loading…"}
+        {status.kind === "saving" && "Saving…"}
+        {status.kind === "error" && (status.msg || "Something went wrong")}
+        {status.kind === "success" && (status.msg || "Saved")}
+        {status.kind === "idle" && "Idle"}
+      </div>
 
-      <form onSubmit={onSubmit} className="space-y-8">
-        {submitted && Object.keys(errors).length > 0 && (
-          <div
-            role="alert"
-            aria-live="assertive"
-            className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700"
-          >
-            <p className="font-medium mb-1">
-              Please fix the highlighted fields:
-            </p>
-            <ul className="list-disc pl-4">
-              {Object.entries(errors)
-                .filter(([k]) => k !== "_form")
-                .map(([k, msg]) => (
-                  <li key={k}>
-                    <strong>{prettyKey(k)}</strong>
-                    {msg ? ` — ${msg}` : ""}
-                  </li>
-                ))}
-            </ul>
-            {"_form" in errors ? (
-              <p className="mt-2">{errors["_form"]}</p>
-            ) : null}
-          </div>
-        )}
-
-        {/* Basics */}
-        <section
-          aria-labelledby="sec-basics"
-          className="rounded-2xl border p-4"
-        >
-          <h2 id="sec-basics" className="text-lg font-medium">
-            Basics
-          </h2>
-          <div className="mt-3">
-            <fieldset className="rounded-2xl border p-4">
-              <legend className="px-1 text-sm font-medium text-gray-700">
-                Profile photo
-              </legend>
-              <div className="mt-3">
-                <ImagePicker
-                  valueUrl={state.headshotUrl || null}
-                  previewUrl={state.headshotPreview || null}
-                  onPick={async (file) => {
-                    // clear last error
-                    setUploadError(null);
-
-                    // Revoke previous preview if any
-                    if (state.headshotPreview) {
-                      try {
-                        URL.revokeObjectURL(state.headshotPreview);
-                      } catch {}
-                    }
-
-                    if (!file) {
-                      setState((s) => ({
-                        ...s,
-                        headshotFile: null,
-                        headshotPreview: null,
-                      }));
-                      return;
-                    }
-
-                    // Show instant local preview
-                    const localUrl = URL.createObjectURL(file);
-                    setState((s) => ({
-                      ...s,
-                      headshotFile: file,
-                      headshotPreview: localUrl,
-                    }));
-
-                    // Start upload
-                    setUploadingPhoto(true);
-                    try {
-                      const remoteUrl = await uploadHeadshot(file);
-                      // Replace preview with the real URL
-                      try {
-                        URL.revokeObjectURL(localUrl);
-                      } catch {}
-                      setState((s) => ({
-                        ...s,
-                        headshotUrl: remoteUrl,
-                        headshotFile: null,
-                        headshotPreview: null,
-                      }));
-                    } catch (err: any) {
-                      setUploadError(err?.message || "Upload failed");
-                      // keep the preview so the user can retry
-                    } finally {
-                      setUploadingPhoto(false);
-                    }
-                  }}
-                />
-
-                <div className="mt-2 text-xs">
-                  {uploadingPhoto ? (
-                    <span className="text-gray-600">Uploading…</span>
-                  ) : uploadError ? (
-                    <span className="text-red-600">{uploadError}</span>
-                  ) : state.headshotUrl ? (
-                    <span className="text-green-600">Uploaded ✓</span>
-                  ) : (
-                    <span className="text-gray-500">
-                      JPG/PNG up to 5 MB. We’ll auto-crop to a square.
-                    </span>
-                  )}
-                </div>
-              </div>
-            </fieldset>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Display name</span>
-              <input
-                className="rounded-lg border p-2"
-                value={state.displayName}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, displayName: e.target.value }))
-                }
-                placeholder="e.g., Dr. Lina Hassan"
-              />
-            </label>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">
-                Name (local script / pronunciation)
-              </span>
-              <input
-                className="rounded-lg border p-2"
-                value={state.localName}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, localName: e.target.value }))
-                }
-                placeholder="e.g., توماس مكدونالد"
-              />
-            </label>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Pronouns (optional)</span>
-              <input
-                className="rounded-lg border p-2"
-                value={state.pronouns}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, pronouns: e.target.value }))
-                }
-                placeholder="she/her, he/him, they/them…"
-              />
-            </label>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Timezone</span>
-              <select
-                className="rounded-lg border p-2"
-                value={state.timezone}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, timezone: e.target.value }))
-                }
-              >
-                {TIMEZONES.map((tz) => (
-                  <option key={tz} value={tz}>
-                    {tz}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Country</span>
-              <select
-                className="rounded-lg border p-2"
-                value={state.countryCode}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, countryCode: e.target.value }))
-                }
-              >
-                {COUNTRY_OPTIONS.map((c) => (
-                  <option key={c.code} value={c.code}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">City</span>
-              <input
-                className="rounded-lg border p-2"
-                value={state.city}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, city: e.target.value }))
-                }
-                placeholder="e.g., Cairo"
-              />
-            </label>
-          </div>
-        </section>
-
-        {/* Languages & Regions */}
-        <section
-          aria-labelledby="sec-lang"
-          className="rounded-2xl border p-4"
-          role="group"
-        >
-          <h2 id="sec-lang" className="text-lg font-medium">
-            Languages & Regions
-          </h2>
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label className="text-sm">Languages</label>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {LANGUAGE_OPTIONS.map((lang) => {
-                  const checked = state.languages.includes(lang);
-                  return (
-                    <label
-                      key={lang}
-                      className="inline-flex items-center gap-2 text-sm"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4"
-                        checked={checked}
-                        onChange={() => toggleArrayValue("languages", lang)}
-                      />
-                      {lang}
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm">Regions (coverage)</label>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {REGION_OPTIONS.map((r) => {
-                  const checked = state.regions.includes(r);
-                  return (
-                    <label
-                      key={r}
-                      className="inline-flex items-center gap-2 text-sm"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4"
-                        checked={checked}
-                        onChange={() => toggleArrayValue("regions", r)}
-                      />
-                      {r}
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Topics & Formats */}
-        <section
-          aria-labelledby="sec-topics"
-          className="rounded-2xl border p-4"
-        >
-          <h2 id="sec-topics" className="text-lg font-medium">
-            Topics & Formats
-          </h2>
-
-          {/* Topics chips */}
-          <div className="mt-4">
-            <label className="text-sm">Beats / Topics</label>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {state.topics.map((t, i) =>
-                t ? (
-                  <Chip
-                    key={t + i}
-                    label={t}
-                    onRemove={() =>
-                      setState((s) => ({
-                        ...s,
-                        topics: s.topics.filter((x, idx) => idx !== i),
-                      }))
-                    }
+      <form onSubmit={onSave} className="space-y-10">
+        {/* Identity */}
+        <section>
+          <Section
+            title="Identity"
+            subtitle="Your public identity as it appears in the directory."
+          />
+          <div className="grid grid-cols-1 gap-4">
+            {/* Headshot */}
+            <div className="flex items-start gap-4">
+              <div className="w-20 h-20 rounded-full overflow-hidden border bg-white">
+                {form.headshotUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={form.headshotUrl}
+                    alt="Headshot preview"
+                    className="w-full h-full object-cover"
                   />
-                ) : null
-              )}
-            </div>
-            <div className="mt-3 flex gap-2">
-              <input
-                aria-label="Add topic"
-                className="w-full rounded-lg border p-2"
-                placeholder="Type a topic and press Add"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                  }
-                }}
-                id="topicInput"
-              />
-              <button
-                type="button"
-                className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                onClick={() => {
-                  const el = document.getElementById(
-                    "topicInput"
-                  ) as HTMLInputElement | null;
-                  const val = (el?.value || "").trim();
-                  if (val && !state.topics.includes(val)) {
-                    setState((s) => ({ ...s, topics: [...s.topics, val] }));
-                    if (el) el.value = "";
-                  }
-                }}
-              >
-                Add
-              </button>
-              <div className="hidden md:block">
-                <span className="text-xs text-gray-500">
-                  Suggestions: {TOPIC_SUGGESTIONS.join(", ")}
-                </span>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">
+                    No photo
+                  </div>
+                )}
               </div>
-            </div>
-          </div>
 
-          {/* Formats */}
-          <div className="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-            {[
-              ["tv", "TV"],
-              ["radio", "Radio"],
-              ["online", "Online"],
-              ["phone", "Phone"],
-            ].map(([key, label]) => (
-              <label key={key} className="inline-flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={(state.formats as any)[key]}
-                  onChange={(e) =>
-                    setState((s) => ({
-                      ...s,
-                      formats: { ...s.formats, [key]: e.target.checked },
-                    }))
-                  }
-                />
-                <span className="text-sm">{label}</span>
-              </label>
-            ))}
-          </div>
-        </section>
-
-        {/* Visibility & Inviteability */}
-        <section
-          aria-labelledby="sec-vis"
-          className="rounded-2xl border p-4"
-          role="group"
-        >
-          <h2 id="sec-vis" className="text-lg font-medium">
-            Visibility & Inviteability
-          </h2>
-          <p className="mt-1 text-xs text-gray-600">
-            Availability signal comes from calendar & bookings (managed
-            elsewhere).
-          </p>
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <fieldset className="rounded-xl border p-3">
-              <legend className="text-sm font-medium">
-                Profile visibility
-              </legend>
-              <label className="mt-2 flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="visibility"
-                  className="h-4 w-4"
-                  checked={state.visibility === "PUBLIC"}
-                  onChange={() =>
-                    setState((s) => ({ ...s, visibility: "PUBLIC" }))
-                  }
-                />
-                Public (discoverable in directory)
-              </label>
-              <label className="mt-2 flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="visibility"
-                  className="h-4 w-4"
-                  checked={state.visibility === "PRIVATE"}
-                  onChange={() =>
-                    setState((s) => ({ ...s, visibility: "PRIVATE" }))
-                  }
-                />
-                Private (hidden; share only via invite link)
-              </label>
-            </fieldset>
-
-            <label className="mt-2 flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="h-5 w-5"
-                checked={state.inviteable}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, inviteable: e.target.checked }))
-                }
-              />
-              Inviteable (can be added to bookings)
-            </label>
-          </div>
-        </section>
-
-        {/* Bio & Links */}
-        <section aria-labelledby="sec-bio" className="rounded-2xl border p-4">
-          <h2 id="sec-bio" className="text-lg font-medium">
-            Bio & Links
-          </h2>
-          <div className="mt-4 grid grid-cols-1 gap-4">
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Short bio</span>
-              <textarea
-                className="min-h-[96px] rounded-lg border p-2"
-                value={state.bio}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, bio: e.target.value }))
-                }
-                placeholder="One paragraph—experience, beats, highlights."
-              />
-            </label>
-
-            <div className="flex flex-col gap-2">
-              <span className="text-sm">
-                Links (e.g., website, X, LinkedIn)
-              </span>
-              {state.links.map((url, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input
-                    className="w-full rounded-lg border p-2"
-                    value={url}
-                    onChange={(e) => updateArrayAt("links", i, e.target.value)}
-                    placeholder="https://example.com"
-                    inputMode="url"
-                  />
+              <div className="flex-1">
+                <div className="flex gap-2">
                   <button
                     type="button"
-                    className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
-                    onClick={() => removeArraySlot("links", i)}
-                    aria-label="Remove link"
+                    onClick={pickHeadshot}
+                    className="rounded-md border px-3 py-2 text-sm disabled:opacity-50"
+                    disabled={uploadingHeadshot}
+                  >
+                    {uploadingHeadshot ? "Uploading…" : "Choose photo"}
+                  </button>
+                  {form.headshotUrl ? (
+                    <button
+                      type="button"
+                      onClick={removeHeadshot}
+                      className="rounded-md border px-3 py-2 text-sm"
+                      disabled={uploadingHeadshot}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  JPG/PNG, up to 5MB. Stored via Blob.
+                </p>
+                {uploadError ? (
+                  <p className="text-xs text-red-600 mt-1">{uploadError}</p>
+                ) : null}
+              </div>
+
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={onHeadshotSelected}
+              />
+            </div>
+
+            <label className="block">
+              <span className="block text-sm font-medium">Display name</span>
+              <input
+                type="text"
+                value={form.displayName ?? ""}
+                onChange={(e) => update("displayName", e.target.value)}
+                className="mt-1 w-full rounded-md border px-3 py-2"
+                placeholder="e.g., Dr. Lina Farouk"
+              />
+            </label>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <label className="block">
+                <span className="block text-sm font-medium">Honorific</span>
+                <select
+                  value={form.honorific ?? ""}
+                  onChange={(e) =>
+                    update(
+                      "honorific",
+                      (e.target.value ||
+                        undefined) as GuestProfileV2DTO["honorific"]
+                    )
+                  }
+                  className="mt-1 w-full rounded-md border px-3 py-2"
+                >
+                  <option value="">—</option>
+                  {HonorificLiterals.map((h) => (
+                    <option key={h} value={h}>
+                      {h}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="block text-sm font-medium">Pronouns</span>
+                <select
+                  value={form.pronouns ?? ""}
+                  onChange={(e) =>
+                    update(
+                      "pronouns",
+                      (e.target.value ||
+                        undefined) as GuestProfileV2DTO["pronouns"]
+                    )
+                  }
+                  className="mt-1 w-full rounded-md border px-3 py-2"
+                >
+                  <option value="">—</option>
+                  {PronounsLiterals.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="block text-sm font-medium">
+                  Name in native script
+                </span>
+                <input
+                  type="text"
+                  value={form.nativeName ?? ""}
+                  onChange={(e) => update("nativeName", e.target.value)}
+                  className="mt-1 w-full rounded-md border px-3 py-2"
+                  placeholder="e.g., لينا فاروق"
+                />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        {/* Headline & Summary */}
+        <section>
+          <Section
+            title="Headline & summary"
+            subtitle="A crisp headline and a short summary help producers find you quickly."
+          />
+          <label className="block mb-3">
+            <span className="block text-sm font-medium">Headline (≤120)</span>
+            <input
+              type="text"
+              value={form.headline ?? ""}
+              onChange={(e) => update("headline", e.target.value)}
+              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder='e.g., "Political analyst; Head of XYZ Institute"'
+              maxLength={120}
+            />
+          </label>
+          <label className="block mb-3">
+            <span className="block text-sm font-medium">Short bio (≤280)</span>
+            <textarea
+              value={form.shortBio ?? ""}
+              onChange={(e) => update("shortBio", e.target.value)}
+              className="mt-1 w-full rounded-md border px-3 py-2"
+              rows={3}
+              maxLength={280}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-sm font-medium">Full bio</span>
+            <textarea
+              value={form.fullBio ?? ""}
+              onChange={(e) => update("fullBio", e.target.value)}
+              className="mt-1 w-full rounded-md border px-3 py-2"
+              rows={6}
+              placeholder="Longer background, publications, affiliations…"
+            />
+          </label>
+        </section>
+
+        {/* Expertise & Coverage */}
+        <section>
+          <Section
+            title="Expertise & coverage"
+            subtitle="Topics, regions, and languages used for search and filters."
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label className="block">
+              <span className="block text-sm font-medium">
+                Topics (comma-separated)
+              </span>
+              <input
+                type="text"
+                value={(form.topicKeys || []).join(", ")}
+                onChange={(e) =>
+                  update("topicKeys", onCommaList(e.target.value))
+                }
+                className="mt-1 w-full rounded-md border px-3 py-2"
+                placeholder="e.g., MENA politics, energy, elections"
+              />
+            </label>
+
+            <label className="block">
+              <span className="block text-sm font-medium">
+                Regions (codes, comma-separated)
+              </span>
+              <input
+                type="text"
+                value={(form.regionCodes || []).join(", ")}
+                onChange={(e) =>
+                  update("regionCodes", onCommaList(e.target.value))
+                }
+                className="mt-1 w-full rounded-md border px-3 py-2"
+                placeholder="e.g., MENA, 015, 145"
+              />
+            </label>
+          </div>
+
+          {/* Languages */}
+          <div className="mt-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Languages</span>
+              <button
+                type="button"
+                onClick={() =>
+                  update("languages", [
+                    ...(form.languages || []),
+                    { isoCode: "", level: "B2" },
+                  ])
+                }
+                className="text-sm px-2 py-1 rounded-md border"
+              >
+                + Add language
+              </button>
+            </div>
+            <div className="mt-2 space-y-2">
+              {(form.languages || []).map((l, i) => (
+                <div key={i} className="grid grid-cols-12 gap-2">
+                  <input
+                    aria-label="Language code"
+                    className="col-span-6 rounded-md border px-3 py-2"
+                    placeholder="e.g., en, ar"
+                    value={l.isoCode}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      const arr = [...(form.languages || [])];
+                      arr[i] = { ...arr[i], isoCode: v };
+                      update("languages", arr);
+                    }}
+                  />
+                  <select
+                    aria-label="Level"
+                    className="col-span-4 rounded-md border px-3 py-2"
+                    value={l.level}
+                    onChange={(e) => {
+                      const v = e.target
+                        .value as GuestProfileV2DTO["languages"][number]["level"];
+                      const arr = [...(form.languages || [])];
+                      arr[i] = { ...arr[i], level: v };
+                      update("languages", arr);
+                    }}
+                  >
+                    {CEFRLiterals.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="col-span-2 rounded-md border px-3 py-2"
+                    onClick={() => {
+                      const arr = [...(form.languages || [])];
+                      arr.splice(i, 1);
+                      update("languages", arr);
+                    }}
+                    aria-label="Remove language"
                   >
                     Remove
                   </button>
                 </div>
               ))}
-              <button
-                type="button"
-                className="w-fit rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                onClick={() => addArraySlot("links")}
-              >
-                + Add link
-              </button>
+              {(form.languages || []).length === 0 ? (
+                <p className="text-xs text-gray-500">No languages yet.</p>
+              ) : null}
             </div>
           </div>
         </section>
 
-        {/* Contact & Private Notes */}
-        <section
-          aria-labelledby="sec-private"
-          className="rounded-2xl border p-4"
-          role="group"
-        >
-          <h2 id="sec-private" className="text-lg font-medium">
-            Contact & Private Notes
-          </h2>
-          <p className="mt-1 text-xs text-gray-600">
-            Primary email is your account email (auto-assigned). You can add
-            private contact details that org staff with access may view.
-          </p>
+        {/* Logistics */}
+        <section>
+          <Section
+            title="Logistics"
+            subtitle="Where you are and how you prefer to appear."
+          />
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <label className="block">
+              <span className="block text-sm font-medium">Country (ISO-2)</span>
+              <input
+                type="text"
+                value={form.countryCode ?? ""}
+                onChange={(e) => update("countryCode", e.target.value)}
+                className="mt-1 w-full rounded-md border px-3 py-2"
+                placeholder="e.g., EG"
+                maxLength={2}
+              />
+            </label>
 
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label className="text-sm">Additional emails</label>
-              {state.additionalEmails.map((em, i) => (
-                <div key={i} className="mt-2 flex items-center gap-2">
+            <label className="block">
+              <span className="block text-sm font-medium">City</span>
+              <input
+                type="text"
+                value={form.city ?? ""}
+                onChange={(e) => update("city", e.target.value)}
+                className="mt-1 w-full rounded-md border px-3 py-2"
+              />
+            </label>
+
+            <label className="block">
+              <span className="block text-sm font-medium">Timezone (IANA)</span>
+              <input
+                type="text"
+                value={form.timezone ?? ""}
+                onChange={(e) => update("timezone", e.target.value)}
+                className="mt-1 w-full rounded-md border px-3 py-2"
+                placeholder="e.g., Africa/Cairo"
+              />
+            </label>
+          </div>
+
+          <fieldset className="mt-4">
+            <legend className="text-sm font-medium mb-2">
+              Appearance types
+            </legend>
+            <div className="flex flex-wrap gap-3">
+              {AppearanceTypeLiterals.map((t) => {
+                const checked = (form.appearanceTypes || []).includes(t);
+                return (
+                  <label key={t} className="inline-flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const set = new Set(form.appearanceTypes || []);
+                        if (e.target.checked) set.add(t);
+                        else set.delete(t);
+                        update("appearanceTypes", Array.from(set));
+                      }}
+                    />
+                    <span className="text-sm">{t}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <label className="block mt-4">
+            <span className="block text-sm font-medium">Travel readiness</span>
+            <select
+              value={form.travelReadiness ?? ""}
+              onChange={(e) =>
+                update(
+                  "travelReadiness",
+                  (e.target.value ||
+                    undefined) as GuestProfileV2DTO["travelReadiness"]
+                )
+              }
+              className="mt-1 w-full rounded-md border px-3 py-2"
+            >
+              <option value="">—</option>
+              {TravelReadinessLiterals.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+
+        {/* Contacts */}
+        <section>
+          <Section
+            title="Contacts"
+            subtitle="Additional emails and contact methods are visible internally unless you change visibility."
+          />
+
+          {/* Additional emails */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Additional emails</span>
+              <button
+                type="button"
+                onClick={() =>
+                  update("additionalEmails", [
+                    ...(form.additionalEmails || []),
+                    { email: "", visibility: "INTERNAL", verified: false },
+                  ])
+                }
+                className="text-sm px-2 py-1 rounded-md border"
+              >
+                + Add email
+              </button>
+            </div>
+            <div className="mt-2 space-y-2">
+              {(form.additionalEmails || []).map((e, i) => (
+                <div key={i} className="grid grid-cols-12 gap-2">
                   <input
-                    className="w-full rounded-lg border p-2"
-                    value={em}
-                    onChange={(e) =>
-                      updateArrayAt("additionalEmails", i, e.target.value)
-                    }
+                    aria-label="Email"
+                    className="col-span-6 rounded-md border px-3 py-2"
                     placeholder="name@example.com"
-                    inputMode="email"
+                    value={e.email}
+                    onChange={(ev) => {
+                      const arr = [...(form.additionalEmails || [])];
+                      arr[i] = { ...arr[i], email: ev.target.value };
+                      update("additionalEmails", arr);
+                    }}
                   />
+                  <select
+                    aria-label="Visibility"
+                    className="col-span-4 rounded-md border px-3 py-2"
+                    value={e.visibility}
+                    onChange={(ev) => {
+                      const arr = [...(form.additionalEmails || [])];
+                      arr[i] = {
+                        ...arr[i],
+                        visibility: ev.target
+                          .value as GuestProfileV2DTO["additionalEmails"][number]["visibility"],
+                      };
+                      update("additionalEmails", arr);
+                    }}
+                  >
+                    {ContactVisibilityLiterals.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
-                    className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
-                    onClick={() => removeArraySlot("additionalEmails", i)}
+                    className="col-span-2 rounded-md border px-3 py-2"
+                    onClick={() => {
+                      const arr = [...(form.additionalEmails || [])];
+                      arr.splice(i, 1);
+                      update("additionalEmails", arr);
+                    }}
                     aria-label="Remove email"
                   >
                     Remove
                   </button>
                 </div>
               ))}
+              {(form.additionalEmails || []).length === 0 ? (
+                <p className="text-xs text-gray-500">No additional emails.</p>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Contact methods */}
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Contact methods</span>
               <button
                 type="button"
-                className="mt-2 w-fit rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                onClick={() => addArraySlot("additionalEmails")}
+                onClick={() =>
+                  update("contacts", [
+                    ...(form.contacts || []),
+                    { type: "PHONE", value: "", visibility: "INTERNAL" },
+                  ])
+                }
+                className="text-sm px-2 py-1 rounded-md border"
               >
-                + Add email
+                + Add contact
               </button>
             </div>
+            <div className="mt-2 space-y-2">
+              {(form.contacts || []).map((c, i) => (
+                <div key={i} className="grid grid-cols-12 gap-2">
+                  <select
+                    aria-label="Type"
+                    className="col-span-3 rounded-md border px-3 py-2"
+                    value={c.type}
+                    onChange={(ev) => {
+                      const arr = [...(form.contacts || [])];
+                      arr[i] = {
+                        ...arr[i],
+                        type: ev.target
+                          .value as GuestProfileV2DTO["contacts"][number]["type"],
+                      };
+                      update("contacts", arr);
+                    }}
+                  >
+                    {ContactTypeLiterals.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    aria-label="Value"
+                    className="col-span-5 rounded-md border px-3 py-2"
+                    placeholder="e.g., +20123…, @username, link"
+                    value={c.value}
+                    onChange={(ev) => {
+                      const arr = [...(form.contacts || [])];
+                      arr[i] = { ...arr[i], value: ev.target.value };
+                      update("contacts", arr);
+                    }}
+                  />
+                  <select
+                    aria-label="Visibility"
+                    className="col-span-2 rounded-md border px-3 py-2"
+                    value={c.visibility}
+                    onChange={(ev) => {
+                      const arr = [...(form.contacts || [])];
+                      arr[i] = {
+                        ...arr[i],
+                        visibility: ev.target
+                          .value as GuestProfileV2DTO["contacts"][number]["visibility"],
+                      };
+                      update("contacts", arr);
+                    }}
+                  >
+                    {ContactVisibilityLiterals.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="col-span-2 rounded-md border px-3 py-2"
+                    onClick={() => {
+                      const arr = [...(form.contacts || [])];
+                      arr.splice(i, 1);
+                      update("contacts", arr);
+                    }}
+                    aria-label="Remove contact"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              {(form.contacts || []).length === 0 ? (
+                <p className="text-xs text-gray-500">No contacts yet.</p>
+              ) : null}
+            </div>
+          </div>
+        </section>
 
-            <label className="flex flex-col gap-1">
-              <span className="text-sm">Phone (private)</span>
+        {/* Visibility flags */}
+        <section>
+          <Section title="Visibility" />
+          <div className="flex items-center gap-6">
+            <label className="inline-flex items-center gap-2">
               <input
-                className="rounded-lg border p-2"
-                value={state.phone}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, phone: e.target.value }))
-                }
-                placeholder="+20…"
-                inputMode="tel"
+                type="checkbox"
+                checked={!!form.listedPublic}
+                onChange={(e) => update("listedPublic", e.target.checked)}
               />
+              <span className="text-sm">List my profile publicly</span>
             </label>
-
-            <label className="md:col-span-2 flex flex-col gap-1">
-              <span className="text-sm">Fee note (private)</span>
-              <textarea
-                className="min-h-[72px] rounded-lg border p-2"
-                value={state.feeNote}
-                onChange={(e) =>
-                  setState((s) => ({ ...s, feeNote: e.target.value }))
-                }
-                placeholder="Optional range, constraints, or billing instructions."
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={!!form.inviteable}
+                onChange={(e) => update("inviteable", e.target.checked)}
               />
+              <span className="text-sm">Allow booking invites</span>
             </label>
           </div>
         </section>
 
-        {/* Footer actions */}
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-gray-500">
-            Tip: Equipment quality is parked (dropped for now). Availability is
-            managed via calendar & bookings.
-          </p>
+        <div className="pt-2 flex items-center gap-3">
           <button
             type="submit"
-            //disabled={disabled}
-            className="rounded-2xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+            className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+            disabled={
+              status.kind === "loading" ||
+              status.kind === "saving" ||
+              uploadingHeadshot
+            }
           >
-            {saving ? "Saving…" : "Save changes"}
+            {status.kind === "saving" ? "Saving…" : "Save changes"}
           </button>
+          <span className="text-xs text-gray-500">
+            All fields are optional; empty ones are hidden on your profile.
+          </span>
         </div>
       </form>
-      {saveNotice && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed bottom-4 right-4 z-50 rounded-lg bg-green-600 px-3 py-2 text-sm text-white shadow-lg"
-        >
-          {saveNotice}
-        </div>
-      )}
     </main>
   );
 }
