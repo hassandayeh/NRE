@@ -56,6 +56,22 @@ function toIso(d: unknown): string | undefined {
   return undefined;
 }
 
+function parseYear(input: unknown): number | null {
+  // Accepts 2024 or 2024-06 (UI can send YYYY or YYYY-MM)
+  if (typeof input === "number" && Number.isFinite(input)) {
+    const y = Math.trunc(input);
+    return y >= 1900 && y <= 3000 ? y : null;
+  }
+  if (typeof input === "string") {
+    const m = input.trim().match(/^(\d{4})(?:-(\d{2}))?$/);
+    if (m) {
+      const y = parseInt(m[1], 10);
+      return y >= 1900 && y <= 3000 ? y : null;
+    }
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session || !(session as any)?.user) {
@@ -188,20 +204,23 @@ export async function POST(req: NextRequest) {
     })) ?? [];
 
   const pubRows =
-    dto.publications?.map((p) => ({
-      title: p.title,
-      outlet: p.outlet ?? null,
-      year: typeof p.year === "number" ? p.year : null,
-      url: p.url ?? null,
+    dto.publications?.map((p: any) => ({
+      title: p?.title,
+      // UI uses "outlet" already — keep; if future UI sends "publisher", ignore for now.
+      outlet: (p?.outlet ?? null) || null,
+      // Accept either DTO.year (number) or UI.date (YYYY / YYYY-MM string)
+      year: parseYear((p?.year as any) ?? (p?.date as any)),
+      url: p?.url ?? null,
     })) ?? [];
 
   const mediaRows =
-    dto.media?.map((m) => ({
-      title: m.title,
-      outlet: m.outlet ?? null,
-      date: m.date ? new Date(m.date) : null,
-      url: m.url ?? null,
-      type: (m.type as any) ?? null,
+    dto.media?.map((m: any) => ({
+      title: m?.title,
+      // UI sends "network"; DB/model uses "outlet" — accept either
+      outlet: (m?.outlet ?? m?.network ?? null) || null,
+      date: m?.date ? new Date(m.date) : null,
+      url: m?.url ?? null,
+      type: typeof m?.type === "string" ? m.type : undefined,
     })) ?? [];
 
   const addEmailRows =

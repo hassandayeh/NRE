@@ -98,7 +98,7 @@ function mapRowToDTO(row: any, session: any): GuestProfileV2DTO {
           outlet: m?.outlet ? String(m.outlet).trim() : undefined,
           date: toIso(m?.date),
           url: m?.url ? String(m.url) : undefined,
-          type: m?.type,
+          type: typeof m?.type === "string" ? m.type : undefined,
         }))
       : [];
 

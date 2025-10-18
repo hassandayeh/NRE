@@ -68,6 +68,29 @@ function mapEducationDTOToUI(
   }));
 }
 
+function mapPublicationsDTOToUI(
+  dtoRows: GuestProfileV2DTO["publications"] | undefined
+) {
+  return (dtoRows ?? []).map((p) => ({
+    title: p.title ?? "",
+    outlet: p.outlet ?? "",
+    // DTO has `year` (number); UI uses `date` (string)
+    date: typeof p.year === "number" ? String(p.year) : "",
+    url: p.url ?? "",
+  }));
+}
+
+function mapMediaDTOToUI(dtoRows: GuestProfileV2DTO["media"] | undefined) {
+  return (dtoRows ?? []).map((m) => ({
+    title: m.title ?? "",
+    // DTO has `outlet`; UI shows it as `network`
+    network: m.outlet ?? "",
+    // DTO has ISO; UI shows YYYY-MM
+    date: isoToYearMonth(m.date),
+    url: m.url ?? "",
+  }));
+}
+
 const initialForm: GuestProfileV2DTO = {
   // Identity
   displayName: "",
@@ -149,6 +172,8 @@ export default function GuestEditorPage() {
           // S4: convert DTO rows -> UI rows (key + date shape)
           experience: mapExperienceDTOToUI(dto.experience) as any,
           education: mapEducationDTOToUI(dto.education) as any,
+          publications: mapPublicationsDTOToUI(dto.publications) as any,
+          media: mapMediaDTOToUI(dto.media) as any,
         });
 
         setStatus({ kind: "idle" });
@@ -196,6 +221,10 @@ export default function GuestEditorPage() {
 
     return {
       ...src,
+      headshotUrl:
+        src.headshotUrl && src.headshotUrl.trim()
+          ? src.headshotUrl.trim()
+          : undefined,
 
       // S6 normalization
       countryCode: src.countryCode
@@ -229,6 +258,47 @@ export default function GuestEditorPage() {
           from: normDate(r.from),
           to: normDate(r.to),
         })) || [],
+
+      // S5 publications & media — map UI keys to DTO + normalize
+      publications: ((src as any).publications || []).map((p: any) => {
+        const title = (p?.title || "").trim();
+        const outlet = p?.outlet ? String(p.outlet).trim() : undefined;
+
+        // Accept YYYY or YYYY-MM (or number); convert to year:number
+        const v = (p?.date ?? p?.year) as any;
+        let year: number | undefined = undefined;
+        if (typeof v === "number" && Number.isFinite(v)) {
+          year = Math.trunc(v);
+        } else if (typeof v === "string") {
+          const s = v.trim();
+          if (/^\d{4}$/.test(s)) year = parseInt(s, 10);
+          else if (/^\d{4}-\d{2}$/.test(s)) year = parseInt(s.slice(0, 4), 10);
+        }
+
+        const urlStr = (p?.url || "").trim();
+        const url = urlStr ? urlStr : undefined; // drop empty string
+
+        return { title, outlet, year, url };
+      }),
+
+      media: ((src as any).media || []).map((m: any) => {
+        const title = (m?.title || "").trim();
+        // UI uses `network`; DTO uses `outlet`
+        const outlet = m?.outlet
+          ? String(m.outlet).trim()
+          : m?.network
+          ? String(m.network).trim()
+          : undefined;
+
+        const date = normDate(m?.date); // ISO or undefined
+
+        const urlStr = (m?.url || "").trim();
+        const url = urlStr ? urlStr : undefined; // drop empty string
+
+        const type = (m?.type as any) || undefined;
+
+        return { title, outlet, date, url, type };
+      }),
 
       // S7 contacts
       additionalEmails: (src.additionalEmails || []).map((e) => ({
@@ -962,6 +1032,216 @@ export default function GuestEditorPage() {
             >
               + Add education
             </button>
+          </div>
+        </section>
+
+        {/* Publications & Media */}
+        <section>
+          <Section
+            title="Publications & media"
+            subtitle="Articles, op-eds, books, and TV/radio/online appearances."
+          />
+
+          {/* Publications */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Publications</span>
+              <button
+                type="button"
+                onClick={() =>
+                  update("publications", [
+                    ...(form.publications || []),
+                    { title: "", outlet: "", date: "", url: "" } as any,
+                  ])
+                }
+                className="text-sm px-2 py-1 rounded-md border"
+              >
+                + Add publication
+              </button>
+            </div>
+
+            <div className="mt-2 space-y-2">
+              {((form.publications as any[]) || []).map((p: any, i: number) => (
+                <div key={i} className="grid gap-2 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Title</span>
+                    <input
+                      value={(p?.title ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.publications as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), title: e.target.value };
+                        update("publications", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Elections and Energy Markets"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Outlet / Publisher</span>
+                    <input
+                      value={(p?.outlet ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.publications as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), outlet: e.target.value };
+                        update("publications", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Foreign Affairs"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Date</span>
+                    <input
+                      value={(p?.date ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.publications as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), date: e.target.value };
+                        update("publications", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., 2024 or 2024-06"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">URL</span>
+                    <input
+                      value={(p?.url ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.publications as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), url: e.target.value };
+                        update("publications", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="https://…"
+                    />
+                  </label>
+
+                  <div className="md:col-span-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const arr = [...((form.publications as any[]) || [])];
+                        arr.splice(i, 1);
+                        update("publications", arr as any);
+                      }}
+                      className="rounded-md border px-3 py-1.5 text-sm"
+                      aria-label={`Remove publication row ${i + 1}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              {((form.publications as any[]) || []).length === 0 ? (
+                <p className="text-xs text-gray-500">No publications yet.</p>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Media appearances */}
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Media appearances</span>
+              <button
+                type="button"
+                onClick={() =>
+                  update("media", [
+                    ...(form.media || []),
+                    { title: "", network: "", date: "", url: "" } as any,
+                  ])
+                }
+                className="text-sm px-2 py-1 rounded-md border"
+              >
+                + Add appearance
+              </button>
+            </div>
+
+            <div className="mt-2 space-y-2">
+              {((form.media as any[]) || []).map((m: any, i: number) => (
+                <div key={i} className="grid gap-2 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Title</span>
+                    <input
+                      value={(m?.title ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.media as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), title: e.target.value };
+                        update("media", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Interview on election night"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Network / Program</span>
+                    <input
+                      value={(m?.network ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.media as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), network: e.target.value };
+                        update("media", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., BBC World"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Date</span>
+                    <input
+                      value={(m?.date ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.media as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), date: e.target.value };
+                        update("media", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., 2023-11"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="text-gray-700">URL</span>
+                    <input
+                      value={(m?.url ?? "") as string}
+                      onChange={(e) => {
+                        const arr = [...((form.media as any[]) || [])];
+                        arr[i] = { ...(arr[i] ?? {}), url: e.target.value };
+                        update("media", arr as any);
+                      }}
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="https://…"
+                    />
+                  </label>
+
+                  <div className="md:col-span-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const arr = [...((form.media as any[]) || [])];
+                        arr.splice(i, 1);
+                        update("media", arr as any);
+                      }}
+                      className="rounded-md border px-3 py-1.5 text-sm"
+                      aria-label={`Remove appearance row ${i + 1}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              {((form.media as any[]) || []).length === 0 ? (
+                <p className="text-xs text-gray-500">
+                  No media appearances yet.
+                </p>
+              ) : null}
+            </div>
           </div>
         </section>
 
