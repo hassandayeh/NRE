@@ -30,6 +30,7 @@ function getGuestProfileId(session: unknown): string | null {
   const u = getUser(session);
   return u?.guestProfileId || null;
 }
+
 function fallbackDisplay(session: any): string {
   return (
     session?.user?.name ||
@@ -194,6 +195,7 @@ export async function GET(_req: NextRequest) {
     (prisma as any).guestProfileV2 ||
     (prisma as any).GuestProfile ||
     null;
+
   if (!repo) {
     return json(500, {
       ok: false,
@@ -202,68 +204,69 @@ export async function GET(_req: NextRequest) {
     });
   }
 
-  // Try a few safe lookups. Any can fail if the column doesn't exist in a given env.
+  // 1) Load the parent row WITHOUT includes (avoid relation-name brittleness)
   let row: any = null;
   try {
     if (gpId) {
-      try {
-        row = await repo.findUnique({
-          where: { id: gpId },
-          include: {
-            languages: true,
-            experience: true,
-            education: true,
-            publications: true,
-            media: true,
-            additionalEmails: true,
-            contacts: true,
-          },
-        });
-      } catch {
-        row = await repo.findUnique({ where: { id: gpId } });
-      }
+      row = await repo.findUnique({ where: { id: gpId } });
     }
     if (!row && user?.email) {
-      try {
-        row = await repo.findFirst({
-          where: { personalEmail: user.email },
-          include: {
-            languages: true,
-            experience: true,
-            education: true,
-            publications: true,
-            media: true,
-            additionalEmails: true,
-            contacts: true,
-          },
-        });
-      } catch {}
+      row = await repo.findFirst({ where: { personalEmail: user.email } });
     }
     if (!row && userId) {
-      // Legacy schemas sometimes had userId on the profile
+      // legacy setups may still have userId on profile
       try {
-        row = await repo.findUnique({
-          where: { userId },
-          include: {
-            languages: true,
-            experience: true,
-            education: true,
-            publications: true,
-            media: true,
-            additionalEmails: true,
-            contacts: true,
-          },
-        });
+        row = await repo.findUnique({ where: { userId } });
       } catch {
-        try {
-          row = await repo.findFirst({ where: { userId } });
-        } catch {}
+        row = await repo.findFirst({ where: { userId } });
       }
     }
   } catch {
-    // ignore; we'll fall back
+    // ignore; we'll fall back to defaults below
   }
 
+  // 2) If we found a row, fetch child records per table (best-effort)
+  if (row?.id) {
+    const p = prisma as any;
+
+    try {
+      row.languages = await p.guestLanguage.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.experience = await p.guestExperience.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.education = await p.guestEducation.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.publications = await p.guestPublication.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.media = await p.guestMediaAppearance.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.additionalEmails = await p.guestAdditionalEmail.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+    try {
+      row.contacts = await p.guestContactMethod.findMany({
+        where: { profileId: row.id },
+      });
+    } catch {}
+  }
+
+  // 3) Build DTO (or defaults)
   const candidate: GuestProfileV2DTO = row
     ? mapRowToDTO(row, session)
     : {
@@ -297,8 +300,8 @@ export async function GET(_req: NextRequest) {
   try {
     const dto = validateGuestProfileV2(candidate);
     return json(200, { ok: true, profile: dto });
-  } catch (err) {
-    // If validation fails for some unexpected legacy combo, return a minimal safe baseline
+  } catch {
+    // minimal safe baseline if validation fails on legacy data
     const fallback: GuestProfileV2DTO = {
       displayName: fallbackDisplay(session),
       topicKeys: [],

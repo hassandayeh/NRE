@@ -35,6 +35,39 @@ type Status =
   | { kind: "success"; msg?: string }
   | { kind: "error"; msg: string };
 
+// ---- S4 view-model helpers: ISO -> YYYY-MM and DTO -> UI rows ----
+function isoToYearMonth(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+function mapExperienceDTOToUI(
+  dtoRows: GuestProfileV2DTO["experience"] | undefined
+) {
+  return (dtoRows ?? []).map((r) => ({
+    org: r.orgName ?? "",
+    role: r.roleTitle ?? "",
+    from: isoToYearMonth(r.from),
+    to: isoToYearMonth(r.to),
+    current: !!r.isCurrent,
+    note: "", // UI-only, not persisted
+  }));
+}
+function mapEducationDTOToUI(
+  dtoRows: GuestProfileV2DTO["education"] | undefined
+) {
+  return (dtoRows ?? []).map((r) => ({
+    institution: r.institution ?? "",
+    program: r.credential ?? "",
+    from: isoToYearMonth(r.from),
+    to: isoToYearMonth(r.to),
+    note: "", // UI-only, not persisted
+  }));
+}
+
 const initialForm: GuestProfileV2DTO = {
   // Identity
   displayName: "",
@@ -109,10 +142,15 @@ export default function GuestEditorPage() {
           profile: GuestProfileV2DTO;
         };
         if (cancelled) return;
+        const dto = data.profile;
         setForm({
           ...initialForm,
-          ...data.profile, // server already normalized
+          ...dto, // keep server-normalized fields
+          // S4: convert DTO rows -> UI rows (key + date shape)
+          experience: mapExperienceDTOToUI(dto.experience) as any,
+          education: mapEducationDTOToUI(dto.education) as any,
         });
+
         setStatus({ kind: "idle" });
       } catch (e: any) {
         if (cancelled) return;

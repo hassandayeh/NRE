@@ -135,7 +135,7 @@ export async function POST(req: NextRequest) {
     // ignore; we treat as not found
   }
 
-  // Prepare scalar/array columns (guest-owned)
+  // Prepare scalar/array columns (guest-owned, all exist in schema)
   const scalars = {
     displayName: dto.displayName ?? null,
     honorific: dto.honorific ?? null,
@@ -162,6 +162,7 @@ export async function POST(req: NextRequest) {
       typeof dto.inviteable === "boolean" ? dto.inviteable : undefined,
   } as const;
 
+  // Child rows prepared from DTO
   const langRows =
     dto.languages?.map((l) => ({
       isoCode: l.isoCode,
@@ -221,94 +222,102 @@ export async function POST(req: NextRequest) {
   const prevAvatarUrl = existing?.avatarUrl || null;
   const nextAvatarUrl = dto.headshotUrl ?? null;
 
-  try {
-    // helper: apply writes for an existing profileId (update + replace children)
-    const applyWrites = async (tx: any, profileId: string) => {
-      await tx.guestProfile.update({
+  // Helper to build a non-interactive batch for atomic replace
+  const buildOps = (profileId: string) => {
+    const p = prisma as any; // use 'any' to avoid TS mismatches if client isn't regenerated yet
+    const ops: any[] = [
+      p.guestProfile.update({
         where: { id: profileId },
         data: { ...scalars },
-      });
+      }),
+      p.guestLanguage.deleteMany({ where: { profileId } }),
+      p.guestExperience.deleteMany({ where: { profileId } }),
+      p.guestEducation.deleteMany({ where: { profileId } }),
+      p.guestPublication.deleteMany({ where: { profileId } }),
+      p.guestMediaAppearance.deleteMany({ where: { profileId } }),
+      p.guestAdditionalEmail.deleteMany({ where: { profileId } }),
+      p.guestContactMethod.deleteMany({ where: { profileId } }),
+    ];
 
-      // Replace children
-      await tx.guestLanguage.deleteMany({ where: { profileId } });
-      await tx.guestExperience.deleteMany({ where: { profileId } });
-      await tx.guestEducation.deleteMany({ where: { profileId } });
-      await tx.guestPublication.deleteMany({ where: { profileId } });
-      await tx.guestMediaAppearance.deleteMany({ where: { profileId } });
-      await tx.guestAdditionalEmail.deleteMany({ where: { profileId } });
-      await tx.guestContactMethod.deleteMany({ where: { profileId } });
+    if (langRows.length) {
+      ops.push(
+        p.guestLanguage.createMany({
+          data: langRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (expRows.length) {
+      ops.push(
+        p.guestExperience.createMany({
+          data: expRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (eduRows.length) {
+      ops.push(
+        p.guestEducation.createMany({
+          data: eduRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (pubRows.length) {
+      ops.push(
+        p.guestPublication.createMany({
+          data: pubRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (mediaRows.length) {
+      ops.push(
+        p.guestMediaAppearance.createMany({
+          data: mediaRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (addEmailRows.length) {
+      ops.push(
+        p.guestAdditionalEmail.createMany({
+          data: addEmailRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
+    if (contactRows.length) {
+      ops.push(
+        p.guestContactMethod.createMany({
+          data: contactRows.map((r: any) => ({ ...r, profileId })),
+        })
+      );
+    }
 
-      if (langRows.length) {
-        await tx.guestLanguage.createMany({
-          data: langRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (expRows.length) {
-        await tx.guestExperience.createMany({
-          data: expRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (eduRows.length) {
-        await tx.guestEducation.createMany({
-          data: eduRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (pubRows.length) {
-        await tx.guestPublication.createMany({
-          data: pubRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (mediaRows.length) {
-        await tx.guestMediaAppearance.createMany({
-          data: mediaRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (addEmailRows.length) {
-        await tx.guestAdditionalEmail.createMany({
-          data: addEmailRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      if (contactRows.length) {
-        await tx.guestContactMethod.createMany({
-          data: contactRows.map((r) => ({ ...r, profileId })),
-        });
-      }
-      return { profileId };
-    };
+    return ops;
+  };
 
-    // First attempt in a transaction
-    const result = await prisma.$transaction(async (tx: any) => {
-      // Prefer ID from session/existing lookup
-      let profileId = existing?.id as string | undefined;
+  try {
+    // 1) Resolve or create the profile record
+    let profileId = existing?.id as string | undefined;
 
-      // If not found by id, try by email inside the tx (fresh read)
-      if (!profileId && email) {
-        const byEmail = await tx.guestProfile.findFirst({
-          where: { personalEmail: email },
-          select: { id: true },
-        });
-        if (byEmail?.id) profileId = byEmail.id;
-      }
-
-      if (profileId) {
-        return applyWrites(tx, profileId);
-      }
-
-      // Create if still missing (email is required at this point)
-      if (!email) {
-        throw new Error("Cannot create profile without a personal email");
-      }
-      const created = await tx.guestProfile.create({
-        data: {
-          personalEmail: email,
-          ...scalars,
-        },
+    if (!profileId && email) {
+      const byEmail = await (prisma as any).guestProfile.findFirst({
+        where: { personalEmail: email },
         select: { id: true },
       });
-      return applyWrites(tx, created.id);
-    });
+      if (byEmail?.id) profileId = byEmail.id as string;
+    }
 
-    // Best-effort blob cleanup if the avatar changed or was removed
+    if (!profileId) {
+      if (!email)
+        throw new Error("Cannot create profile without a personal email");
+      const created = await (prisma as any).guestProfile.create({
+        data: { personalEmail: email, ...scalars },
+        select: { id: true },
+      });
+      profileId = created.id as string;
+    }
+
+    // 2) Atomic replace of parent + children (no interactive tx)
+    await prisma.$transaction(buildOps(profileId));
+
+    // 3) Best-effort blob cleanup if the avatar changed or was removed
     try {
       if (prevAvatarUrl && prevAvatarUrl !== nextAvatarUrl) {
         const key = keyFromBlobUrl(prevAvatarUrl);
@@ -332,66 +341,8 @@ export async function POST(req: NextRequest) {
           select: { id: true },
         });
         if (found?.id) {
-          await prisma.$transaction(async (tx: any) => {
-            await (async () => {
-              const profileId = found.id as string;
-              // reuse the same write logic as above
-              await tx.guestProfile.update({
-                where: { id: profileId },
-                data: { ...scalars },
-              });
-
-              await tx.guestLanguage.deleteMany({ where: { profileId } });
-              await tx.guestExperience.deleteMany({ where: { profileId } });
-              await tx.guestEducation.deleteMany({ where: { profileId } });
-              await tx.guestPublication.deleteMany({ where: { profileId } });
-              await tx.guestMediaAppearance.deleteMany({
-                where: { profileId },
-              });
-              await tx.guestAdditionalEmail.deleteMany({
-                where: { profileId },
-              });
-              await tx.guestContactMethod.deleteMany({ where: { profileId } });
-
-              if (langRows.length) {
-                await tx.guestLanguage.createMany({
-                  data: langRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (expRows.length) {
-                await tx.guestExperience.createMany({
-                  data: expRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (eduRows.length) {
-                await tx.guestEducation.createMany({
-                  data: eduRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (pubRows.length) {
-                await tx.guestPublication.createMany({
-                  data: pubRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (mediaRows.length) {
-                await tx.guestMediaAppearance.createMany({
-                  data: mediaRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (addEmailRows.length) {
-                await tx.guestAdditionalEmail.createMany({
-                  data: addEmailRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-              if (contactRows.length) {
-                await tx.guestContactMethod.createMany({
-                  data: contactRows.map((r) => ({ ...r, profileId })),
-                });
-              }
-            })();
-          });
-
-          // success on retry
+          const profileId = found.id as string;
+          await prisma.$transaction(buildOps(profileId));
           return json(200, { ok: true, profile: dto });
         }
       } catch (retryErr) {
