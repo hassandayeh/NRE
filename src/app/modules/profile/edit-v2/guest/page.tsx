@@ -140,20 +140,59 @@ export default function GuestEditorPage() {
       .map((x) => x.trim())
       .filter(Boolean);
 
-  // Build normalized payload (client-side) matching DTO
+  // Build normalized payload (client-side) matching DTO (server schema)
   function buildPayload(next?: GuestProfileV2DTO): GuestProfileV2DTO {
     const src = next ?? form;
+
+    // Accept YYYY or YYYY-MM or YYYY-MM-DD or full ISO; return RFC-3339
+    const normDate = (v?: string) => {
+      const s = (v || "").trim();
+      if (!s) return undefined;
+      let candidate = s;
+      if (/^\d{4}$/.test(s)) candidate = `${s}-01-01`;
+      else if (/^\d{4}-\d{2}$/.test(s)) candidate = `${s}-01`;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) candidate += "T00:00:00Z";
+      const d = new Date(candidate);
+      return isNaN(d.getTime()) ? undefined : d.toISOString();
+    };
+
     return {
       ...src,
+
+      // S6 normalization
       countryCode: src.countryCode
         ? src.countryCode.trim().toUpperCase()
         : undefined,
       regionCodes: (src.regionCodes || []).map((r) => r.trim().toUpperCase()),
       topicKeys: (src.topicKeys || []).map((t) => t.trim()).filter(Boolean),
+
+      // S3 languages
       languages: (src.languages || []).map((l) => ({
-        isoCode: l.isoCode.trim().toLowerCase(),
+        isoCode: (l.isoCode || "").trim().toLowerCase(),
         level: l.level,
       })),
+
+      // S4 experience -> map UI keys to DTO keys (drop 'note')
+      experience:
+        (src as any).experience?.map((r: any) => ({
+          orgName: (r.org || "").trim(),
+          roleTitle: r.role ? String(r.role).trim() : undefined,
+          from: normDate(r.from),
+          to: normDate(r.to),
+          isCurrent: !!r.current,
+        })) || [],
+
+      // S4 education -> map UI keys to DTO keys (program -> credential, drop 'note')
+      education:
+        (src as any).education?.map((r: any) => ({
+          institution: (r.institution || "").trim(),
+          credential: r.program ? String(r.program).trim() : undefined,
+          fieldOfStudy: undefined, // not collected in this slice
+          from: normDate(r.from),
+          to: normDate(r.to),
+        })) || [],
+
+      // S7 contacts
       additionalEmails: (src.additionalEmails || []).map((e) => ({
         email: e.email.trim().toLowerCase(),
         visibility: e.visibility,
@@ -165,6 +204,69 @@ export default function GuestEditorPage() {
         visibility: c.visibility,
       })),
     };
+  }
+
+  // ---- S4 helpers: experience/education array updaters (UI-only) ----
+  type ExpItem = {
+    org?: string;
+    role?: string;
+    from?: string; // YYYY-MM or YYYY
+    to?: string; // YYYY-MM or YYYY
+    current?: boolean;
+    note?: string;
+  };
+  type EduItem = {
+    institution?: string;
+    program?: string; // degree/cert
+    from?: string; // YYYY or YYYY-MM
+    to?: string; // YYYY or YYYY-MM
+    note?: string;
+  };
+
+  const blankExp: ExpItem = {
+    org: "",
+    role: "",
+    from: "",
+    to: "",
+    current: false,
+    note: "",
+  };
+  const blankEdu: EduItem = {
+    institution: "",
+    program: "",
+    from: "",
+    to: "",
+    note: "",
+  };
+
+  function addRow<K extends "experience" | "education">(key: K) {
+    setForm((f) => ({
+      ...f,
+      [key]: [
+        ...(f as any)[key],
+        key === "experience" ? { ...blankExp } : { ...blankEdu },
+      ] as any,
+    }));
+  }
+  function removeRow<K extends "experience" | "education">(
+    key: K,
+    index: number
+  ) {
+    setForm((f) => {
+      const arr = ([...(f as any)[key]] as any[]).filter((_, i) => i !== index);
+      return { ...f, [key]: arr as any };
+    });
+  }
+  function patchRow<K extends "experience" | "education">(
+    key: K,
+    index: number,
+    patch: Record<string, unknown>
+  ) {
+    setForm((f) => {
+      const arr = [...((f as any)[key] as any[])];
+      arr[index] = { ...(arr[index] ?? {}), ...patch };
+      return { ...f, [key]: arr as any };
+    });
   }
 
   // Save NOW (used by upload/remove flows and the form submit)
@@ -277,29 +379,8 @@ export default function GuestEditorPage() {
     e.preventDefault();
     setStatus({ kind: "saving" });
 
-    // Client-side normalization: keep it light, server will validate again
-    const payload: GuestProfileV2DTO = {
-      ...form,
-      countryCode: form.countryCode
-        ? form.countryCode.trim().toUpperCase()
-        : undefined,
-      regionCodes: (form.regionCodes || []).map((r) => r.trim().toUpperCase()),
-      topicKeys: (form.topicKeys || []).map((t) => t.trim()).filter(Boolean),
-      languages: (form.languages || []).map((l) => ({
-        isoCode: l.isoCode.trim().toLowerCase(),
-        level: l.level,
-      })),
-      additionalEmails: (form.additionalEmails || []).map((e) => ({
-        email: e.email.trim().toLowerCase(),
-        visibility: e.visibility,
-        verified: e.verified, // server stamps time if true
-      })),
-      contacts: (form.contacts || []).map((c) => ({
-        type: c.type,
-        value: c.value.trim(),
-        visibility: c.visibility,
-      })),
-    };
+    // Build the exact DTO shape the server expects (incl. S4 mapping)
+    const payload = buildPayload(form);
 
     // Optional Zod check on client for instant feedback
     const parsed = safeParseGuestProfileV2(payload);
@@ -631,6 +712,218 @@ export default function GuestEditorPage() {
                 <p className="text-xs text-gray-500">No languages yet.</p>
               ) : null}
             </div>
+          </div>
+        </section>
+
+        {/* Experience & Credentials */}
+        <section>
+          <Section
+            title="Experience"
+            subtitle="Your affiliations and past roles. Add the most relevant items first."
+          />
+
+          {(form.experience?.length ?? 0) === 0 ? (
+            <div className="rounded-md border p-3 text-sm text-gray-600">
+              No experience added yet.
+            </div>
+          ) : null}
+
+          <div className="space-y-4 mt-2">
+            {(form.experience as any[]).map((row, i) => (
+              <div key={i} className="rounded-xl border p-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Organization</span>
+                    <input
+                      value={(row?.org ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("experience", i, { org: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., XYZ Institute"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Role / Title</span>
+                    <input
+                      value={(row?.role ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("experience", i, { role: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Senior Fellow"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">From</span>
+                    <input
+                      value={(row?.from ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("experience", i, { from: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., 2021-06"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">To</span>
+                    <input
+                      value={(row?.to ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("experience", i, { to: e.target.value })
+                      }
+                      disabled={!!row?.current}
+                      className="mt-1 w-full rounded-md border px-3 py-2 disabled:bg-gray-100"
+                      placeholder="e.g., 2024-01"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={!!row?.current}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        patchRow("experience", i, {
+                          current: checked,
+                          to: checked ? "" : row?.to ?? "",
+                        });
+                      }}
+                    />
+                    <span>Current</span>
+                  </label>
+                  <label className="block text-sm md:col-span-2">
+                    <span className="text-gray-700">Note (optional)</span>
+                    <input
+                      value={(row?.note ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("experience", i, { note: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="Team lead, managed 5 researchers…"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => removeRow("experience", i)}
+                    className="rounded-md border px-3 py-1.5 text-sm"
+                    aria-label={`Remove experience row ${i + 1}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => addRow("experience")}
+              className="rounded-md border px-3 py-1.5 text-sm"
+            >
+              + Add experience
+            </button>
+          </div>
+        </section>
+
+        <section>
+          <Section
+            title="Education & Certifications"
+            subtitle="Schools, degrees, and certifications."
+          />
+
+          {(form.education?.length ?? 0) === 0 ? (
+            <div className="rounded-md border p-3 text-sm text-gray-600">
+              No education added yet.
+            </div>
+          ) : null}
+
+          <div className="space-y-4 mt-2">
+            {(form.education as any[]).map((row, i) => (
+              <div key={i} className="rounded-xl border p-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Institution</span>
+                    <input
+                      value={(row?.institution ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("education", i, {
+                          institution: e.target.value,
+                        })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., University of X"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">Program / Degree</span>
+                    <input
+                      value={(row?.program ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("education", i, { program: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., MA International Relations"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">From</span>
+                    <input
+                      value={(row?.from ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("education", i, { from: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., 2019"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-gray-700">To</span>
+                    <input
+                      value={(row?.to ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("education", i, { to: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., 2021"
+                    />
+                  </label>
+                  <label className="block text-sm md:col-span-2">
+                    <span className="text-gray-700">Note (optional)</span>
+                    <input
+                      value={(row?.note ?? "") as string}
+                      onChange={(e) =>
+                        patchRow("education", i, { note: e.target.value })
+                      }
+                      className="mt-1 w-full rounded-md border px-3 py-2"
+                      placeholder="Thesis, honors, certification ID…"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => removeRow("education", i)}
+                    className="rounded-md border px-3 py-1.5 text-sm"
+                    aria-label={`Remove education row ${i + 1}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => addRow("education")}
+              className="rounded-md border px-3 py-1.5 text-sm"
+            >
+              + Add education
+            </button>
           </div>
         </section>
 

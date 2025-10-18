@@ -139,6 +139,7 @@ function mapRowToDTO(row: any, session: any): GuestProfileV2DTO {
     displayName: row?.displayName || fallbackDisplay(session),
     nativeName: row?.nativeName || undefined,
     pronouns: row?.pronouns || undefined,
+    honorific: row?.honorific || undefined,
 
     // Headline & Summary
     headline: row?.headline || undefined,
@@ -270,6 +271,7 @@ export async function GET(_req: NextRequest) {
         displayName: fallbackDisplay(session),
         nativeName: "",
         pronouns: undefined,
+        honorific: undefined,
         headline: "",
         shortBio: "",
         fullBio: "",
