@@ -24,7 +24,7 @@ import {
  * Endpoints:
  *  - GET  /api/profile/guest/me
  *  - POST /api/profile/guest/update
- *  - POST /api/uploads/profile-photo (multipart; returns { ok, url })
+ *  - POST /api/uploads/profile-photo (multipart; returns { ok, url, bust }; auto-saves DB)
  *  - DELETE /api/uploads/profile-photo (deletes current blob)
  */
 
@@ -96,7 +96,7 @@ const initialForm: GuestProfileV2DTO = {
   displayName: "",
   nativeName: "",
   pronouns: undefined,
-  headshotUrl: "",
+  headshotUrl: undefined,
 
   // Headline & Summary
   headline: "",
@@ -151,6 +151,7 @@ export default function GuestEditorPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingHeadshot, setUploadingHeadshot] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [headshotBroken, setHeadshotBroken] = useState(false);
 
   // Load
   useEffect(() => {
@@ -190,6 +191,11 @@ export default function GuestEditorPage() {
       cancelled = true;
     };
   }, []);
+
+  // Reset broken flag whenever the headshot url changes (e.g., after upload/remove)
+  useEffect(() => {
+    setHeadshotBroken(false);
+  }, [form.headshotUrl]);
 
   // Helpers
   const update = <K extends keyof GuestProfileV2DTO>(
@@ -413,7 +419,7 @@ export default function GuestEditorPage() {
     fileInputRef.current?.click();
   }
 
-  // Headshot: upload to Blob (auto-saves new url)
+  // Headshot: upload to Blob (server auto-saves; client just refreshes preview)
   async function onHeadshotSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.currentTarget.value = ""; // allow re-picking same file
@@ -440,43 +446,53 @@ export default function GuestEditorPage() {
         method: "POST",
         body: fd,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        throw new Error(err?.message || `Upload failed (${res.status})`);
-      }
-      const data = (await res.json()) as
-        | { ok: true; url: string }
-        | { ok: false; message: string };
-      if ((data as any).ok !== true || !(data as any).url) {
-        throw new Error((data as any).message || "Upload failed");
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.ok || !payload?.url) {
+        throw new Error(payload?.message || `Upload failed (${res.status})`);
       }
 
+      // Cache-bust because the path is deterministic (same URL path)
+      const bust = typeof payload.bust === "number" ? payload.bust : Date.now();
       const next = {
         ...form,
-        headshotUrl: (data as any).url,
+        headshotUrl: `${payload.url}?v=${bust}`,
       } as GuestProfileV2DTO;
+
+      // Server already saved avatarUrl; we only refresh local state for preview
       setForm(next);
-      await saveNow(next); // persist immediately
+      setStatus({ kind: "success", msg: "Photo updated" });
+      setHeadshotBroken(false);
     } catch (err: any) {
       setUploadError(err?.message || "Upload failed");
+      setStatus({ kind: "error", msg: err?.message || "Upload failed" });
     } finally {
       setUploadingHeadshot(false);
     }
   }
 
-  // Headshot: remove from Blob (auto-saves cleared url)
+  // Headshot: remove from Blob (server auto-clears DB; client clears preview)
   async function removeHeadshot() {
     try {
       setUploadError(null);
       setUploadingHeadshot(true);
 
-      await fetch("/api/uploads/profile-photo", { method: "DELETE" });
+      const res = await fetch("/api/uploads/profile-photo", {
+        method: "DELETE",
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.ok) {
+        throw new Error(payload?.message || `Delete failed (${res.status})`);
+      }
 
-      const next = { ...form, headshotUrl: "" } as GuestProfileV2DTO;
+      // Clear locally; server already cleared avatarUrl
+      const next = { ...form, headshotUrl: undefined } as GuestProfileV2DTO;
       setForm(next);
-      await saveNow(next);
+      setHeadshotBroken(false);
+
+      setStatus({ kind: "success", msg: "Photo removed" });
     } catch (e: any) {
       setUploadError(e?.message || "Failed to remove photo");
+      setStatus({ kind: "error", msg: e?.message || "Failed to remove photo" });
     } finally {
       setUploadingHeadshot(false);
     }
@@ -549,12 +565,13 @@ export default function GuestEditorPage() {
             {/* Headshot */}
             <div className="flex items-start gap-4">
               <div className="w-20 h-20 rounded-full overflow-hidden border bg-white">
-                {form.headshotUrl ? (
+                {form.headshotUrl && !headshotBroken ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={form.headshotUrl}
                     alt="Headshot preview"
                     className="w-full h-full object-cover"
+                    onError={() => setHeadshotBroken(true)}
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">
@@ -585,8 +602,9 @@ export default function GuestEditorPage() {
                   ) : null}
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  JPG/PNG, up to 5MB. Stored via Blob.
+                  JPG/PNG, up to 5MB. Saved automatically.
                 </p>
+
                 {uploadError ? (
                   <p className="text-xs text-red-600 mt-1">{uploadError}</p>
                 ) : null}

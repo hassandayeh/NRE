@@ -294,7 +294,7 @@ export async function GET(_req: NextRequest) {
         contacts: [],
         listedPublic: false,
         inviteable: false,
-        headshotUrl: "",
+        headshotUrl: undefined,
       };
 
   try {
@@ -319,7 +319,7 @@ export async function GET(_req: NextRequest) {
       timezone: "Africa/Cairo",
       listedPublic: false,
       inviteable: false,
-      headshotUrl: "",
+      headshotUrl: undefined,
     };
     return json(200, { ok: true, profile: fallback });
   }
