@@ -629,3 +629,17 @@ model OrganizationDomain {
   @@unique([orgId, domain]) // unique per org
   @@index([domain])
 }
+
+/// Per-org internal notes on a guest’s public profile (MVP).
+/// We keep org/guest/user as strings to avoid coupling to existing relations.
+model OrgGuestNote {
+  id           String   @id @default(cuid())
+  orgId        String   // organization that owns this note
+  guestId      String   // the public guest profile this note is attached to
+  authorUserId String   // staff user id who posted the note
+  authorName   String?  // cached display name for convenience
+  body         String   // note text (markdown/plain)
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, guestId, createdAt])
+}

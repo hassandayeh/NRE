@@ -12,26 +12,43 @@ export const runtime = "nodejs";
 // Cache lightly so public loads fast but stays fresh after edits.
 export const revalidate = 300; // 5 minutes
 
-type Params = { params: { guestId: string } };
+type PageProps = {
+  params: { guestId: string };
+  searchParams?: Record<string, string | string[] | undefined>;
+};
 
-export default async function PublicGuestProfilePage({ params }: Params) {
+export default async function PublicGuestProfilePage({
+  params,
+  searchParams,
+}: PageProps) {
   const guestId = params.guestId;
 
   const res = await getGuestPublic(guestId);
   if (!res.ok) return notFound();
 
-  // Overlay needs orgId if the viewer is an org member (stub UI).
+  // Prefer orgId from query (?orgId=...), fallback to session org.
+  const qOrgRaw = searchParams?.orgId;
+  const qOrgId =
+    typeof qOrgRaw === "string"
+      ? qOrgRaw
+      : Array.isArray(qOrgRaw)
+      ? qOrgRaw[0]
+      : "";
+
   const session = await getServerSession(authOptions);
-  const orgId =
+  const sessionOrgId =
     (session as any)?.orgId ||
     (session as any)?.user?.orgId ||
     (session as any)?.user?.org?.id ||
     "";
 
+  const orgId = qOrgId || sessionOrgId || "";
+
   return (
     <GuestProfileRenderer
       profile={res.profile}
-      sidebarSlot={<OrgOverlay orgId={orgId || ""} guestId={guestId} />}
+      // Show internal notes below the profile content.
+      footerSlot={<OrgOverlay orgId={orgId} guestId={guestId} />}
     />
   );
 }
@@ -40,7 +57,11 @@ export default async function PublicGuestProfilePage({ params }: Params) {
  * Clean share cards for public profiles.
  * Uses displayName/headline; never leaks private fields.
  */
-export async function generateMetadata({ params }: Params) {
+export async function generateMetadata({
+  params,
+}: {
+  params: { guestId: string };
+}) {
   const guestId = params.guestId;
 
   const res = await getGuestPublic(guestId);

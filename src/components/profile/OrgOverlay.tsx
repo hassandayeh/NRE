@@ -3,36 +3,113 @@
 import * as React from "react";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../lib/auth";
+import { revalidatePath } from "next/cache";
+import { listNotes, createNote } from "../../lib/server/profile/notes";
 
-/**
- * Org overlay (stub)
- * Renders only for ORG accounts. Guests see nothing.
- *
- * Props kept minimal for now; we’ll expand when internal notes land.
- */
+/** Server action — adds a note and revalidates the public page. */
+async function postNoteAction(formData: FormData) {
+  "use server";
+
+  const session = await getServerSession(authOptions);
+  const viewerOrgId =
+    (session as any)?.orgId ||
+    (session as any)?.user?.orgId ||
+    (session as any)?.user?.org?.id ||
+    "";
+  if (!viewerOrgId) return;
+
+  const orgId = String(formData.get("orgId") || "") || viewerOrgId;
+  const guestId = String(formData.get("guestId") || "");
+  const body = String(formData.get("note") || "").trim();
+  if (!guestId || !body) return;
+
+  const authorUserId =
+    (session as any)?.user?.id ||
+    (session as any)?.user?.sub ||
+    (session as any)?.user?.userId ||
+    "";
+  const authorName =
+    (session as any)?.user?.name ||
+    (session as any)?.user?.displayName ||
+    (session as any)?.user?.email ||
+    null;
+
+  await createNote({ orgId, guestId, authorUserId, authorName, body });
+
+  revalidatePath(`/modules/profile/public/${guestId}`, "page");
+}
+
+/** Internal Notes (org-only). Renders via footerSlot below the profile. */
 export default async function OrgOverlay(props: {
   orgId: string;
   guestId: string;
 }) {
+  // Only org viewers may see/post notes
   const session = await getServerSession(authOptions);
-  const role =
-    (session as any)?.user?.role ||
-    (session as any)?.role ||
-    (session as any)?.user?.roles?.[0] ||
+  const viewerOrgId =
+    (session as any)?.orgId ||
+    (session as any)?.user?.orgId ||
+    (session as any)?.user?.org?.id ||
     "";
+  if (!viewerOrgId) return null;
 
-  if (role !== "org") return null;
+  const effectiveOrgId = props.orgId || viewerOrgId;
+
+  // Load existing notes from DB (newest first)
+  const notes = await listNotes(effectiveOrgId, props.guestId);
 
   return (
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-      <div className="text-sm font-medium text-amber-900">
-        Internal notes (coming soon)
+    <section aria-labelledby="internal-notes-title" className="mt-8">
+      <h2
+        id="internal-notes-title"
+        className="text-sm font-medium text-gray-900"
+      >
+        Internal notes (org-only)
+      </h2>
+
+      {/* Post form */}
+      <form action={postNoteAction} className="mt-2 space-y-2">
+        <input type="hidden" name="orgId" value={effectiveOrgId} />
+        <input type="hidden" name="guestId" value={props.guestId} />
+        <textarea
+          name="note"
+          rows={3}
+          required
+          placeholder="Write a note for your producers…"
+          className="w-full rounded-md border px-3 py-2 text-sm"
+        />
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            className="rounded-md border bg-black px-3 py-1.5 text-sm text-white hover:bg-gray-900"
+          >
+            Post
+          </button>
+        </div>
+      </form>
+
+      {/* Notes list */}
+      <div className="mt-4 space-y-3">
+        {notes.length === 0 ? (
+          <div className="text-sm text-gray-500">No notes yet.</div>
+        ) : (
+          notes.map((n) => (
+            <article key={n.id} className="rounded-md border bg-white p-3">
+              <div className="whitespace-pre-wrap text-sm text-gray-900">
+                {n.body}
+              </div>
+              <div className="mt-2 text-xs text-gray-500">
+                by{" "}
+                <span className="font-medium">{n.authorName ?? "Staff"}</span>{" "}
+                <span aria-hidden>·</span>{" "}
+                <time dateTime={n.createdAt}>
+                  {new Date(n.createdAt).toLocaleString()}
+                </time>
+              </div>
+            </article>
+          ))
+        )}
       </div>
-      <p className="mt-1 text-sm text-amber-800/90">
-        Org: <span className="font-mono">{props.orgId || "—"}</span>
-        <br />
-        Guest: <span className="font-mono">{props.guestId}</span>
-      </p>
-    </div>
+    </section>
   );
 }

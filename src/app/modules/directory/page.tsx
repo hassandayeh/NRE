@@ -79,12 +79,30 @@ function getInviteableFlag(x: OrgDirectoryItem): boolean | null {
     return x.flags.inviteable;
   return null;
 }
+
 function getListedInternalFlag(x: OrgDirectoryItem): boolean | null {
   if (typeof x.listed_internal === "boolean") return x.listed_internal;
   if (x.flags && typeof x.flags.listed_internal === "boolean")
     return x.flags.listed_internal;
   return null;
 }
+
+/** Directory → public profile helpers (shape-tolerant, no regressions) */
+function getListedPublicFlag(x: any): boolean | null {
+  if (typeof x?.listedPublic === "boolean") return x.listedPublic;
+  if (typeof x?.listed_public === "boolean") return x.listed_public;
+  if (x?.flags && typeof x.flags.listedPublic === "boolean")
+    return x.flags.listedPublic;
+  if (x?.flags && typeof x.flags.listed_public === "boolean")
+    return x.flags.listed_public;
+  return null; // unknown → treat as not public for safety
+}
+
+/** For INTERNAL rows only; we do not assume p.id === guestId */
+function getPublicGuestIdFromInternal(x: any): string | null {
+  return x?.guestId || x?.guestProfileId || null;
+}
+
 function getAvailabilityStatus(
   a: OrgDirectoryItem["availability"] | GlobalExpert["availability"]
 ): string | null {
@@ -94,6 +112,7 @@ function getAvailabilityStatus(
     return (a as any).status;
   return null;
 }
+
 function displayName(x: OrgDirectoryItem | GlobalExpert): string {
   return (
     ((x as OrgDirectoryItem).displayName as string) ||
@@ -531,12 +550,12 @@ export default function DirectoryPage() {
 
       {/* Internal tab */}
       {!loading && !error && tab === "internal" && effectiveOrgId && (
-        <DirectoryListInternal items={orgItems} />
+        <DirectoryListInternal items={orgItems} orgId={effectiveOrgId || ""} />
       )}
 
       {/* Global tab */}
       {!loading && !error && tab === "global" && effectiveOrgId && (
-        <DirectoryListGlobal items={globalItems} />
+        <DirectoryListGlobal items={globalItems} orgId={effectiveOrgId || ""} />
       )}
 
       {/* Empty states */}
@@ -576,7 +595,13 @@ export default function DirectoryPage() {
  * Lists
  * ---------------------------------------------------------------------- */
 
-function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
+function DirectoryListInternal({
+  items,
+  orgId,
+}: {
+  items: OrgDirectoryItem[];
+  orgId?: string;
+}) {
   return (
     <ul className="divide-y rounded-md border">
       {items.map((p) => {
@@ -626,13 +651,45 @@ function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
               </div>
             </div>
 
-            {/* Invite button (always enabled here; booking picker enforces rules) */}
-            <Link
-              href="#"
-              className="whitespace-nowrap rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
-            >
-              Invite
-            </Link>
+            {/* Actions: View (public) + Invite */}
+            <div className="flex items-center gap-2">
+              {(() => {
+                const listedPublic = getListedPublicFlag(p);
+                const guestId = getPublicGuestIdFromInternal(p);
+                const href =
+                  listedPublic && guestId
+                    ? `/modules/profile/public/${guestId}${
+                        orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""
+                      }`
+                    : undefined;
+
+                return href ? (
+                  <Link
+                    href={href}
+                    className="whitespace-nowrap rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+                  >
+                    View
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    aria-disabled
+                    title="Not public"
+                    className="whitespace-nowrap cursor-not-allowed rounded-md border px-3 py-1.5 text-sm text-gray-400"
+                    onClick={(e) => e.preventDefault()}
+                  >
+                    View
+                  </button>
+                );
+              })()}
+
+              <Link
+                href="#"
+                className="whitespace-nowrap rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                Invite
+              </Link>
+            </div>
           </li>
         );
       })}
@@ -640,7 +697,13 @@ function DirectoryListInternal({ items }: { items: OrgDirectoryItem[] }) {
   );
 }
 
-function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
+function DirectoryListGlobal({
+  items,
+  orgId,
+}: {
+  items: GlobalExpert[];
+  orgId?: string;
+}) {
   return (
     <ul className="divide-y rounded-md border">
       {items.map((e) => {
@@ -688,6 +751,37 @@ function DirectoryListGlobal({ items }: { items: GlobalExpert[] }) {
                   </span>
                 ))}
               </div>
+            </div>
+
+            {/* Actions: Global search returns only public experts */}
+            <div className="flex items-center gap-2">
+              {(() => {
+                const guestId = (e as any)?.guestId || e.id || null;
+                const href = guestId
+                  ? `/modules/profile/public/${guestId}${
+                      orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""
+                    }`
+                  : null;
+                return href ? (
+                  <Link
+                    prefetch={false}
+                    href={href}
+                    className="whitespace-nowrap rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50"
+                  >
+                    View
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    aria-disabled
+                    title="Not public"
+                    className="whitespace-nowrap cursor-not-allowed rounded-md border px-3 py-1.5 text-sm text-gray-400"
+                    onClick={(ev) => ev.preventDefault()}
+                  >
+                    View
+                  </button>
+                );
+              })()}
             </div>
           </li>
         );
