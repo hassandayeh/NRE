@@ -134,7 +134,7 @@ export default function SignInPage() {
       <div className="mt-6 space-y-2 text-sm">
         <p>
           New here?{" "}
-          <Link href="/auth/signup" className="text-indigo-600 underline">
+          <Link href="/entry" className="text-indigo-600 underline">
             Create account
           </Link>
           .

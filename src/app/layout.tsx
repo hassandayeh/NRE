@@ -66,10 +66,14 @@ export default async function RootLayout({
 
   type NavLink = { href: string; label: string };
 
-  // Keep order: Bookings, (Directory if staff), Settings, Profile
-  const links: NavLink[] = [
+  // Public (unauthenticated) navbar tabs – empty for now.
+  // Later, add items like: { href: "/pricing", label: "Pricing" }
+  const PUBLIC_LINKS: NavLink[] = [];
+
+  // Authenticated tabs (guests keep their existing rules)
+  const AUTH_LINKS: NavLink[] = [
     { href: "/modules/booking", label: "Bookings" },
-    { href: "/modules/settings", label: "Settings" },
+    { href: settingsHref, label: "Settings" },
     {
       href: isGuest
         ? "/modules/profile/view-v2/guest"
@@ -78,8 +82,11 @@ export default async function RootLayout({
     },
   ];
 
+  // Choose which set to render
+  const links: NavLink[] = signedIn ? [...AUTH_LINKS] : [...PUBLIC_LINKS];
+
   // Insert Directory only for staff WITH permission
-  if (!isGuest && canViewDirectory) {
+  if (signedIn && !isGuest && canViewDirectory) {
     // place Directory after Bookings
     links.splice(1, 0, { href: "/modules/directory", label: "Directory" });
   }
