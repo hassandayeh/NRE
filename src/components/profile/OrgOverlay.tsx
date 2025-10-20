@@ -232,7 +232,7 @@ export default async function OrgOverlay(props: {
               const actor = n.authorName || "Staff";
               return (
                 <p key={n.id} className="text-xs text-gray-500 italic px-1">
-                  — {actor} deleted a note ·{" "}
+                  {actor} deleted a note |{" "}
                   <time dateTime={n.createdAt}>{formatWhen(n.createdAt)}</time>
                 </p>
               );

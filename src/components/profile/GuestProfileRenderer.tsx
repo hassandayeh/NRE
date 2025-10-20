@@ -7,7 +7,6 @@ import Link from "next/link";
 import type { GuestProfileV2DTO } from "../../lib/profile/guestSchema";
 import {
   initialsFromName,
-  stripCacheBust,
   formatMonthYear,
   safeLink,
 } from "../../lib/profile/view-format";
@@ -65,9 +64,12 @@ export default function GuestProfileRenderer({
   const p = profile as any;
 
   // --- Derived — mirrors original page logic ---------------------------------
-  const headshotUrl = stripCacheBust(
-    p?.headshotUrl || p?.photoUrl || p?.photo?.url || ""
-  );
+  const headshotRaw = (p?.headshotUrl ||
+    p?.photoUrl ||
+    p?.photo?.url ||
+    "") as string;
+  const headshotUrl = headshotRaw;
+
   const [imgOk, setImgOk] = React.useState(true);
   React.useEffect(() => setImgOk(true), [headshotUrl]);
 
