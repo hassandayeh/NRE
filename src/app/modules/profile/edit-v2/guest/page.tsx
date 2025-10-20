@@ -3,6 +3,7 @@
 
 import * as React from "react";
 import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import {
   type GuestProfileV2DTO,
   AppearanceTypeLiterals,
@@ -144,6 +145,52 @@ function Section({ title, subtitle }: { title: string; subtitle?: string }) {
 }
 
 export default function GuestEditorPage() {
+  const router = useRouter();
+  // null = unknown (loading), true = allow, false = block
+  const [allow, setAllow] = useState<boolean | null>(null);
+  const didAllowRef = useRef(false);
+
+  // Allow only "true guest" accounts (has guestProfileId OR role=guest) AND not in an org (staff/admin)
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session", { cache: "no-store" });
+        if (!res.ok) {
+          if (active && !didAllowRef.current) setAllow(false);
+          return;
+        }
+        const s: any = await res.json();
+        const u = s?.user || null;
+
+        const role = String(u?.role || "").toLowerCase();
+        const isGuest = !!u?.guestProfileId || role === "guest";
+        const isStaff = !!u?.orgId && role !== "guest";
+
+        if (!active) return;
+
+        if (isGuest && !isStaff) {
+          didAllowRef.current = true;
+          setAllow(true);
+        } else {
+          setAllow(false);
+        }
+      } catch {
+        if (active && !didAllowRef.current) setAllow(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Perform the redirect only when we definitively know it's not a guest
+  useEffect(() => {
+    if (allow === false && !didAllowRef.current) {
+      router.replace("/");
+    }
+  }, [allow, router]);
+
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [form, setForm] = useState<GuestProfileV2DTO>(initialForm);
 
@@ -153,8 +200,9 @@ export default function GuestEditorPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [headshotBroken, setHeadshotBroken] = useState(false);
 
-  // Load
+  // Load (only after access is allowed)
   useEffect(() => {
+    if (!allow) return;
     let cancelled = false;
     async function load() {
       setStatus({ kind: "loading" });
@@ -169,14 +217,13 @@ export default function GuestEditorPage() {
         const dto = data.profile;
         setForm({
           ...initialForm,
-          ...dto, // keep server-normalized fields
+          ...dto,
           // S4: convert DTO rows -> UI rows (key + date shape)
           experience: mapExperienceDTOToUI(dto.experience) as any,
           education: mapEducationDTOToUI(dto.education) as any,
           publications: mapPublicationsDTOToUI(dto.publications) as any,
           media: mapMediaDTOToUI(dto.media) as any,
         });
-
         setStatus({ kind: "idle" });
       } catch (e: any) {
         if (cancelled) return;
@@ -190,7 +237,7 @@ export default function GuestEditorPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [allow]);
 
   // Reset broken flag whenever the headshot url changes (e.g., after upload/remove)
   useEffect(() => {
@@ -497,6 +544,9 @@ export default function GuestEditorPage() {
       setUploadingHeadshot(false);
     }
   }
+
+  // Do not render the editor until guest access is confirmed
+  if (allow !== true) return null;
 
   // Save (form submit)
   async function onSave(e: React.FormEvent) {

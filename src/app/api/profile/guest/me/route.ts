@@ -12,7 +12,15 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Ok = { ok: true; profile: GuestProfileV2DTO };
+type Ok = {
+  ok: true;
+  profile: GuestProfileV2DTO;
+  meta?: {
+    isGuest: boolean;
+    isStaff: boolean;
+    role: string | null;
+  };
+};
 type Err = { ok: false; message: string; code?: string };
 
 function json(status: number, body: Ok | Err) {
@@ -29,6 +37,21 @@ function getUserId(session: unknown): string | null {
 function getGuestProfileId(session: unknown): string | null {
   const u = getUser(session);
   return u?.guestProfileId || null;
+}
+
+function buildMeta(session: unknown) {
+  const u = getUser(session);
+  const role = (u?.role ?? null) as string | null;
+  const orgId = u?.orgId ?? null;
+  const isGuest = !!u?.guestProfileId && !orgId;
+  const isStaff =
+    !!orgId || (role ? /^(staff|admin)$/i.test(String(role)) : false);
+
+  return {
+    isGuest,
+    isStaff,
+    role: role ? String(role) : null,
+  };
 }
 
 function fallbackDisplay(session: any): string {
@@ -299,7 +322,7 @@ export async function GET(_req: NextRequest) {
 
   try {
     const dto = validateGuestProfileV2(candidate);
-    return json(200, { ok: true, profile: dto });
+    return json(200, { ok: true, profile: dto, meta: buildMeta(session) });
   } catch {
     // minimal safe baseline if validation fails on legacy data
     const fallback: GuestProfileV2DTO = {
