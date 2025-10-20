@@ -49,7 +49,7 @@ export default async function GuestProfileView() {
       return <GuestProfileMeClient />;
     }
 
-    return <GuestProfileRenderer profile={dto.profile} />;
+    return <GuestProfileRenderer profile={dto.profile} canEdit />;
   } catch {
     // Any unexpected condition → graceful client-side fetch
     return <GuestProfileMeClient />;

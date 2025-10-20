@@ -35,6 +35,9 @@ function Chip({
 export type GuestProfileRendererProps = {
   profile: GuestProfileV2DTO;
 
+  /** Show the "Edit Profile" button (enabled only on the private "me" view). Defaults to false. */
+  canEdit?: boolean;
+
   /** Extensibility slots */
   beforeSummarySlot?: React.ReactNode;
   afterSummarySlot?: React.ReactNode;
@@ -56,6 +59,7 @@ export type GuestProfileRendererProps = {
  */
 export default function GuestProfileRenderer({
   profile,
+  canEdit = false,
   beforeSummarySlot,
   afterSummarySlot,
   sidebarSlot,
@@ -373,12 +377,14 @@ export default function GuestProfileRenderer({
         <h1 id="page-title" className="text-xl font-semibold">
           Guest Profile
         </h1>
-        <Link
-          href="/modules/profile/edit-v2/guest"
-          className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-black"
-        >
-          Edit Profile
-        </Link>
+        {canEdit && (
+          <Link
+            href="/modules/profile/edit-v2/guest"
+            className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-black"
+          >
+            Edit Profile
+          </Link>
+        )}
       </div>
 
       {/* Optional slot content above summary */}
