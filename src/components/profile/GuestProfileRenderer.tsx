@@ -34,9 +34,13 @@ function Chip({
 
 export type GuestProfileRendererProps = {
   profile: GuestProfileV2DTO;
-
   /** Show the "Edit Profile" button (enabled only on the private "me" view). Defaults to false. */
   canEdit?: boolean;
+
+  /** Public-page tweaks (all default to current behavior = true/false as appropriate) */
+  showContactVisibility?: boolean; // show PUBLIC/PRIVATE chips next to email/contacts
+  showEmailVerification?: boolean; // show Verified/Unverified chip next to additional emails
+  linkifyTitles?: boolean; // make publication/media titles clickable if URL exists
 
   /** Extensibility slots */
   beforeSummarySlot?: React.ReactNode;
@@ -64,6 +68,9 @@ export default function GuestProfileRenderer({
   afterSummarySlot,
   sidebarSlot,
   footerSlot,
+  showContactVisibility = true,
+  showEmailVerification = true,
+  linkifyTitles = false,
 }: GuestProfileRendererProps) {
   const p = profile as any;
 
@@ -248,14 +255,23 @@ export default function GuestProfileRenderer({
           const outlet = (r as any)?.outlet || "";
           const year = (r as any)?.year;
           const url = safeLink((r as any)?.url || "");
+          const titleNode =
+            url && linkifyTitles ? (
+              <Link href={url} target="_blank" rel="noreferrer">
+                {title}
+              </Link>
+            ) : (
+              <>{title}</>
+            );
+
           return (
             <li key={i} className="text-sm text-gray-800">
-              <span className="font-medium">{title}</span>
+              <span className="font-medium">{titleNode}</span>
               {outlet ? (
                 <span className="text-gray-500"> — {outlet}</span>
               ) : null}
               {year ? <span className="text-gray-500"> • {year}</span> : null}{" "}
-              {url ? (
+              {linkifyTitles ? null : url ? (
                 <a
                   href={url}
                   target="_blank"
@@ -283,14 +299,23 @@ export default function GuestProfileRenderer({
           const outlet = (r as any)?.outlet || "";
           const date = formatMonthYear((r as any)?.date, { fallback: "" });
           const url = safeLink((r as any)?.url || "");
+          const titleNode =
+            url && linkifyTitles ? (
+              <Link href={url} target="_blank" rel="noreferrer">
+                {title}
+              </Link>
+            ) : (
+              <>{title}</>
+            );
+
           return (
             <li key={i} className="text-sm text-gray-800">
-              <span className="font-medium">{title}</span>
+              <span className="font-medium">{titleNode}</span>
               {outlet ? (
                 <span className="text-gray-500"> — {outlet}</span>
               ) : null}
               {date ? <span className="text-gray-500"> • {date}</span> : null}{" "}
-              {url ? (
+              {linkifyTitles ? null : url ? (
                 <a
                   href={url}
                   target="_blank"
@@ -321,12 +346,12 @@ export default function GuestProfileRenderer({
           return (
             <li key={i} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="text-gray-800">{email || "—"}</span>
-              {visibility ? (
+              {showContactVisibility && visibility ? (
                 <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
                   {String(visibility)}
                 </span>
               ) : null}
-              {typeof verified === "boolean" ? (
+              {showEmailVerification && typeof verified === "boolean" ? (
                 <span
                   className={`rounded-md px-2 py-0.5 text-xs ${
                     verified
@@ -357,7 +382,7 @@ export default function GuestProfileRenderer({
             <li key={i} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium text-gray-800">{type}</span>
               <span className="text-gray-800">{value || "—"}</span>
-              {vis ? (
+              {showContactVisibility && vis ? (
                 <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
                   {String(vis)}
                 </span>

@@ -47,6 +47,9 @@ export default async function PublicGuestProfilePage({
   return (
     <GuestProfileRenderer
       profile={res.profile}
+      showContactVisibility={false}
+      showEmailVerification={false}
+      linkifyTitles={true}
       // Show internal notes below the profile content.
       footerSlot={<OrgOverlay orgId={orgId} guestId={guestId} />}
     />

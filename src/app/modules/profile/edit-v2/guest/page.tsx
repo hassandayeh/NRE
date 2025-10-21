@@ -243,13 +243,15 @@ function buildPayloadFrom(src: GuestProfileV2DTO): GuestProfileV2DTO {
     // S7 contacts
     additionalEmails: (src.additionalEmails || []).map((e) => ({
       email: e.email.trim().toLowerCase(),
-      visibility: e.visibility,
+      visibility:
+        (e.visibility as any) === "INTERNAL" ? "PRIVATE" : e.visibility,
       verified: e.verified,
     })),
     contacts: (src.contacts || []).map((c) => ({
       type: c.type,
       value: c.value.trim(),
-      visibility: c.visibility,
+      visibility:
+        (c.visibility as any) === "INTERNAL" ? "PRIVATE" : c.visibility,
     })),
   };
 }
@@ -313,6 +315,12 @@ export default function GuestEditorPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [headshotBroken, setHeadshotBroken] = useState(false);
 
+  // Visibility options (retire "INTERNAL" from UI)
+  const visibilityOptions = useMemo(
+    () => ContactVisibilityLiterals.filter((v) => v !== "INTERNAL"),
+    []
+  );
+
   // Nicer "leave page" modal instead of window.confirm
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [leaveBusy, setLeaveBusy] = useState(false);
@@ -362,9 +370,27 @@ export default function GuestEditorPage() {
           publications: mapPublicationsDTOToUI(dto.publications) as any,
           media: mapMediaDTOToUI(dto.media) as any,
         };
-        setForm(mappedForm);
+
+        // Normalize legacy visibility: INTERNAL -> PRIVATE (so selects show a valid value)
+        const normalizedForm = {
+          ...mappedForm,
+          additionalEmails: (mappedForm.additionalEmails || []).map(
+            (e: any) => ({
+              ...e,
+              visibility:
+                e.visibility === "INTERNAL" ? "PRIVATE" : e.visibility,
+            })
+          ),
+          contacts: (mappedForm.contacts || []).map((c: any) => ({
+            ...c,
+            visibility: c.visibility === "INTERNAL" ? "PRIVATE" : c.visibility,
+          })),
+        } as GuestProfileV2DTO;
+
+        setForm(normalizedForm);
         // Establish baseline that reflects what’s saved on the server
-        setSavedPayload(buildPayloadFrom(mappedForm));
+        setSavedPayload(buildPayloadFrom(normalizedForm));
+
         setStatus({ kind: "idle" });
       } catch (e: any) {
         if (cancelled) return;
@@ -1589,7 +1615,7 @@ export default function GuestEditorPage() {
                 onClick={() =>
                   update("additionalEmails", [
                     ...(form.additionalEmails || []),
-                    { email: "", visibility: "INTERNAL", verified: false },
+                    { email: "", visibility: "PRIVATE", verified: false },
                   ])
                 }
                 className="text-sm px-2 py-1 rounded-md border"
@@ -1625,7 +1651,7 @@ export default function GuestEditorPage() {
                       update("additionalEmails", arr);
                     }}
                   >
-                    {ContactVisibilityLiterals.map((v) => (
+                    {visibilityOptions.map((v) => (
                       <option key={v} value={v}>
                         {v}
                       </option>
@@ -1660,7 +1686,7 @@ export default function GuestEditorPage() {
                 onClick={() =>
                   update("contacts", [
                     ...(form.contacts || []),
-                    { type: "PHONE", value: "", visibility: "INTERNAL" },
+                    { type: "PHONE", value: "", visibility: "PRIVATE" },
                   ])
                 }
                 className="text-sm px-2 py-1 rounded-md border"
@@ -1716,7 +1742,7 @@ export default function GuestEditorPage() {
                       update("contacts", arr);
                     }}
                   >
-                    {ContactVisibilityLiterals.map((v) => (
+                    {visibilityOptions.map((v) => (
                       <option key={v} value={v}>
                         {v}
                       </option>
