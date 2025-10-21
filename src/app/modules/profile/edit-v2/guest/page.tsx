@@ -313,6 +313,31 @@ export default function GuestEditorPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [headshotBroken, setHeadshotBroken] = useState(false);
 
+  // Nicer "leave page" modal instead of window.confirm
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+
+  async function leaveViaSave() {
+    if (leaveBusy) return;
+    setLeaveBusy(true);
+    const ok = await saveNow();
+    setLeaveBusy(false);
+    if (ok) {
+      const dest = pendingHref ?? "/modules/profile/view-v2/guest";
+      setLeaveOpen(false);
+      setPendingHref(null);
+      router.push(dest);
+    }
+  }
+
+  function leaveDiscard() {
+    const dest = pendingHref ?? "/modules/profile/view-v2/guest";
+    setLeaveOpen(false);
+    setPendingHref(null);
+    router.push(dest);
+  }
+
   // Load (only after access is allowed)
   useEffect(() => {
     if (!allow) return;
@@ -397,6 +422,60 @@ export default function GuestEditorPage() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
+  // Intercept in-app navigations (any <a>/<Link>) while there are unsaved edits.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      // Only guard when dirty; otherwise ignore.
+      if (!dirty) return;
+
+      // Ignore already-handled events
+      if (e.defaultPrevented) return;
+
+      // Left-click only, no modifier keys
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+        return;
+
+      // Find nearest anchor
+      const target = e.target as Element | null;
+      if (!target) return;
+      const a = target.closest("a") as HTMLAnchorElement | null;
+      if (!a) return;
+
+      // Allow explicit bypass if needed
+      if (a.dataset && a.dataset.bypassUnsaved === "true") return;
+
+      // Resolve href; only same-origin/app routes
+      const raw = a.getAttribute("href") || a.href;
+      if (!raw) return;
+
+      let dest: string | null = null;
+      if (raw.startsWith("/")) {
+        dest = raw; // internal
+      } else {
+        try {
+          const u = new URL(raw);
+          if (u.host === window.location.host)
+            dest = u.pathname + u.search + u.hash;
+          else return; // external -> let it go
+        } catch {
+          return;
+        }
+      }
+
+      // Ignore hash-only navigations within the current page
+      if (dest && dest.startsWith("#")) return;
+
+      // At this point, prevent navigation and show modal
+      e.preventDefault();
+      setPendingHref(dest);
+      setLeaveOpen(true);
+    };
+
+    // Capture phase to catch Next/Link before it navigates
+    window.addEventListener("click", onClick, true);
+    return () => window.removeEventListener("click", onClick, true);
   }, [dirty]);
 
   // Helpers
@@ -496,7 +575,8 @@ export default function GuestEditorPage() {
         const err = await res.json().catch(() => null);
         throw new Error(err?.message || `Save failed (${res.status})`);
       }
-      setSavedPayload(parsed.data);
+      // Set baseline to the exact normalized payload we just sent
+      setSavedPayload(payload);
       setStatus({ kind: "success", msg: "Saved" });
 
       return true;
@@ -626,7 +706,8 @@ export default function GuestEditorPage() {
         const err = await res.json().catch(() => null);
         throw new Error(err?.message || `Save failed (${res.status})`);
       }
-      setSavedPayload(parsed.data);
+      // Set baseline to the exact normalized payload we just sent
+      setSavedPayload(payload);
       setStatus({ kind: "success", msg: "Saved" });
     } catch (e: any) {
       setStatus({ kind: "error", msg: e?.message ?? "Failed to save" });
@@ -678,13 +759,11 @@ export default function GuestEditorPage() {
           <button
             type="button"
             onClick={() => {
-              if (
-                dirty &&
-                !window.confirm(
-                  "You have unsaved changes. Leave without saving?"
-                )
-              )
+              if (dirty) {
+                setPendingHref("/modules/profile/view-v2/guest");
+                setLeaveOpen(true);
                 return;
+              }
               router.push("/modules/profile/view-v2/guest");
             }}
             className="rounded-md bg-black text-white px-4 py-2"
@@ -1704,6 +1783,64 @@ export default function GuestEditorPage() {
           </span>
         </div>
       </form>
+      {/* Leave-with-unsaved modal */}
+      {leaveOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="leave-title"
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setLeaveOpen(false);
+          }}
+        >
+          <div
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setLeaveOpen(false)}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+            <h2 id="leave-title" className="text-base font-semibold">
+              Unsaved changes
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">
+              You have unsaved edits. What would you like to do?
+            </p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setLeaveOpen(false)}
+                className="rounded-md border px-4 py-2 text-sm"
+                disabled={leaveBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={leaveDiscard}
+                className="rounded-md border px-4 py-2 text-sm"
+                disabled={leaveBusy}
+              >
+                Discard &amp; view
+              </button>
+              <button
+                type="button"
+                onClick={leaveViaSave}
+                className="rounded-md bg-black text-white px-4 py-2 text-sm disabled:opacity-50"
+                disabled={
+                  leaveBusy ||
+                  status.kind === "loading" ||
+                  status.kind === "saving" ||
+                  uploadingHeadshot
+                }
+              >
+                {leaveBusy || status.kind === "saving"
+                  ? "Saving…"
+                  : "Save & view"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
