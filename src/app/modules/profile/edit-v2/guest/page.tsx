@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
   type GuestProfileV2DTO,
@@ -193,6 +193,9 @@ export default function GuestEditorPage() {
 
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [form, setForm] = useState<GuestProfileV2DTO>(initialForm);
+  const [savedPayload, setSavedPayload] = useState<GuestProfileV2DTO | null>(
+    null
+  );
 
   // Headshot upload/remove state
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -215,7 +218,7 @@ export default function GuestEditorPage() {
         };
         if (cancelled) return;
         const dto = data.profile;
-        setForm({
+        const mappedForm = {
           ...initialForm,
           ...dto,
           // S4: convert DTO rows -> UI rows (key + date shape)
@@ -223,7 +226,10 @@ export default function GuestEditorPage() {
           education: mapEducationDTOToUI(dto.education) as any,
           publications: mapPublicationsDTOToUI(dto.publications) as any,
           media: mapMediaDTOToUI(dto.media) as any,
-        });
+        };
+        setForm(mappedForm);
+        // Establish baseline that reflects what’s saved on the server
+        setSavedPayload(buildPayload(mappedForm));
         setStatus({ kind: "idle" });
       } catch (e: any) {
         if (cancelled) return;
@@ -243,6 +249,36 @@ export default function GuestEditorPage() {
   useEffect(() => {
     setHeadshotBroken(false);
   }, [form.headshotUrl]);
+
+  // Auto-clear success pill after ~3s (keeps errors visible)
+  useEffect(() => {
+    if (status.kind !== "success") return;
+    const t = setTimeout(() => setStatus({ kind: "idle" }), 3000);
+    return () => clearTimeout(t);
+  }, [status]);
+
+  // Compare normalized payloads to detect unsaved changes
+  const dirty = useMemo(() => {
+    if (!savedPayload) return false;
+    try {
+      return (
+        JSON.stringify(buildPayload(form)) !== JSON.stringify(savedPayload)
+      );
+    } catch {
+      return false;
+    }
+  }, [form, savedPayload]);
+
+  // Warn on close/refresh if there are unsaved changes
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
 
   // Helpers
   const update = <K extends keyof GuestProfileV2DTO>(
@@ -452,7 +488,9 @@ export default function GuestEditorPage() {
         const err = await res.json().catch(() => null);
         throw new Error(err?.message || `Save failed (${res.status})`);
       }
+      setSavedPayload(parsed.data);
       setStatus({ kind: "success", msg: "Saved" });
+
       return true;
     } catch (e: any) {
       setStatus({ kind: "error", msg: e?.message ?? "Failed to save" });
@@ -507,6 +545,8 @@ export default function GuestEditorPage() {
 
       // Server already saved avatarUrl; we only refresh local state for preview
       setForm(next);
+      setSavedPayload(buildPayload(next));
+
       setStatus({ kind: "success", msg: "Photo updated" });
       setHeadshotBroken(false);
     } catch (err: any) {
@@ -534,6 +574,8 @@ export default function GuestEditorPage() {
       // Clear locally; server already cleared avatarUrl
       const next = { ...form, headshotUrl: undefined } as GuestProfileV2DTO;
       setForm(next);
+      setSavedPayload(buildPayload(next));
+
       setHeadshotBroken(false);
 
       setStatus({ kind: "success", msg: "Photo removed" });
@@ -576,6 +618,7 @@ export default function GuestEditorPage() {
         const err = await res.json().catch(() => null);
         throw new Error(err?.message || `Save failed (${res.status})`);
       }
+      setSavedPayload(parsed.data);
       setStatus({ kind: "success", msg: "Saved" });
     } catch (e: any) {
       setStatus({ kind: "error", msg: e?.message ?? "Failed to save" });
@@ -626,7 +669,16 @@ export default function GuestEditorPage() {
           </button>
           <button
             type="button"
-            onClick={() => router.push("/modules/profile/view-v2/guest")}
+            onClick={() => {
+              if (
+                dirty &&
+                !window.confirm(
+                  "You have unsaved changes. Leave without saving?"
+                )
+              )
+                return;
+              router.push("/modules/profile/view-v2/guest");
+            }}
             className="rounded-md bg-black text-white px-4 py-2"
             aria-label="View profile"
           >
