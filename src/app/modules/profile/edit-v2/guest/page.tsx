@@ -430,7 +430,7 @@ export default function GuestEditorPage() {
     });
   }
 
-  // Save NOW (used by upload/remove flows and the form submit)
+  // Save NOW (used by upload/remove flows and the new top "Save" button)
   async function saveNow(next?: GuestProfileV2DTO) {
     const payload = buildPayload(next);
     const parsed = safeParseGuestProfileV2(payload);
@@ -584,24 +584,55 @@ export default function GuestEditorPage() {
 
   return (
     <main className="max-w-3xl mx-auto px-4 py-8">
-      <h1 className="text-2xl font-bold mb-8">Edit guest profile</h1>
+      <h1 className="text-2xl font-bold mb-4">Edit guest profile</h1>
 
-      {/* Status bar */}
-      <div
-        role="status"
-        className={`mb-6 rounded-md border px-3 py-2 text-sm ${
-          status.kind === "error"
-            ? "border-red-300 bg-red-50 text-red-700"
-            : status.kind === "success"
-            ? "border-green-300 bg-green-50 text-green-700"
-            : "border-gray-200 bg-gray-50 text-gray-600"
-        }`}
-      >
-        {status.kind === "loading" && "Loading…"}
-        {status.kind === "saving" && "Saving…"}
-        {status.kind === "error" && (status.msg || "Something went wrong")}
-        {status.kind === "success" && (status.msg || "Saved")}
-        {status.kind === "idle" && "Idle"}
+      {/* Top row: Status (left) + Buttons (right) */}
+      <div className="mb-6 flex items-center justify-between gap-3">
+        {/* Status pill lives in the same row; hidden when idle */}
+        <div className="flex-1">
+          {status.kind !== "idle" && (
+            <div
+              role="status"
+              className={`rounded-md border px-3 py-2 text-sm ${
+                status.kind === "error"
+                  ? "border-red-300 bg-red-50 text-red-700"
+                  : status.kind === "success"
+                  ? "border-green-300 bg-green-50 text-green-700"
+                  : "border-gray-200 bg-gray-50 text-gray-600"
+              }`}
+            >
+              {status.kind === "loading" && "Loading…"}
+              {status.kind === "saving" && "Saving…"}
+              {status.kind === "error" &&
+                (status.msg || "Something went wrong")}
+              {status.kind === "success" && (status.msg || "Saved")}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void saveNow()}
+            className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+            disabled={
+              status.kind === "loading" ||
+              status.kind === "saving" ||
+              uploadingHeadshot
+            }
+            aria-label="Save changes"
+          >
+            {status.kind === "saving" ? "Saving…" : "Save changes"}
+          </button>
+          <button
+            type="button"
+            onClick={() => router.push("/modules/profile/view-v2/guest")}
+            className="rounded-md bg-black text-white px-4 py-2"
+            aria-label="View profile"
+          >
+            View profile
+          </button>
+        </div>
       </div>
 
       <form onSubmit={onSave} className="space-y-10">
