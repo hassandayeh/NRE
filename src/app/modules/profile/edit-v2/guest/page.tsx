@@ -2,7 +2,7 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   type GuestProfileV2DTO,
@@ -144,6 +144,116 @@ function Section({ title, subtitle }: { title: string; subtitle?: string }) {
   );
 }
 
+// Pure normalizer that never captures component state.
+// Use inside effects to avoid hook dependency churn.
+function buildPayloadFrom(src: GuestProfileV2DTO): GuestProfileV2DTO {
+  // Accept YYYY or YYYY-MM or YYYY-MM-DD or full ISO; return RFC-3339
+  const normDate = (v?: string) => {
+    const s = (v || "").trim();
+    if (!s) return undefined;
+    let candidate = s;
+    if (/^\d{4}$/.test(s)) candidate = `${s}-01-01`;
+    else if (/^\d{4}-\d{2}$/.test(s)) candidate = `${s}-01`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) candidate += "T00:00:00Z";
+    const d = new Date(candidate);
+    return isNaN(d.getTime()) ? undefined : d.toISOString();
+  };
+
+  return {
+    ...src,
+    headshotUrl:
+      src.headshotUrl && src.headshotUrl.trim()
+        ? src.headshotUrl.trim()
+        : undefined,
+
+    // S6 normalization
+    countryCode: src.countryCode
+      ? src.countryCode.trim().toUpperCase()
+      : undefined,
+    regionCodes: (src.regionCodes || []).map((r) => r.trim().toUpperCase()),
+    topicKeys: (src.topicKeys || []).map((t) => t.trim()).filter(Boolean),
+
+    // S3 languages
+    languages: (src.languages || []).map((l) => ({
+      isoCode: (l.isoCode || "").trim().toLowerCase(),
+      level: l.level,
+    })),
+
+    // S4 experience -> map UI keys to DTO keys (drop 'note')
+    experience:
+      (src as any).experience?.map((r: any) => ({
+        orgName: (r.org || "").trim(),
+        roleTitle: r.role ? String(r.role).trim() : undefined,
+        from: normDate(r.from),
+        to: normDate(r.to),
+        isCurrent: !!r.current,
+      })) || [],
+
+    // S4 education -> map UI keys to DTO keys (program -> credential, drop 'note')
+    education:
+      (src as any).education?.map((r: any) => ({
+        institution: (r.institution || "").trim(),
+        credential: r.program ? String(r.program).trim() : undefined,
+        fieldOfStudy: undefined, // not collected in this slice
+        from: normDate(r.from),
+        to: normDate(r.to),
+      })) || [],
+
+    // S5 publications & media — map UI keys to DTO + normalize
+    publications: ((src as any).publications || []).map((p: any) => {
+      const title = (p?.title || "").trim();
+      const outlet = p?.outlet ? String(p.outlet).trim() : undefined;
+
+      // Accept YYYY or YYYY-MM (or number); convert to year:number
+      const v = (p?.date ?? p?.year) as any;
+      let year: number | undefined = undefined;
+      if (typeof v === "number" && Number.isFinite(v)) {
+        year = Math.trunc(v);
+      } else if (typeof v === "string") {
+        const s = v.trim();
+        if (/^\d{4}$/.test(s)) year = parseInt(s, 10);
+        else if (/^\d{4}-\d{2}$/.test(s)) year = parseInt(s.slice(0, 4), 10);
+      }
+
+      const urlStr = (p?.url || "").trim();
+      const url = urlStr ? urlStr : undefined; // drop empty string
+
+      return { title, outlet, year, url };
+    }),
+
+    media: ((src as any).media || []).map((m: any) => {
+      const title = (m?.title || "").trim();
+      // UI uses `network`; DTO uses `outlet`
+      const outlet = m?.outlet
+        ? String(m.outlet).trim()
+        : m?.network
+        ? String(m.network).trim()
+        : undefined;
+
+      const date = normDate(m?.date); // ISO or undefined
+
+      const urlStr = (m?.url || "").trim();
+      const url = urlStr ? urlStr : undefined; // drop empty string
+
+      const type = (m?.type as any) || undefined;
+
+      return { title, outlet, date, url, type };
+    }),
+
+    // S7 contacts
+    additionalEmails: (src.additionalEmails || []).map((e) => ({
+      email: e.email.trim().toLowerCase(),
+      visibility: e.visibility,
+      verified: e.verified,
+    })),
+    contacts: (src.contacts || []).map((c) => ({
+      type: c.type,
+      value: c.value.trim(),
+      visibility: c.visibility,
+    })),
+  };
+}
+
 export default function GuestEditorPage() {
   const router = useRouter();
   // null = unknown (loading), true = allow, false = block
@@ -229,7 +339,7 @@ export default function GuestEditorPage() {
         };
         setForm(mappedForm);
         // Establish baseline that reflects what’s saved on the server
-        setSavedPayload(buildPayload(mappedForm));
+        setSavedPayload(buildPayloadFrom(mappedForm));
         setStatus({ kind: "idle" });
       } catch (e: any) {
         if (cancelled) return;
@@ -257,6 +367,15 @@ export default function GuestEditorPage() {
     return () => clearTimeout(t);
   }, [status]);
 
+  // Build normalized payload (client-side) matching DTO (server schema)
+  // Memoized so hooks can safely depend on it.
+  // Delegates to the pure helper to avoid capturing other values.
+  const buildPayload = useCallback(
+    (next?: GuestProfileV2DTO): GuestProfileV2DTO =>
+      buildPayloadFrom(next ?? form),
+    [form]
+  );
+
   // Compare normalized payloads to detect unsaved changes
   const dirty = useMemo(() => {
     if (!savedPayload) return false;
@@ -267,7 +386,7 @@ export default function GuestEditorPage() {
     } catch {
       return false;
     }
-  }, [form, savedPayload]);
+  }, [form, savedPayload, buildPayload]);
 
   // Warn on close/refresh if there are unsaved changes
   useEffect(() => {
@@ -291,117 +410,6 @@ export default function GuestEditorPage() {
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean);
-
-  // Build normalized payload (client-side) matching DTO (server schema)
-  function buildPayload(next?: GuestProfileV2DTO): GuestProfileV2DTO {
-    const src = next ?? form;
-
-    // Accept YYYY or YYYY-MM or YYYY-MM-DD or full ISO; return RFC-3339
-    const normDate = (v?: string) => {
-      const s = (v || "").trim();
-      if (!s) return undefined;
-      let candidate = s;
-      if (/^\d{4}$/.test(s)) candidate = `${s}-01-01`;
-      else if (/^\d{4}-\d{2}$/.test(s)) candidate = `${s}-01`;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) candidate += "T00:00:00Z";
-      const d = new Date(candidate);
-      return isNaN(d.getTime()) ? undefined : d.toISOString();
-    };
-
-    return {
-      ...src,
-      headshotUrl:
-        src.headshotUrl && src.headshotUrl.trim()
-          ? src.headshotUrl.trim()
-          : undefined,
-
-      // S6 normalization
-      countryCode: src.countryCode
-        ? src.countryCode.trim().toUpperCase()
-        : undefined,
-      regionCodes: (src.regionCodes || []).map((r) => r.trim().toUpperCase()),
-      topicKeys: (src.topicKeys || []).map((t) => t.trim()).filter(Boolean),
-
-      // S3 languages
-      languages: (src.languages || []).map((l) => ({
-        isoCode: (l.isoCode || "").trim().toLowerCase(),
-        level: l.level,
-      })),
-
-      // S4 experience -> map UI keys to DTO keys (drop 'note')
-      experience:
-        (src as any).experience?.map((r: any) => ({
-          orgName: (r.org || "").trim(),
-          roleTitle: r.role ? String(r.role).trim() : undefined,
-          from: normDate(r.from),
-          to: normDate(r.to),
-          isCurrent: !!r.current,
-        })) || [],
-
-      // S4 education -> map UI keys to DTO keys (program -> credential, drop 'note')
-      education:
-        (src as any).education?.map((r: any) => ({
-          institution: (r.institution || "").trim(),
-          credential: r.program ? String(r.program).trim() : undefined,
-          fieldOfStudy: undefined, // not collected in this slice
-          from: normDate(r.from),
-          to: normDate(r.to),
-        })) || [],
-
-      // S5 publications & media — map UI keys to DTO + normalize
-      publications: ((src as any).publications || []).map((p: any) => {
-        const title = (p?.title || "").trim();
-        const outlet = p?.outlet ? String(p.outlet).trim() : undefined;
-
-        // Accept YYYY or YYYY-MM (or number); convert to year:number
-        const v = (p?.date ?? p?.year) as any;
-        let year: number | undefined = undefined;
-        if (typeof v === "number" && Number.isFinite(v)) {
-          year = Math.trunc(v);
-        } else if (typeof v === "string") {
-          const s = v.trim();
-          if (/^\d{4}$/.test(s)) year = parseInt(s, 10);
-          else if (/^\d{4}-\d{2}$/.test(s)) year = parseInt(s.slice(0, 4), 10);
-        }
-
-        const urlStr = (p?.url || "").trim();
-        const url = urlStr ? urlStr : undefined; // drop empty string
-
-        return { title, outlet, year, url };
-      }),
-
-      media: ((src as any).media || []).map((m: any) => {
-        const title = (m?.title || "").trim();
-        // UI uses `network`; DTO uses `outlet`
-        const outlet = m?.outlet
-          ? String(m.outlet).trim()
-          : m?.network
-          ? String(m.network).trim()
-          : undefined;
-
-        const date = normDate(m?.date); // ISO or undefined
-
-        const urlStr = (m?.url || "").trim();
-        const url = urlStr ? urlStr : undefined; // drop empty string
-
-        const type = (m?.type as any) || undefined;
-
-        return { title, outlet, date, url, type };
-      }),
-
-      // S7 contacts
-      additionalEmails: (src.additionalEmails || []).map((e) => ({
-        email: e.email.trim().toLowerCase(),
-        visibility: e.visibility,
-        verified: e.verified,
-      })),
-      contacts: (src.contacts || []).map((c) => ({
-        type: c.type,
-        value: c.value.trim(),
-        visibility: c.visibility,
-      })),
-    };
-  }
 
   // ---- S4 helpers: experience/education array updaters (UI-only) ----
   type ExpItem = {
