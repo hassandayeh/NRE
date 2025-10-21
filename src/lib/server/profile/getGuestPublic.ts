@@ -42,12 +42,77 @@ export async function getGuestPublic(guestId: string): Promise<PublicRes> {
   }
 
   // Must be explicitly public
-  if (!gp.listedPublic) {
-    return { ok: false, status: 404, message: "Profile is not public" };
+  // Load child relations needed by the renderer (best-effort, tolerate missing tables)
+  // Mirrors the pattern used in the private "me" API.
+  try {
+    const p = prisma as any;
+    gp.languages = await p.guestLanguage.findMany({
+      where: { profileId: gp.id },
+    });
+  } catch {}
+  try {
+    gp.experience = await (prisma as any).guestExperience.findMany({
+      where: { profileId: gp.id },
+    });
+  } catch {}
+  try {
+    gp.education = await (prisma as any).guestEducation.findMany({
+      where: { profileId: gp.id },
+    });
+  } catch {}
+  try {
+    gp.publications = await (prisma as any).guestPublication.findMany({
+      where: { profileId: gp.id },
+    });
+  } catch {}
+  try {
+    gp.media = await (prisma as any).guestMediaAppearance.findMany({
+      where: { profileId: gp.id },
+    });
+  } catch {}
+
+  // Load "Private details" for the PUBLIC page, but gate strictly by visibility.
+  // We accept minor schema drift and normalize to the renderer's expected keys.
+  function normVis(v: any) {
+    return (v ?? "").toString().toUpperCase();
+  }
+  function normalizeEmailRow(r: any) {
+    return {
+      email: r?.email ?? r?.address ?? r?.value ?? "",
+      verified: !!(r?.verified ?? r?.isVerified),
+      visibility: normVis(r?.visibility ?? r?.permission),
+    };
+  }
+  function normalizeContactRow(r: any) {
+    return {
+      type: r?.type ?? r?.contactType ?? r?.kind ?? "",
+      value: r?.value ?? r?.handle ?? r?.address ?? "",
+      visibility: normVis(r?.visibility ?? r?.permission),
+    };
   }
 
-  // ---- Image: be generous in what we accept from the DB schema ----
-  // Try common/legacy keys and nested shapes, then mirror to all keys the renderer recognizes.
+  // Additional emails — only keep PUBLIC
+  try {
+    const rows =
+      (await (prisma as any).guestAdditionalEmail.findMany({
+        where: { profileId: gp.id },
+      })) ?? [];
+    gp.additionalEmails = rows
+      .map(normalizeEmailRow)
+      .filter((e: any) => e.visibility === "PUBLIC");
+  } catch {}
+
+  // Contact methods — only keep PUBLIC
+  try {
+    const rows =
+      (await (prisma as any).guestContactMethod.findMany({
+        where: { profileId: gp.id },
+      })) ?? [];
+    gp.contacts = rows
+      .map(normalizeContactRow)
+      .filter((c: any) => c.visibility === "PUBLIC");
+  } catch {}
+
   // The renderer checks: headshotUrl || photoUrl || photo.url (see component).
   const resolvedHeadshot = coalesceUrl(
     gp.headshotUrl,
@@ -105,9 +170,12 @@ export async function getGuestPublic(guestId: string): Promise<PublicRes> {
     travelReadiness: gp.travelReadiness ?? null,
     inviteable: typeof gp.inviteable === "boolean" ? gp.inviteable : null,
 
-    // Privacy: NEVER expose these on public
-    additionalEmails: [],
-    contacts: [],
+    // Privacy: expose ONLY PUBLIC rows loaded above
+    additionalEmails: Array.isArray(gp.additionalEmails)
+      ? gp.additionalEmails
+      : [],
+    contacts: Array.isArray(gp.contacts) ? gp.contacts : [],
+
     listedPublic: true,
   };
 
