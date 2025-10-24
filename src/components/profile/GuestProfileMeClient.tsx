@@ -62,5 +62,5 @@ export default function GuestProfileMeClient() {
     );
   }
 
-  return <GuestProfileRenderer profile={state.profile} />;
+  return <GuestProfileRenderer profile={state.profile} canEdit />;
 }
