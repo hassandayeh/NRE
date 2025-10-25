@@ -4,6 +4,8 @@ import prisma from "../../../lib/prisma";
 import { resolveViewerFromRequest } from "../../../lib/viewer";
 import { hasCan } from "../../../lib/access/permissions";
 import { AppearanceType, BookingStatus } from "@prisma/client";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../../lib/auth";
 
 type BookingRow = {
   id: string;
@@ -48,9 +50,46 @@ function parseAppearanceType(v: unknown): AppearanceType | null | undefined {
   return undefined;
 }
 
+async function deriveOrgId(
+  req: NextRequest,
+  seed?: string | null,
+  viewer?: any
+): Promise<string | null> {
+  // 1) body/orgId if provided
+  if (typeof seed === "string" && seed.trim()) return seed.trim();
+
+  // 2) header
+  const h = req.headers.get("x-org-id");
+  if (h && h.trim()) return h.trim();
+
+  // 3) query
+  const q = new URL(req.url).searchParams.get("orgId");
+  if (q && q.trim()) return q.trim();
+
+  // 4) viewer (if resolver attaches org)
+  const vOrg =
+    (viewer?.orgId as string | undefined) ??
+    (viewer?.org?.id as string | undefined);
+  if (vOrg && vOrg.trim()) return vOrg.trim();
+
+  // 5) session fallback
+  try {
+    const session = await getServerSession(authOptions);
+    const sOrg =
+      (((session as any)?.user?.orgId as string | undefined) ??
+        (session as any)?.orgId) ||
+      null;
+    if (sOrg && String(sOrg).trim()) return String(sOrg).trim();
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
 // ---------------- GET /api/bookings ----------------
 // Query params:
-//   orgId (required) - the organization to list bookings for
+//   orgId (derived: query | header | viewer | session)
 //   take (optional, default 50), skip (optional, default 0)
 export async function GET(req: NextRequest) {
   try {
@@ -63,7 +102,9 @@ export async function GET(req: NextRequest) {
     }
 
     const { searchParams } = new URL(req.url);
-    const orgId = searchParams.get("orgId") ?? "";
+    const orgId =
+      (await deriveOrgId(req, searchParams.get("orgId"), viewer)) || "";
+
     const take = Math.min(
       Math.max(parseInt(searchParams.get("take") || "50", 10), 1),
       200
@@ -126,8 +167,10 @@ export async function GET(req: NextRequest) {
 
 // ---------------- POST /api/bookings ----------------
 // Body:
-//   orgId (required), subject (required), startAt (required), durationMins (required number)
-//   Optional: appearanceType | locationUrl | locationName | locationAddress | dialInfo
+//   subject (required), startAt (required ISO), durationMins (required number)
+//   Optional: appearanceType | locationUrl | locationName | locationAddress | dialInfo | orgId
+// Behavior:
+//   orgId is derived automatically from: body → x-org-id → query → viewer → session.
 export async function POST(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -150,7 +193,13 @@ export async function POST(req: NextRequest) {
       dialInfo: string | null;
     }>;
 
-    const orgId = typeof body.orgId === "string" ? body.orgId : "";
+    const orgId =
+      (await deriveOrgId(
+        req,
+        typeof body.orgId === "string" ? body.orgId : null,
+        viewer
+      )) || "";
+
     if (!orgId) {
       return NextResponse.json(
         { ok: false, error: "orgId is required" },
@@ -174,12 +223,25 @@ export async function POST(req: NextRequest) {
       typeof body.subject === "string" && body.subject.trim().length > 0
         ? body.subject.trim()
         : "";
-    const startAt = body.startAt ? new Date(body.startAt) : undefined;
-    const durationMins = Number.isInteger(body.durationMins as any)
-      ? (body.durationMins as number)
-      : undefined;
+    const startAtRaw = body.startAt;
+    const startAt =
+      startAtRaw instanceof Date
+        ? startAtRaw
+        : typeof startAtRaw === "string"
+        ? new Date(startAtRaw)
+        : undefined;
+    const durationMins =
+      typeof body.durationMins === "number" &&
+      Number.isFinite(body.durationMins)
+        ? Math.trunc(body.durationMins)
+        : undefined;
 
-    if (!subject || !startAt || !durationMins) {
+    if (
+      !subject ||
+      !startAt ||
+      Number.isNaN(startAt.getTime()) ||
+      !durationMins
+    ) {
       return NextResponse.json(
         { ok: false, error: "subject, startAt, and durationMins are required" },
         { status: 400 }

@@ -1,3 +1,4 @@
+// src/app/modules/directory/v2/page.tsx
 "use client";
 
 import * as React from "react";
@@ -17,7 +18,7 @@ export const dynamic = "force-dynamic";
  * - User selects filters, then clicks Search
  * - Results are lean cards with photo, name, headline, and badges
  *
- * This UI calls `/api/directory/search?v=2` (API to be added next slice).
+ * This UI calls `/api/directory/search?v=2` (API is already wired).
  */
 
 // ---------- Suggestions (can move to a taxonomy module later) ----------
@@ -266,7 +267,15 @@ export default function DirectoryV2Page() {
 
   // Scope & inviteable
   const [scope, setScope] = React.useState<"global" | "internal">("global");
+
+  // IMPORTANT: by default, internal = inviteable-only (bookable). Global ignores this flag.
   const [inviteableOnly, setInviteableOnly] = React.useState<boolean>(false);
+  React.useEffect(() => {
+    // Set sane defaults whenever scope changes:
+    // - internal → inviteable-only ON (default behavior on the API)
+    // - global   → inviteableOnly irrelevant (keep OFF / disabled)
+    setInviteableOnly(scope === "internal");
+  }, [scope]);
 
   // Availability (pass-through only now)
   const [availDate, setAvailDate] = React.useState(""); // yyyy-mm-dd
@@ -329,7 +338,13 @@ export default function DirectoryV2Page() {
 
     // scope / inviteable
     params.set("scope", scope);
-    if (inviteableOnly) params.set("inviteable", "true");
+
+    // ✅ Key change:
+    // Internal defaults to inviteable-only (bookable). To RELAX it, explicitly send inviteable=false.
+    if (scope === "internal" && !inviteableOnly) {
+      params.set("inviteable", "false");
+    }
+    // Note: when inviteableOnly is true, we omit the param and let the API's default (inviteable=true) apply.
 
     // languages: send pairs as lang=en:B2
     languages.forEach((l) => params.append("lang", `${l.code}:${l.minLevel}`));
@@ -612,14 +627,25 @@ export default function DirectoryV2Page() {
           </fieldset>
 
           {/* Inviteable only */}
-          <label className="flex items-center gap-2">
+          <label
+            className="flex items-center gap-2"
+            title={
+              scope === "internal"
+                ? "Default is ON (inviteable/bookable only). Turn OFF to include all active staff."
+                : "Only applies to Internal scope."
+            }
+          >
             <input
               type="checkbox"
               checked={inviteableOnly}
               onChange={(e) => setInviteableOnly(e.target.checked)}
-              className="h-4 w-4 rounded border"
+              className="h-4 w-4 rounded border disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={scope !== "internal"}
             />
-            <span className="text-sm">Inviteable only</span>
+            <span className="text-sm">
+              Inviteable only{" "}
+              <span className="text-gray-500">(Internal scope)</span>
+            </span>
           </label>
 
           {/* Availability (date, time, slot length, timezone) */}

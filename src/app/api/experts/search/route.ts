@@ -11,14 +11,24 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/experts/search
  * Used by Directory → Global tab.
- * Query params:
- *   - q: optional free-text (name/email)
- *   - take: optional limit (default 30, max 50)
- *   - visibility: "public" (ignored if column doesn't exist)
  *
- * NOTE: We keep selection minimal and map to the GlobalExpert shape
- * the page expects (id, name, city, countryCode, tags, availability).
+ * Query params:
+ * - q: optional free-text (name/email)
+ * - take: optional limit (default 30, max 50)
+ * - orgId: required (derived by the v2 proxy if not provided by caller)
+ *
+ * Privacy:
+ * - Only returns listedPublic guests.
+ *
+ * NOTE:
+ * - This slice expands the SELECT to include richer card fields so that the
+ *   Directory V2 proxy can render badges without extra round-trips:
+ *   city, countryCode, avatarUrl, topicKeys (→ topics), regionCodes (→ regions),
+ *   languages { isoCode, level }.
+ *
+ * Shape is additive. We keep legacy fields (name, tags, availability) intact.
  */
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get("q") || "").trim();
@@ -34,8 +44,8 @@ export async function GET(req: NextRequest) {
 
   const session = await getServerSession(authOptions).catch(() => null);
   const email = (session?.user as any)?.email as string | undefined;
-  let userId = (session?.user as any)?.id as string | undefined;
 
+  let userId = (session?.user as any)?.id as string | undefined;
   if (!userId && email) {
     const u = await prisma.user.findUnique({
       where: { email },
@@ -43,6 +53,7 @@ export async function GET(req: NextRequest) {
     });
     userId = u?.id;
   }
+
   if (!userId) {
     return NextResponse.json(
       { ok: false, error: "Unauthorized" },
@@ -50,12 +61,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const allowed = await hasCan({
-    userId,
-    orgId,
-    permission: "directory:view",
-  });
-
+  const allowed = await hasCan({ userId, orgId, permission: "directory:view" });
   if (!allowed) {
     return NextResponse.json(
       { ok: false, error: "DIRECTORY_FORBIDDEN" },
@@ -84,28 +90,51 @@ export async function GET(req: NextRequest) {
         : {}),
     };
 
-    // Pull minimal fields (safe across schema changes)
+    // ⬇️ Expanded selection to feed Directory V2 badges without extra fetches
     const rows = await prisma.guestProfile.findMany({
       where,
       select: {
         id: true,
         displayName: true,
-        // If your model has these, we can expand later:
-        // city: true,
-        // countryCode: true,
-        // tags: true,
+        // richer card fields
+        city: true,
+        countryCode: true,
+        avatarUrl: true,
+        topicKeys: true, // -> topics
+        regionCodes: true, // -> regions
+        languages: {
+          select: {
+            isoCode: true,
+            level: true,
+          },
+        },
+        // keep a couple of legacy-safe fields if someone depends on them
+        // headline: true, // optional (not required by this slice)
       },
       take,
     });
 
-    // Normalize to GlobalExpert[]
-    const items = rows.map((r: any) => ({
+    // Normalize to legacy + enriched shape (non-breaking)
+    const items = rows.map((r) => ({
       id: r.id,
+      // legacy field kept (used by older consumers)
       name: r.displayName ?? null,
-      city: null,
-      countryCode: null,
-      tags: [],
-      availability: null,
+
+      // enriched fields (Directory V2 proxy will map to UI SearchItem)
+      displayName: r.displayName ?? null,
+      city: r.city ?? null,
+      countryCode: r.countryCode ?? null,
+      avatarUrl: r.avatarUrl ?? null,
+      topics: r.topicKeys ?? [],
+      regions: r.regionCodes ?? [],
+      languages: (r.languages || []).map((l) => ({
+        isoCode: l.isoCode,
+        level: l.level,
+      })),
+
+      // legacy placeholders preserved
+      tags: [] as string[],
+      availability: null as null,
     }));
 
     return NextResponse.json({ ok: true, items });

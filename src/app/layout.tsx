@@ -88,7 +88,7 @@ export default async function RootLayout({
   // Insert Directory only for staff WITH permission
   if (signedIn && !isGuest && canViewDirectory) {
     // place Directory after Bookings
-    links.splice(1, 0, { href: "/modules/directory", label: "Directory" });
+    links.splice(1, 0, { href: "/modules/directory/v2", label: "Directory" });
   }
 
   return (
