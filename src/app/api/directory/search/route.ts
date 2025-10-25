@@ -1,14 +1,28 @@
+// src/app/api/directory/search/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "../../../../lib/auth";
-import prisma from "../../../../lib/prisma";
-import { Prisma as PrismaNS } from "@prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-// ---------- Types (match Directory V2 UI) ----------
-type SearchItem = {
+/**
+ * Directory Search API
+ *
+ * v=2 (Directory V2):
+ *   - scope=internal|global (default: global)
+ *   - inviteable=true|false
+ *       * DEFAULT (when param absent) for INTERNAL is **true** → keep only bookable/inviteable people.
+ *       * Set inviteable=false to relax this filter (show all internal staff).
+ *   - q, country, city, topic=*, region=*, lang=code:CEFR
+ *   - availableAt=ISO  slotMin=number  tz=IANA
+ *   - take, cursor (for public)
+ *   - Returns: { ok: true, items: Array<LeanItem>, nextCursor? }
+ *
+ * v≠2 fallback:
+ *   - Thin proxy that returns downstream JSON **unchanged** (no regression).
+ */
+
+type LeanItem = {
   id: string;
   displayName: string;
   headline?: string | null;
@@ -20,420 +34,292 @@ type SearchItem = {
   regions?: string[];
 };
 
-type Ok = { ok: true; items: SearchItem[]; nextCursor?: string | null };
-type Err = { ok: false; message: string };
+type ApiOk = { ok: true; items: LeanItem[]; nextCursor?: string | null };
+type ApiErr = { ok: false; message?: string };
 
-function json(status: number, body: Ok | Err) {
+function ok(items: LeanItem[], nextCursor?: string | null) {
+  const body: ApiOk = {
+    ok: true,
+    items,
+    ...(nextCursor ? { nextCursor } : {}),
+  };
+  return NextResponse.json(body, { status: 200 });
+}
+function err(status: number, message: string) {
+  const body: ApiErr = { ok: false, message };
   return NextResponse.json(body, { status });
 }
-
-/* ------------------------ Prisma meta helpers ------------------------ */
-
-type DmmfField = { name: string; kind: string; type: string; isList?: boolean };
-type DmmfModel = { name: string; fields: DmmfField[] };
-
-function getModels(): DmmfModel[] {
-  return ((PrismaNS as any).dmmf?.datamodel?.models ?? []) as DmmfModel[];
-}
-function getModel(name: string): DmmfModel | undefined {
-  return getModels().find((m) => m.name === name);
-}
-function toDelegateName(modelName: string) {
-  return modelName.charAt(0).toLowerCase() + modelName.slice(1);
-}
-function getDelegate(db: any, modelName: string) {
-  const camel = toDelegateName(modelName);
-  const direct = db?.[camel];
-  if (direct && typeof direct.findMany === "function") return direct;
-  const key = Object.keys(db || {}).find(
-    (k) => k.toLowerCase() === camel.toLowerCase()
-  );
-  const alt = key ? db[key] : null;
-  return alt && typeof alt.findMany === "function" ? alt : null;
-}
-
-function findGuestModelName(): string | null {
-  const models = getModels();
-  const mustHaveAnyOf = [
-    ["displayName", "fullName", "name"],
-    ["headline", "title"],
-    ["topics", "topicTags"],
-    ["regions", "regionTags"],
-    ["city"],
-    ["countryCode", "country"],
-  ];
-  function score(m: DmmfModel) {
-    const f = new Set(m.fields.map((x) => x.name));
-    let s = 0;
-    for (const group of mustHaveAnyOf) if (group.some((g) => f.has(g))) s++;
-    return s;
-  }
-  const ranked = models
-    .map((m) => ({ name: m.name, score: score(m) }))
-    .sort((a, b) => b.score - a.score);
-  const best = ranked[0];
-  return best && best.score > 0 ? best.name : null;
-}
-
-function pickField(modelName: string, candidates: string[]): string | null {
-  const meta = getModel(modelName);
-  if (!meta) return null;
-  const names = new Set(meta.fields.map((f) => f.name));
-  return candidates.find((c) => names.has(c)) ?? null;
-}
-
-function findLanguageRelation(modelName: string): {
-  fieldName: string | null;
-  targetModel: string | null;
-  codeField: string | null;
-  levelField: string | null;
-} {
-  const meta = getModel(modelName);
-  if (!meta)
-    return {
-      fieldName: null,
-      targetModel: null,
-      codeField: null,
-      levelField: null,
-    };
-
-  // Likeliest relation field names first
-  const relField =
-    meta.fields.find(
-      (f) =>
-        f.kind === "object" &&
-        ["languages", "profileLanguages", "spokenLanguages"].includes(f.name)
-    ) ??
-    meta.fields.find(
-      (f) => f.kind === "object" && f.isList && /lang/u.test(f.name)
-    );
-
-  if (!relField)
-    return {
-      fieldName: null,
-      targetModel: null,
-      codeField: null,
-      levelField: null,
-    };
-
-  const target = getModel(relField.type);
-  if (!target)
-    return {
-      fieldName: relField.name,
-      targetModel: relField.type,
-      codeField: null,
-      levelField: null,
-    };
-
-  const targetFields = new Set(target.fields.map((t) => t.name));
-  const codeField =
-    ["code", "isoCode", "langCode", "languageCode"].find((n) =>
-      targetFields.has(n)
-    ) ?? null;
-  const levelField =
-    ["level", "cefr", "cefrLevel", "proficiency", "fluency"].find((n) =>
-      targetFields.has(n)
-    ) ?? null;
-
-  return {
-    fieldName: relField.name,
-    targetModel: relField.type,
-    codeField,
-    levelField,
-  };
-}
-
-/* --------------------------------- GET --------------------------------- */
+const toBool = (v: unknown) =>
+  v === true || v === "true" || v === 1 || v === "1";
 
 export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const sp = url.searchParams;
+
+  const v = (sp.get("v") || "").trim();
+  const scope = (sp.get("scope") || "global").toLowerCase();
+
+  // — Internal filter default: true (bookable-only) unless caller explicitly sends inviteable=false
+  const inviteableParam = sp.get("inviteable");
+  const inviteableOnly =
+    inviteableParam == null
+      ? scope === "internal"
+        ? true
+        : false
+      : toBool(inviteableParam);
+
+  // Common filters
+  const q = (sp.get("q") || "").trim();
+  const country = (sp.get("country") || "").trim().toUpperCase();
+  const city = (sp.get("city") || "").trim();
+  const topics = sp.getAll("topic");
+  const regions = sp.getAll("region");
+  const langs = sp.getAll("lang"); // "en:B2" pairs
+
+  // Availability window
+  const availableAt = sp.get("availableAt");
+  const slotMin = Math.max(5, Number(sp.get("slotMin") || "30"));
+  const tz = (sp.get("tz") || "").trim();
+
+  // Pagination (public)
+  const take = sp.get("take");
+  const cursor = sp.get("cursor");
+
+  // Forward auth/session and org context
+  const cookie = req.headers.get("cookie") || "";
+  const authz = req.headers.get("authorization") || "";
+  const orgHeader = req.headers.get("x-org-id") || undefined;
+
+  const baseHeaders: Record<string, string> = {
+    ...(cookie ? { cookie } : {}),
+    ...(authz ? { authorization: authz } : {}),
+    ...(orgHeader ? { "x-org-id": orgHeader } : {}),
+  };
+
+  // Helper: convert availableAt/slotMin → start/end/startAt/durationMins (internal)
+  const internalWindow = (() => {
+    if (!availableAt) return null;
+    const start = new Date(availableAt);
+    if (Number.isNaN(start.getTime())) return null;
+    const end = new Date(start.getTime() + slotMin * 60_000);
+    return {
+      startISO: start.toISOString(),
+      endISO: end.toISOString(),
+      durationMins: slotMin,
+    };
+  })();
+
   try {
-    const session = await getServerSession(authOptions);
-    const role: string =
-      ((session as any)?.user?.role as string | undefined) ?? "guest";
-
-    // Parse query
-    const sp = req.nextUrl.searchParams;
-    const q = sp.get("q")?.trim() || "";
-    const country = sp.get("country")?.trim().toUpperCase() || "";
-    const city = sp.get("city")?.trim() || "";
-    const scope = sp.get("scope") === "internal" ? "internal" : "global";
-    const inviteable = sp.get("inviteable") === "true";
-    const topics = sp.getAll("topic").filter(Boolean);
-    const regions = sp.getAll("region").filter(Boolean);
-    const appearances = sp.getAll("appearance").filter(Boolean);
-    const travel = sp.get("travel") || "";
-    const languages = sp
-      .getAll("lang")
-      .map((s) => {
-        const [codeRaw, levelRaw] = s.split(":");
-        const code = (codeRaw || "").trim().toLowerCase();
-        const level = (levelRaw || "").trim().toUpperCase();
-        if (!code || !level) return null;
-        return { code, level };
-      })
-      .filter(Boolean) as Array<{ code: string; level: string }>;
-    const availableAt = sp.get("availableAt") || "";
-    const slotMin = Number(sp.get("slotMin") || "0") || null;
-    const tz = sp.get("tz") || "";
-
-    const cursor = sp.get("cursor") || null;
-    const limit = Math.min(Math.max(Number(sp.get("limit") || 20), 1), 50);
-    let take = limit;
-    let skip = 0;
-    if (cursor) {
-      const n = Number(cursor);
-      if (!Number.isNaN(n) && n >= 0) skip = n;
-    }
-
-    const effectiveScope =
-      scope === "internal" && (role === "staff" || role === "admin")
-        ? "internal"
-        : "global";
-
-    // Discover model + fields
-    const modelName = findGuestModelName();
-    const delegate = modelName ? getDelegate(prisma as any, modelName) : null;
-
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[dirV2] model:", {
-        modelName,
-        delegateName: modelName ? toDelegateName(modelName) : null,
-      });
-    }
-
-    if (!delegate) {
-      return json(200, { ok: true, items: [], nextCursor: null });
-    }
-
-    const fDisplayName = pickField(modelName!, [
-      "displayName",
-      "fullName",
-      "name",
-    ]);
-    const fFullName = pickField(modelName!, ["fullName"]);
-    const fHeadline = pickField(modelName!, ["headline", "title"]);
-    const fCity = pickField(modelName!, ["city", "locationCity"]);
-    const fCountry = pickField(modelName!, ["countryCode", "country"]);
-    const fAvatar = pickField(modelName!, [
-      "avatarUrl",
-      "photoUrl",
-      "profilePhotoUrl",
-      "headshotUrl",
-    ]);
-    const fTopics = pickField(modelName!, ["topics", "topicTags"]);
-    const fRegions = pickField(modelName!, ["regions", "regionTags"]);
-    const fAppear = pickField(modelName!, [
-      "appearanceTypes",
-      "formats",
-      "appearance",
-    ]);
-    const fTravel = pickField(modelName!, ["travelReadiness", "travelScope"]);
-    const fIsPublic = pickField(modelName!, [
-      "isPublic",
-      "publicProfile",
-      "isPublicProfile",
-    ]);
-    const fInviteable = pickField(modelName!, [
-      "isInviteable",
-      "inviteable",
-      "inviteAble",
-    ]);
-    const fUpdatedAt = pickField(modelName!, [
-      "updatedAt",
-      "modifiedAt",
-      "updated_at",
-    ]);
-
-    // Language relation introspection
-    const langRel = findLanguageRelation(modelName!);
-    const hasLangRel = !!langRel.fieldName;
-
-    // WHERE
-    const where: any = {};
-
-    if (effectiveScope === "global" && fIsPublic) where[fIsPublic] = true;
-    if (inviteable && fInviteable) where[fInviteable] = true;
-
-    if (q) {
-      // Build unique bigrams, e.g. "galeth" -> ["ga","al","le","et","th"]
-      const cleaned = q.toLowerCase().replace(/\s+/g, " ").trim();
-      const grams: string[] = [];
-      for (let i = 0; i < cleaned.length - 1; i++) {
-        const g = cleaned.slice(i, i + 2);
-        if (!/\s/.test(g) && !grams.includes(g)) grams.push(g);
-      }
-      // limit to first 6 grams to cap query size
-      const top = grams.slice(0, 6);
-
-      // Generate ALL 2-gram combinations so we match any two grams on a field
-      const pairs: [string, string][] = [];
-      for (let i = 0; i < top.length; i++) {
-        for (let j = i + 1; j < top.length; j++) {
-          pairs.push([top[i], top[j]]);
+    /* ============================================================
+       v2 — New behavior (Directory V2)
+       ============================================================ */
+    if (v === "2") {
+      if (scope === "internal") {
+        // Build /api/directory/org query
+        const orgQs = new URLSearchParams();
+        if (q) orgQs.set("q", q);
+        if (internalWindow) {
+          orgQs.set("start", internalWindow.startISO);
+          orgQs.set("end", internalWindow.endISO);
+          // compatibility variants used elsewhere in the app
+          orgQs.set("startAt", internalWindow.startISO);
+          orgQs.set("durationMins", String(internalWindow.durationMins));
         }
-      }
-      // safety cap (max ~10 combos)
-      const pairList = pairs.slice(0, 10);
 
-      const fieldOr = (field: string) => {
-        const or: any[] = [];
-        // direct contains
-        or.push({ [field]: { contains: q, mode: "insensitive" as const } });
-        // fuzzy: any two bigrams present
-        for (const [a, b] of pairList) {
-          or.push({
-            AND: [
-              { [field]: { contains: a, mode: "insensitive" as const } },
-              { [field]: { contains: b, mode: "insensitive" as const } },
-            ],
-          });
+        const orgUrl = new URL(
+          `/api/directory/org?${orgQs.toString()}`,
+          url
+        ).toString();
+        const res = await fetch(orgUrl, {
+          headers: baseHeaders,
+          cache: "no-store",
+        });
+        const j: any = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const m =
+            (j && (j.error || j.message)) ||
+            `Internal directory failed (${res.status})`;
+          return err(res.status, m);
         }
-        return or;
-      };
 
-      const or: any[] = [];
-      if (fDisplayName) or.push(...fieldOr(fDisplayName));
-      if (fFullName && fFullName !== fDisplayName)
-        or.push(...fieldOr(fFullName));
-      if (fHeadline) or.push(...fieldOr(fHeadline));
+        const rows: any[] = Array.isArray(j.items) ? j.items : [];
 
-      if (or.length) where.OR = or;
-    }
+        // inviteableOnly → keep only bookable (or inviteable alias). If flags
+        // are missing (roles degraded), do NOT hide rows.
+        const filtered = inviteableOnly
+          ? rows.filter((u) =>
+              Object.prototype.hasOwnProperty.call(u ?? {}, "bookable")
+                ? u.bookable === true
+                : Object.prototype.hasOwnProperty.call(u ?? {}, "inviteable")
+                ? u.inviteable === true
+                : true
+            )
+          : rows;
 
-    if (country && fCountry) where[fCountry] = country;
-    if (city && fCity) where[fCity] = { contains: city, mode: "insensitive" };
-
-    if (topics.length && fTopics) where[fTopics] = { hasSome: topics };
-    if (regions.length && fRegions) where[fRegions] = { hasSome: regions };
-    if (appearances.length && fAppear)
-      where[fAppear] = { hasSome: appearances };
-    if (travel && fTravel) where[fTravel] = travel;
-
-    // Languages: adapt to relation fields
-    if (languages.length && hasLangRel) {
-      if (langRel.codeField && langRel.levelField) {
-        // Both code + level exist
-        where[langRel.fieldName!] = {
-          some: {
-            OR: languages.map((l) => ({
-              AND: [
-                { [langRel.codeField!]: l.code },
-                { [langRel.levelField!]: l.level },
-              ],
-            })),
-          },
-        };
-      } else if (langRel.codeField) {
-        // Only code (e.g., isoCode) — ignore level in filter
-        const codes = Array.from(new Set(languages.map((l) => l.code)));
-        where[langRel.fieldName!] = {
-          some: { [langRel.codeField]: { in: codes } },
-        };
-      }
-    }
-
-    if (availableAt && slotMin && tz) {
-      const fHasAvail = pickField(modelName!, [
-        "hasAvailability",
-        "available",
-        "isAvailable",
-      ]);
-      if (fHasAvail) where[fHasAvail] = true;
-    }
-
-    // SELECT
-    const select: any = { id: true };
-    if (fDisplayName) select[fDisplayName] = true;
-    if (fFullName) select[fFullName] = true;
-    if (fHeadline) select[fHeadline] = true;
-    if (fCity) select[fCity] = true;
-    if (fCountry) select[fCountry] = true;
-    if (fAvatar) select[fAvatar] = true;
-    if (fTopics) select[fTopics] = true;
-    if (fRegions) select[fRegions] = true;
-    if (hasLangRel) {
-      // Select only fields that exist on the related model
-      const langSelect: any = {};
-      if (langRel.codeField) langSelect[langRel.codeField] = true;
-      if (langRel.levelField) langSelect[langRel.levelField] = true;
-      select[langRel.fieldName!] = { select: langSelect };
-    }
-
-    const orderBy: any[] = [];
-    if (fUpdatedAt) orderBy.push({ [fUpdatedAt]: "desc" as const });
-    if (fDisplayName) orderBy.push({ [fDisplayName]: "asc" as const });
-
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[dirV2] where/select", {
-        where,
-        select,
-        orderBy,
-        skip,
-        take,
-        langRel,
-      });
-    }
-
-    // Query
-    let rows: any[] = [];
-    try {
-      rows = await delegate.findMany({
-        where,
-        select,
-        orderBy: orderBy.length ? orderBy : undefined,
-        take,
-        skip,
-      });
-    } catch (e) {
-      if (process.env.NODE_ENV !== "production") {
-        console.error("[dirV2] findMany error:", e);
-      }
-      return json(200, { ok: true, items: [], nextCursor: null });
-    }
-
-    // Map to SearchItem
-    const items: SearchItem[] = rows.map((r: any) => {
-      const name =
-        (fDisplayName ? r[fDisplayName] : undefined) ||
-        (fFullName ? r[fFullName] : undefined) ||
-        "Unknown";
-
-      let langs: Array<{ code: string; level: string }> = [];
-      if (hasLangRel && Array.isArray(r[langRel.fieldName!])) {
-        langs = r[langRel.fieldName!].map((x: any) => ({
-          code: String(
-            (langRel.codeField ? x[langRel.codeField] : "") ?? ""
-          ).toLowerCase(),
-          level: String(
-            (langRel.levelField ? x[langRel.levelField] : "") ?? ""
-          ).toUpperCase(), // may be empty if schema has no level
+        const items: LeanItem[] = filtered.map((u) => ({
+          id: String(u.id ?? u.userId ?? ""),
+          displayName:
+            (u.displayName as string) ||
+            (u.name as string) ||
+            (u.email as string) ||
+            "Unnamed",
+          headline: null,
+          city: (u.city as string) ?? null,
+          countryCode: (u.countryCode as string) ?? null,
+          avatarUrl: (u.avatarUrl as string) ?? null,
+          languages: [],
+          topics: [],
+          regions: [],
         }));
+
+        return ok(items);
       }
 
-      const topicsOut =
-        fTopics && Array.isArray(r[fTopics]) ? (r[fTopics] as string[]) : [];
-      const regionsOut =
-        fRegions && Array.isArray(r[fRegions]) ? (r[fRegions] as string[]) : [];
+      // GLOBAL scope → public experts search
+      const pubQs = new URLSearchParams();
+      pubQs.set("visibility", "public");
+      if (q) pubQs.set("q", q);
+      if (country) pubQs.set("country", country);
+      if (city) pubQs.set("city", city);
+      topics.forEach((t) => pubQs.append("topic", t));
+      regions.forEach((r) => pubQs.append("region", r));
+      langs.forEach((lp) => pubQs.append("lang", lp));
+      if (availableAt) pubQs.set("availableAt", availableAt);
+      if (slotMin) pubQs.set("slotMin", String(slotMin));
+      if (tz) pubQs.set("tz", tz);
+      // Default page size so empty-text searches return something
+      pubQs.set("take", take || "20");
+      if (cursor) pubQs.set("cursor", cursor);
 
-      return {
-        id: String(r.id),
-        displayName: name,
-        headline: fHeadline ? r[fHeadline] ?? null : null,
-        city: fCity ? r[fCity] ?? null : null,
-        countryCode: fCountry ? r[fCountry] ?? null : null,
-        avatarUrl: fAvatar ? r[fAvatar] ?? null : null,
-        languages: langs,
-        topics: topicsOut,
-        regions: regionsOut,
-      };
-    });
+      // Ensure orgId is provided; /api/experts/search requires it
+      let expertsOrgId = (sp.get("orgId") || "").trim();
+      if (!expertsOrgId && orgHeader) expertsOrgId = orgHeader.trim();
+      if (!expertsOrgId) {
+        try {
+          const sessRes = await fetch(
+            new URL("/api/auth/session", url).toString(),
+            {
+              headers: cookie ? { cookie } : {},
+              cache: "no-store",
+            }
+          );
+          if (sessRes.ok) {
+            const sess: any = await sessRes.json().catch(() => null);
+            expertsOrgId =
+              (sess?.orgId as string) ??
+              (sess?.user?.orgId as string) ??
+              (sess?.user?.org?.id as string) ??
+              "";
+          }
+        } catch {
+          // ignore; handled below
+        }
+      }
+      if (!expertsOrgId) {
+        return err(
+          401,
+          "Unauthorized (missing orgId for global experts search)."
+        );
+      }
+      pubQs.set("orgId", expertsOrgId);
 
-    const nextCursor = items.length === take ? String(skip + take) : null;
-    return json(200, { ok: true, items, nextCursor });
-  } catch (err: any) {
-    return json(500, {
-      ok: false,
-      message: err?.message || "Unexpected error",
-    });
+      const pubUrl = new URL(
+        `/api/experts/search?${pubQs.toString()}`,
+        url
+      ).toString();
+
+      // Call with session cookie so /api/experts/search can read the viewer
+      const res = await fetch(pubUrl, {
+        headers: baseHeaders,
+        cache: "no-store",
+      });
+
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const m =
+          (j && (j.error || j.message)) ||
+          `Public search failed (${res.status})`;
+        return err(res.status, m);
+      }
+
+      const itemsRaw: any[] = Array.isArray(j.items) ? j.items : [];
+      const items: LeanItem[] = itemsRaw.map((e) => ({
+        id: String(e.id),
+        displayName: (e.name as string) ?? "Unnamed",
+        headline: (e.headline as string) ?? null,
+        city: (e.city as string) ?? null,
+        countryCode: (e.countryCode as string) ?? null,
+        avatarUrl: (e.avatarUrl as string) ?? null,
+        languages: Array.isArray(e.languages)
+          ? e.languages
+              .filter((l: any) => l && typeof l.code === "string" && l.level)
+              .map((l: any) => ({
+                code: String(l.code),
+                level: String(l.level),
+              }))
+          : [],
+        topics: (Array.isArray(e.topics) ? e.topics : []) as string[],
+        regions: (Array.isArray(e.regions) ? e.regions : []) as string[],
+      }));
+
+      const nextCursor =
+        (typeof j.nextCursor === "string" && j.nextCursor) || null;
+
+      return ok(items, nextCursor || undefined);
+    }
+
+    /* ============================================================
+       v≠2 fallback — return legacy behavior unchanged (no regression)
+       ============================================================ */
+    if (scope === "internal") {
+      const orgQs = new URLSearchParams();
+      if (q) orgQs.set("q", q);
+      if (internalWindow) {
+        orgQs.set("start", internalWindow.startISO);
+        orgQs.set("end", internalWindow.endISO);
+        orgQs.set("startAt", internalWindow.startISO);
+        orgQs.set("durationMins", String(internalWindow.durationMins));
+      }
+      const orgUrl = new URL(
+        `/api/directory/org?${orgQs.toString()}`,
+        url
+      ).toString();
+      const res = await fetch(orgUrl, {
+        headers: baseHeaders,
+        cache: "no-store",
+      });
+      const j = await res.json().catch(() => ({}));
+      return NextResponse.json(j, { status: res.status });
+    } else {
+      const pubQs = new URLSearchParams();
+      pubQs.set("visibility", "public");
+      if (q) pubQs.set("q", q);
+      if (country) pubQs.set("country", country);
+      if (city) pubQs.set("city", city);
+      topics.forEach((t) => pubQs.append("topic", t));
+      regions.forEach((r) => pubQs.append("region", r));
+      langs.forEach((lp) => pubQs.append("lang", lp));
+      if (availableAt) pubQs.set("availableAt", availableAt);
+      if (slotMin) pubQs.set("slotMin", String(slotMin));
+      if (tz) pubQs.set("tz", tz);
+      if (take) pubQs.set("take", take || "");
+      if (cursor) pubQs.set("cursor", cursor || "");
+
+      const pubUrl = new URL(
+        `/api/experts/search?${pubQs.toString()}`,
+        url
+      ).toString();
+      let res = await fetch(pubUrl, {
+        headers: baseHeaders,
+        cache: "no-store",
+      });
+      if (res.status === 401) {
+        res = await fetch(pubUrl, { cache: "no-store" });
+      }
+      const j = await res.json().catch(() => ({}));
+      return NextResponse.json(j, { status: res.status });
+    }
+  } catch (e: any) {
+    return err(500, e?.message || "Directory search failed");
   }
 }

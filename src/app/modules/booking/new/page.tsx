@@ -1,18 +1,13 @@
+// src/app/modules/booking/new/page.tsx
 "use client";
 
 /**
- * New Booking — parity with existing UI plus post-create HOST participants batch
- *
- * What’s new (no regressions):
- * - After creating the booking, if hosts were selected and the flag is ON,
- *   POST them in one batch to /api/bookings/:id/participants as role=HOST.
- * - No “primary host” concept.
- * - We do NOT mirror any legacy single-host fields on create (no hostUserId/hostName).
- *
- * Flags:
- * - NEXT_PUBLIC_APPEARANCE_PHONE (default: true)
- * - NEXT_PUBLIC_FEATURE_MULTI_HOSTS (existing; controls host UI visibility)
- * - NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED (default: true; controls post-create batch)
+ * New Booking — Unified People Picker + Host toggle (slot-safe)
+ * - One picker (Org | Public | Both). No label/role-name filtering.
+ * - Add people once; mark any as Host via toggle (default: Guest).
+ * - Only non-hosts are sent as "guests" in the create payload.
+ * - After create, we batch-add toggled hosts via /participants.
+ * - Org context is threaded via query param + x-org-id header.
  */
 
 import * as React from "react";
@@ -27,11 +22,9 @@ import * as AlertModule from "../../../../components/ui/Alert";
 const UIAlert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
 
-/* ---------- Flags ---------- */
+/* ---------- Flags (env) ---------- */
 const PHONE_ENABLED =
   (process.env.NEXT_PUBLIC_APPEARANCE_PHONE ?? "true") !== "false";
-const MULTI_HOSTS_ENABLED =
-  (process.env.NEXT_PUBLIC_FEATURE_MULTI_HOSTS ?? "false") === "true";
 const MULTI_PARTICIPANTS_ENABLED =
   (process.env.NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
 
@@ -59,30 +52,70 @@ function useDebounce<T>(v: T, delay = 250): T {
   return s;
 }
 
+/* ---------- Session (client) ---------- */
+type SessionUser = {
+  role?: string; // "guest" for guest identity
+  orgId?: string | null;
+  name?: string | null;
+  email?: string | null;
+};
+function useSessionIdentity() {
+  const [state, setState] = React.useState<
+    | { kind: "loading" }
+    | { kind: "ready"; user: SessionUser | null; identity: "guest" | "staff" }
+  >({ kind: "loading" });
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session", { cache: "no-store" });
+        const json = await res.json().catch(() => ({}));
+        const user = (json?.user ?? null) as SessionUser | null;
+        const identity =
+          (user as any)?.role === "guest" ? "guest" : ("staff" as const);
+        if (!cancelled) setState({ kind: "ready", user, identity });
+      } catch {
+        if (!cancelled)
+          setState({ kind: "ready", user: null, identity: "guest" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return state;
+}
+
 /* ---------- Types ---------- */
 type TAppearance = "ONLINE" | "IN_PERSON" | "PHONE";
 type TScope = "UNIFIED" | "PER_GUEST";
 type TProvisioning = "SHARED" | "PER_GUEST";
+type TKind = "EXPERT" | "REPORTER"; // optional hint if the API provides it
 
-type THostScope = "UNIFIED" | "PER_HOST";
-type THostProvisioning = "SHARED" | "PER_HOST";
-
-type TKind = "EXPERT" | "REPORTER";
-
-type ParticipantRow = {
+type DirectoryItem = {
   id: string;
   name: string | null;
-  kind: TKind;
+  kind?: TKind | null; // optional, display only
   city?: string | null;
   countryCode?: string | null;
   tags?: string[] | null;
   availability?: { status: "AVAILABLE" | "BUSY" | "UNKNOWN" } | null;
+  source: "org" | "public";
 };
 
-type GuestRow = {
-  userId: string | null;
+type SelectedPerson = {
+  userId: string;
   name: string;
-  kind: TKind;
+  // presentation
+  source: "org" | "public";
+  kind?: TKind | null;
+
+  // host toggle
+  isHost: boolean;
+
+  // guest-appearance fields (used only when !isHost)
   order: number;
   appearanceType: TAppearance;
   joinUrl: string | null;
@@ -91,34 +124,25 @@ type GuestRow = {
   dialInfo: string | null;
 };
 
-type HostRow = {
-  userId: string | null;
-  name: string;
-  order: number;
-  appearanceType: TAppearance;
-  joinUrl: string | null;
-  venueName: string | null;
-  venueAddress: string | null;
-  dialInfo: string | null;
-};
-
-/* =======================================================================
-   Guest picker (reporters + experts from org; public experts too)
-   ======================================================================= */
-function AddGuestPicker(props: {
+/* ===============================================================
+   Unified People Picker (Org | Public | Both)
+   ===============================================================*/
+function PeoplePicker(props: {
   startAtISO: string;
   durationMins: number;
-  onPick: (row: { id: string; name: string; kind: TKind }) => void;
-  existingIds: string[];
+  onPick: (row: DirectoryItem) => void;
+  existingIds: string[]; // userIds currently selected
+  orgId?: string | null;
 }) {
-  const { startAtISO, durationMins, onPick, existingIds } = props;
+  const { startAtISO, durationMins, onPick, existingIds, orgId } = props;
+
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
   const [visibility, setVisibility] = React.useState<"org" | "public" | "all">(
     "org"
   );
   const [onlyAvailable, setOnlyAvailable] = React.useState(false);
-  const [items, setItems] = React.useState<ParticipantRow[]>([]);
+  const [items, setItems] = React.useState<DirectoryItem[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -129,31 +153,50 @@ function AddGuestPicker(props: {
     if (!open) return;
     void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, debouncedQ, visibility, onlyAvailable, startAtISO, durationMins]);
+  }, [
+    open,
+    debouncedQ,
+    visibility,
+    onlyAvailable,
+    startAtISO,
+    durationMins,
+    orgId,
+  ]);
 
-  function normalizeOrgRows(dirItems: any[]): ParticipantRow[] {
-    let rows = (dirItems || [])
-      .filter((u: any) => u?.kind === "REPORTER" || u?.kind === "EXPERT")
-      .map((u: any) => ({
-        id: String(u.id),
-        name: (u.displayName as string) ?? null,
-        kind: (u.kind as TKind) ?? "EXPERT",
-        city: u.city ?? null,
-        countryCode: u.countryCode ?? null,
-        tags: u.tags ?? [],
-        availability:
-          u.availability === "AVAILABLE" || u.availability === "BUSY"
-            ? { status: u.availability }
-            : { status: "UNKNOWN" as const },
-      })) as ParticipantRow[];
-
-    if (onlyAvailable && haveWindow) {
-      rows = rows.filter((r) => r.availability?.status === "AVAILABLE");
-    }
-    return rows;
+  function normAvail(v: any): "AVAILABLE" | "BUSY" | "UNKNOWN" {
+    const s = String(v?.status ?? v ?? "UNKNOWN").toUpperCase();
+    return s === "AVAILABLE" || s === "BUSY" ? (s as any) : "UNKNOWN";
   }
 
-  async function fetchOrgRows(): Promise<ParticipantRow[]> {
+  function mapOrgRows(raw: any[]): DirectoryItem[] {
+    const out: DirectoryItem[] = [];
+    for (const u of raw || []) {
+      const id = u?.id ?? u?.userId ?? u?.uid ?? u?.email ?? null;
+      if (!id) continue;
+
+      const name = u?.displayName ?? u?.name ?? u?.fullName ?? u?.email ?? null;
+
+      const maybeKind = String(u?.kind ?? "").toUpperCase();
+      const kind: TKind | null =
+        maybeKind === "EXPERT" || maybeKind === "REPORTER"
+          ? (maybeKind as TKind)
+          : null;
+
+      out.push({
+        id: String(id),
+        name: name ? String(name) : null,
+        kind,
+        city: u?.city ?? null,
+        countryCode: u?.countryCode ?? null,
+        tags: Array.isArray(u?.tags) ? u.tags : [],
+        availability: { status: normAvail(u?.availability) },
+        source: "org",
+      });
+    }
+    return out;
+  }
+
+  async function fetchOrgRows(): Promise<DirectoryItem[]> {
     const sp = new URLSearchParams();
     if (debouncedQ) sp.set("q", debouncedQ);
     if (haveWindow) {
@@ -161,35 +204,71 @@ function AddGuestPicker(props: {
       const end = new Date(start.getTime() + durationMins * 60_000);
       sp.set("start", start.toISOString());
       sp.set("end", end.toISOString());
+      // compatibility variants
+      sp.set("startAt", start.toISOString());
+      sp.set("durationMins", String(durationMins));
     }
+    if (orgId) sp.set("orgId", orgId);
+
     const res = await fetch(`/api/directory/org?${sp.toString()}`, {
       credentials: "include",
+      headers: { ...(orgId ? { "x-org-id": orgId } : {}) },
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok)
       throw new Error(j?.error || `Directory failed (${res.status})`);
-    const dirItems = Array.isArray(j.items) ? j.items : [];
-    return normalizeOrgRows(dirItems);
+
+    const arr = Array.isArray(j.items)
+      ? j.items
+      : Array.isArray(j.users)
+      ? j.users
+      : [];
+
+    // Align to the route’s shape: prefer an explicit boolean if present.
+    // 1) If any row has `bookable`, filter by it.
+    // 2) Else if any row has `inviteable`, filter by it.
+    // 3) Else show all (route did not provide a flag).
+    const hasBookable = (arr as any[]).some((u) =>
+      Object.prototype.hasOwnProperty.call(u ?? {}, "bookable")
+    );
+    const hasInviteable = !hasBookable
+      ? (arr as any[]).some((u) =>
+          Object.prototype.hasOwnProperty.call(u ?? {}, "inviteable")
+        )
+      : false;
+
+    const base = hasBookable
+      ? (arr as any[]).filter((u) => u?.bookable === true)
+      : hasInviteable
+      ? (arr as any[]).filter((u) => u?.inviteable === true)
+      : (arr as any[] as any[]);
+
+    let rows = mapOrgRows(base);
+
+    if (onlyAvailable && haveWindow) {
+      rows = rows.filter((r) => r.availability?.status === "AVAILABLE");
+    }
+    return rows;
   }
 
-  async function fetchPublicRows(): Promise<ParticipantRow[]> {
+  async function fetchPublicRows(): Promise<DirectoryItem[]> {
     const sp = new URLSearchParams({ visibility: "public", take: "20" });
     if (debouncedQ) sp.set("q", debouncedQ);
-    // Send the booking window so the API can compute availability
+
     if (haveWindow) {
       const start = new Date(startAtISO);
       const end = new Date(start.getTime() + durationMins * 60_000);
       sp.set("start", start.toISOString());
       sp.set("end", end.toISOString());
-      // also include the alternate shape for compatibility
       sp.set("startAt", start.toISOString());
       sp.set("durationMins", String(durationMins));
     }
-    // Let server pre-filter, if supported
     if (onlyAvailable) sp.set("onlyAvailable", "true");
+    if (orgId) sp.set("orgId", orgId);
 
     const res = await fetch(`/api/experts/search?${sp.toString()}`, {
       credentials: "include",
+      headers: { ...(orgId ? { "x-org-id": orgId } : {}) },
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok)
@@ -197,8 +276,7 @@ function AddGuestPicker(props: {
 
     const items: any[] = Array.isArray(j.items) ? j.items : [];
     return items.map((e: any) => {
-      // accept both string and {status} shapes
-      const avail = (e as any).availability;
+      const avail = e?.availability;
       const status =
         typeof avail === "string"
           ? avail
@@ -212,7 +290,8 @@ function AddGuestPicker(props: {
         city: e.city ?? null,
         countryCode: e.countryCode ?? null,
         tags: e.tags ?? [],
-        availability: { status } as ParticipantRow["availability"],
+        availability: { status } as DirectoryItem["availability"],
+        source: "public" as const,
       };
     });
   }
@@ -230,16 +309,17 @@ function AddGuestPicker(props: {
         setItems(await fetchPublicRows());
         return;
       }
+
       // both
-      let orgRows: ParticipantRow[] = [];
-      let pubRows: ParticipantRow[] = [];
+      let orgRows: DirectoryItem[] = [];
+      let pubRows: DirectoryItem[] = [];
       try {
         orgRows = await fetchOrgRows();
       } catch {}
       try {
         pubRows = await fetchPublicRows();
       } catch {}
-      const map = new Map();
+      const map = new Map<string, DirectoryItem>();
       [...orgRows, ...pubRows].forEach((r) => {
         if (!map.has(r.id)) map.set(r.id, r);
       });
@@ -253,15 +333,16 @@ function AddGuestPicker(props: {
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="space-y-2">
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
         >
-          {open ? "Hide" : "Browse"}&nbsp; Add guest (expert/reporter)
+          {open ? "Hide" : "Add"}&nbsp; person
         </button>
+
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -275,6 +356,7 @@ function AddGuestPicker(props: {
           }
           className="min-w-[240px] flex-1 rounded-md border px-3 py-2"
         />
+
         {(["org", "public", "all"] as const).map((v) => (
           <button
             key={v}
@@ -289,10 +371,10 @@ function AddGuestPicker(props: {
             {v === "all" ? "Both" : v}
           </button>
         ))}
-        <label className="flex items-center gap-2 text-sm">
+
+        <label className="ml-2 inline-flex select-none items-center gap-2 text-xs">
           <input
             type="checkbox"
-            checked={onlyAvailable}
             onChange={(e) => setOnlyAvailable(e.target.checked)}
           />
           Only available
@@ -300,311 +382,89 @@ function AddGuestPicker(props: {
       </div>
 
       {open && (
-        <div className="rounded-md border p-2">
-          {loading && <div className="text-sm text-gray-600">Loading…</div>}
+        <div className="space-y-2 rounded-md border p-2">
+          {loading && <div className="text-sm opacity-80">Loading…</div>}
           {error && <div className="text-sm text-red-700">{error}</div>}
           {!loading && !error && items.length === 0 && (
-            <div className="text-sm text-gray-600">No matches.</div>
+            <div className="text-sm opacity-70">No matches.</div>
           )}
-          <div className="flex flex-col gap-2">
-            {items.map((p) => {
-              const disabled = props.existingIds.includes(p.id);
-              const status = p.availability?.status;
-              const badge =
-                status === "AVAILABLE"
-                  ? "bg-green-100 text-green-800"
-                  : status === "BUSY"
-                  ? "bg-red-100 text-red-800"
-                  : "bg-gray-100 text-gray-700";
-              const roleBadge =
-                p.kind === "REPORTER"
-                  ? "bg-blue-100 text-blue-800"
-                  : "bg-purple-100 text-purple-800";
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() =>
-                    !disabled &&
-                    props.onPick({
-                      id: p.id,
-                      name:
-                        p.name ||
-                        (p.kind === "REPORTER" ? "Reporter" : "Expert"),
-                      kind: p.kind,
-                    })
-                  }
-                  className={clsx(
-                    "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
-                    disabled && "opacity-50"
-                  )}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{p.name || "Unnamed"}</span>
+
+          {items.map((p) => {
+            const disabled = props.existingIds.includes(p.id);
+            const status = p.availability?.status;
+            const kindBadge =
+              p.kind === "REPORTER"
+                ? "bg-blue-100 text-blue-800"
+                : p.kind === "EXPERT"
+                ? "bg-purple-100 text-purple-800"
+                : "bg-gray-100 text-gray-700";
+
+            return (
+              <button
+                key={`${p.source}-${p.id}`}
+                type="button"
+                disabled={disabled}
+                onClick={() => !disabled && onPick(p)}
+                className={clsx(
+                  "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
+                  disabled && "opacity-50"
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <div className="font-medium">{p.name || "Unnamed"}</div>
+                  <span className="rounded bg-gray-200 px-1.5 py-0.5 text-[11px]">
+                    {p.source.toUpperCase()}
+                  </span>
+                  {p.kind && (
                     <span
                       className={clsx(
-                        "rounded px-1.5 py-0.5 text-[10px]",
-                        roleBadge
+                        "rounded px-1.5 py-0.5 text-[11px]",
+                        kindBadge
                       )}
                     >
                       {p.kind}
                     </span>
-                    <span
-                      className={clsx(
-                        "rounded px-1.5 py-0.5 text-[10px]",
-                        badge
-                      )}
-                    >
-                      {status ?? "UNKNOWN"}
-                    </span>
-                    {p.city && (
-                      <span className="text-[11px] text-gray-600">
-                        {p.city}
-                      </span>
-                    )}
-                    {p.countryCode && (
-                      <span className="text-[11px] text-gray-600">
-                        ({p.countryCode})
-                      </span>
-                    )}
-                    {(p.tags || []).slice(0, 2).map((t) => (
-                      <span
-                        key={t}
-                        className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-700"
-                      >
-                        #{t}
-                      </span>
-                    ))}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* =======================================================================
-   Host picker — availability-aware (sends both window shapes)
-   ======================================================================= */
-type HostDirectoryRow = { id: string; name: string | null };
-
-function AddHostPicker(props: {
-  onPick: (row: HostDirectoryRow) => void;
-  existingIds: string[];
-  startAtISO: string;
-  durationMins: number;
-}) {
-  const { onPick, existingIds, startAtISO, durationMins } = props;
-  const [open, setOpen] = React.useState(false);
-  const [q, setQ] = React.useState("");
-  const [items, setItems] = React.useState<any[]>([]);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-
-  const debouncedQ = useDebounce(q, 250);
-  const haveWindow = !!(startAtISO && durationMins > 0);
-  const windowStart = React.useMemo(
-    () => (haveWindow ? new Date(startAtISO) : null),
-    [haveWindow, startAtISO]
-  );
-  const windowEnd = React.useMemo(
-    () =>
-      haveWindow && windowStart
-        ? new Date(windowStart.getTime() + durationMins * 60_000)
-        : null,
-    [haveWindow, windowStart, durationMins]
-  );
-
-  React.useEffect(() => {
-    if (!open) return;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const sp = new URLSearchParams();
-        if (debouncedQ) sp.set("q", debouncedQ);
-        // send BOTH shapes to be safe
-        if (haveWindow && windowStart && windowEnd) {
-          sp.set("start", windowStart.toISOString());
-          sp.set("end", windowEnd.toISOString());
-          sp.set("startAt", windowStart.toISOString());
-          sp.set("durationMins", String(durationMins));
-        }
-        const res = await fetch(`/api/hosts/search?${sp.toString()}`, {
-          credentials: "include",
-        });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(j?.error || "Failed to load hosts");
-        setItems(Array.isArray(j.items) ? j.items : []);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load hosts");
-        setItems([]);
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, debouncedQ, startAtISO, durationMins]);
-
-  function overlaps(a0: Date, a1: Date, b0: any, b1: any) {
-    const s = b0 ?? (Array.isArray(b0) ? b0[0] : undefined);
-    const e = b1 ?? (Array.isArray(b1) ? b1[1] : undefined);
-    if (!s || !e) return false;
-    const bs = new Date(typeof s === "string" ? s : String(s));
-    const be = new Date(typeof e === "string" ? e : String(e));
-    return bs < a1 && be > a0;
-  }
-
-  function hostStatus(it: any): "AVAILABLE" | "BUSY" | "UNKNOWN" {
-    if (!it) return "UNKNOWN";
-    const a = it.availability;
-
-    // explicit signals
-    if (a && typeof a === "object") {
-      const s = (a.status ?? a.state) as string | undefined;
-      if (s === "AVAILABLE" || s === "BUSY") return s;
-      if (typeof a.isAvailable === "boolean")
-        return a.isAvailable ? "AVAILABLE" : "BUSY";
-      if (typeof a.available === "boolean")
-        return a.available ? "AVAILABLE" : "BUSY";
-      if (Array.isArray(a.busy) && windowStart && windowEnd) {
-        const hit = a.busy.some((w: any) =>
-          overlaps(windowStart, windowEnd, w?.start ?? w?.s, w?.end ?? w?.e)
-        );
-        return hit ? "BUSY" : "AVAILABLE";
-      }
-    }
-
-    if (typeof a === "string")
-      return a === "AVAILABLE" || a === "BUSY" ? a : "UNKNOWN";
-    if (typeof it.status === "string") {
-      const s = it.status.toUpperCase();
-      if (s === "AVAILABLE" || s === "BUSY") return s as any;
-    }
-    if (typeof it.isAvailable === "boolean")
-      return it.isAvailable ? "AVAILABLE" : "BUSY";
-    if (typeof it.available === "boolean")
-      return it.available ? "AVAILABLE" : "BUSY";
-    if (typeof it.busy === "boolean") return it.busy ? "BUSY" : "AVAILABLE";
-
-    // derive from arrays
-    const arrays = [
-      it.busy,
-      it.busyWindows,
-      it.calendarBusy,
-      it.blocks,
-      it.availability?.busy,
-      it.calendar?.busy,
-    ].filter(Boolean);
-
-    if (arrays.length && windowStart && windowEnd) {
-      let sawAny = false;
-      for (const arr of arrays) {
-        if (!Array.isArray(arr)) continue;
-        sawAny = true;
-        for (const w of arr) {
-          const s = w?.start ?? w?.s ?? w?.[0];
-          const e = w?.end ?? w?.e ?? w?.[1];
-          if (s && e && overlaps(windowStart, windowEnd, s, e)) return "BUSY";
-        }
-      }
-      if (sawAny) return "AVAILABLE";
-    }
-
-    return "UNKNOWN";
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
-        >
-          {open ? "Hide" : "Browse"}&nbsp; Add host
-        </button>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onFocus={() => setOpen(true)}
-          onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
-          className="w-full rounded-md border px-3 py-2"
-          placeholder="Search hosts…"
-        />
-      </div>
-
-      {open && (
-        <div className="rounded-md border p-2">
-          {loading && (
-            <div className="text-sm text-gray-600">Loading hosts…</div>
-          )}
-          {error && <div className="text-sm text-red-700">{error}</div>}
-          {!loading && !error && items.length === 0 && (
-            <div className="text-sm text-gray-600">
-              No host directory available.
-            </div>
-          )}
-          <div className="flex flex-col gap-2">
-            {items.map((h: any) => {
-              const disabled = props.existingIds.includes(h.id);
-              const status = hostStatus(h);
-              const badge =
-                status === "AVAILABLE"
-                  ? "bg-green-100 text-green-800"
-                  : status === "BUSY"
-                  ? "bg-red-100 text-red-800"
-                  : "bg-gray-100 text-gray-700";
-              return (
-                <button
-                  key={h.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() =>
-                    !disabled &&
-                    props.onPick({
-                      id: h.id,
-                      name: h.name || "Host",
-                    })
-                  }
-                  className={clsx(
-                    "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
-                    disabled && "opacity-50"
                   )}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{h.name || "Unnamed"}</span>
-                    <span
-                      className={clsx(
-                        "rounded px-1.5 py-0.5 text-[10px]",
-                        badge
-                      )}
-                    >
-                      {status ?? "UNKNOWN"}
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px]">
+                    {status ?? "UNKNOWN"}
+                  </span>
+                  {p.city && (
+                    <span className="text-xs opacity-70">{p.city}</span>
+                  )}
+                  {p.countryCode && (
+                    <span className="text-xs opacity-70">
+                      ({p.countryCode})
                     </span>
-                    <span className="text-[11px] text-gray-500">{h.id}</span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-/* =======================================================================
+/* ===============================================================
    Page
-   ======================================================================= */
+   ===============================================================*/
 export default function NewBookingPage() {
   const router = useRouter();
 
-  // Core booking fields
+  // Access control (client): guests cannot create; staff must have orgId
+  const session = useSessionIdentity();
+  const blocked =
+    session.kind === "ready" &&
+    (!session.user ||
+      session.identity !== "staff" ||
+      !session.user.orgId ||
+      session.user.orgId === null);
+
+  const effectiveOrgId =
+    session.kind === "ready" ? session.user?.orgId ?? null : null;
+
+  // Core booking fields (guests model retained; "guests" === non-host participants)
   const [form, setForm] = React.useState<{
     subject: string;
     newsroomName: string;
@@ -613,25 +473,16 @@ export default function NewBookingPage() {
     startAt: string; // ISO
     durationMins: number;
 
-    // Guests model
+    // Guest appearance model (applies only to non-hosts)
     appearanceScope: TScope;
     accessProvisioning: TProvisioning;
     appearanceType: TAppearance | null; // when UNIFIED
 
-    // UNIFIED defaults (guests)
+    // UNIFIED defaults (non-hosts)
     locationUrl: string;
     locationName: string;
     locationAddress: string;
     dialInfo: string;
-
-    // Hosts model (UNIFIED controls)
-    hostAppearanceScope: THostScope;
-    hostAccessProvisioning: THostProvisioning;
-    hostAppearanceType: TAppearance | null;
-    hostLocationUrl: string;
-    hostLocationName: string;
-    hostLocationAddress: string;
-    hostDialInfo: string;
   }>({
     subject: "",
     newsroomName: "",
@@ -640,44 +491,86 @@ export default function NewBookingPage() {
     startAt: nextFullHourLocalISO(),
     durationMins: 30,
 
-    // guests model
     appearanceScope: "UNIFIED",
     accessProvisioning: "SHARED",
     appearanceType: "ONLINE",
-
     locationUrl: "",
     locationName: "",
     locationAddress: "",
     dialInfo: "",
-
-    // hosts model defaults
-    hostAppearanceScope: "UNIFIED",
-    hostAccessProvisioning: "SHARED",
-    hostAppearanceType: "ONLINE",
-    hostLocationUrl: "",
-    hostLocationName: "",
-    hostLocationAddress: "",
-    hostDialInfo: "",
   });
 
-  // Guests & Hosts arrays
-  const [guests, setGuests] = React.useState<GuestRow[]>([]);
-  const [hosts, setHosts] = React.useState<HostRow[]>([]);
+  // Selected participants (single list, each with Host toggle)
+  const [people, setPeople] = React.useState<SelectedPerson[]>([]);
 
-  // Derived helpers
+  // Derived
   const guestsUnified = form.appearanceScope === "UNIFIED";
   const guestsSharedProvisioned = form.accessProvisioning === "SHARED";
-  const hostUnified = form.hostAppearanceScope === "UNIFIED";
-  const hostSharedProvisioned = form.hostAccessProvisioning === "SHARED";
-  const hostUnifiedType = (form.hostAppearanceType ?? "ONLINE") as TAppearance;
 
-  // Client-side inline validations (lightweight; mirrors Edit)
+  // Form helpers
+  function addPersonFromDirectory(row: DirectoryItem) {
+    setPeople((xs) => {
+      if (xs.some((p) => p.userId === row.id)) return xs;
+      return [
+        ...xs,
+        {
+          userId: row.id,
+          name: row.name || (row.kind ? row.kind : "Person"),
+          source: row.source,
+          kind: row.kind ?? null,
+          isHost: false, // default to Guest
+          order: xs.length,
+          appearanceType: (form.appearanceType ?? "ONLINE") as TAppearance,
+          joinUrl: null,
+          venueName: null,
+          venueAddress: null,
+          dialInfo: null,
+        },
+      ];
+    });
+  }
+  function removePerson(idx: number) {
+    setPeople((xs) =>
+      xs.filter((_, i) => i !== idx).map((p, i) => ({ ...p, order: i }))
+    );
+  }
+  function toggleHost(idx: number, isHost: boolean) {
+    setPeople((xs) =>
+      xs.map((p, i) =>
+        i === idx
+          ? {
+              ...p,
+              isHost,
+              // Clear guest-only fields when toggled to Host
+              ...(isHost
+                ? {
+                    joinUrl: null,
+                    venueName: null,
+                    venueAddress: null,
+                    dialInfo: null,
+                  }
+                : {}),
+            }
+          : p
+      )
+    );
+  }
+  function patchPerson(idx: number, patch: Partial<SelectedPerson>) {
+    setPeople((xs) => xs.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+  }
+
+  const existingIds = people.map((p) => p.userId);
+
+  // Validations — apply ONLY to non-hosts (guests)
   const guestErrors = React.useMemo(() => {
-    const errs: Array<Record<string, string>> = guests.map(() => ({}));
+    const guestOnly = people.filter((p) => !p.isHost);
+    const errs: Array<Partial<Record<keyof SelectedPerson, string>>> =
+      guestOnly.map(() => ({}));
+
     if (guestsUnified) {
       if (!guestsSharedProvisioned) {
-        // UNIFIED + PER_GUEST → each guest fills per unified type
-        guests.forEach((g, idx) => {
+        // UNIFIED + PER_GUEST → each guest provides access
+        guestOnly.forEach((g, idx) => {
           const type = (form.appearanceType ?? "ONLINE") as TAppearance;
           if (type === "ONLINE" && !g.joinUrl)
             errs[idx].joinUrl = "Link required.";
@@ -690,8 +583,8 @@ export default function NewBookingPage() {
         });
       }
     } else {
-      // PER_GUEST → each guest chooses appearance & access
-      guests.forEach((g, idx) => {
+      // PER_GUEST → each guest chooses type and access
+      guestOnly.forEach((g, idx) => {
         if (g.appearanceType === "ONLINE" && !g.joinUrl)
           errs[idx].joinUrl = "Link required.";
         if (g.appearanceType === "IN_PERSON") {
@@ -702,108 +595,8 @@ export default function NewBookingPage() {
           errs[idx].dialInfo = "Dial info required.";
       });
     }
-    return errs;
-  }, [guests, guestsUnified, guestsSharedProvisioned, form.appearanceType]);
-
-  const hostErrors = React.useMemo(() => {
-    const errs: Array<Record<string, string>> = hosts.map(() => ({}));
-    if (!MULTI_HOSTS_ENABLED) return errs;
-
-    if (hostUnified) {
-      if (!hostSharedProvisioned) {
-        // UNIFIED + PER_HOST → each host provides access per unified type
-        hosts.forEach((h, idx) => {
-          if (hostUnifiedType === "ONLINE" && !h.joinUrl)
-            errs[idx].joinUrl = "Link required.";
-          if (hostUnifiedType === "IN_PERSON") {
-            if (!h.venueName) errs[idx].venueName = "Venue name required.";
-            if (!h.venueAddress) errs[idx].venueAddress = "Address required.";
-          }
-          if (PHONE_ENABLED && hostUnifiedType === "PHONE" && !h.dialInfo)
-            errs[idx].dialInfo = "Dial info required.";
-        });
-      }
-    } else {
-      // PER_HOST → each host chooses their own type and access
-      hosts.forEach((h, idx) => {
-        if (h.appearanceType === "ONLINE" && !h.joinUrl)
-          errs[idx].joinUrl = "Link required.";
-        if (h.appearanceType === "IN_PERSON") {
-          if (!h.venueName) errs[idx].venueName = "Venue name required.";
-          if (!h.venueAddress) errs[idx].venueAddress = "Address required.";
-        }
-        if (PHONE_ENABLED && h.appearanceType === "PHONE" && !h.dialInfo)
-          errs[idx].dialInfo = "Dial info required.";
-      });
-    }
-    return errs;
-  }, [hosts, hostUnified, hostSharedProvisioned, hostUnifiedType]);
-
-  // Add/remove/reorder helpers
-  function addPerson(row: { id: string; name: string; kind: TKind }) {
-    setGuests((xs) => [
-      ...xs,
-      {
-        userId: row.id,
-        name: row.name || (row.kind === "REPORTER" ? "Reporter" : "Expert"),
-        kind: row.kind,
-        order: xs.length,
-        appearanceType: (form.appearanceType ?? "ONLINE") as TAppearance,
-        joinUrl: null,
-        venueName: null,
-        venueAddress: null,
-        dialInfo: null,
-      },
-    ]);
-  }
-  function removeGuest(idx: number) {
-    setGuests((xs) =>
-      xs.filter((_, i) => i !== idx).map((g, i) => ({ ...g, order: i }))
-    );
-  }
-  function patchGuest(idx: number, patch: Partial<GuestRow>) {
-    setGuests((xs) => xs.map((g, i) => (i === idx ? { ...g, ...patch } : g)));
-  }
-
-  function addHost(row: { id: string; name: string | null }) {
-    setHosts((xs) => [
-      ...xs,
-      {
-        userId: row.id,
-        name: row.name || "Host",
-        order: xs.length,
-        appearanceType: (form.hostAppearanceType ?? "ONLINE") as TAppearance,
-        joinUrl: null,
-        venueName: null,
-        venueAddress: null,
-        dialInfo: null,
-      },
-    ]);
-  }
-  function removeHost(idx: number) {
-    setHosts((xs) =>
-      xs.filter((_, i) => i !== idx).map((h, i) => ({ ...h, order: i }))
-    );
-  }
-  function moveHost(idx: number, dir: -1 | 1) {
-    setHosts((xs) => {
-      const next = xs.slice();
-      const j = idx + dir;
-      if (j < 0 || j >= next.length) return xs;
-      const tmp = next[idx];
-      next[idx] = next[j];
-      next[j] = tmp;
-      return next.map((h, i) => ({ ...h, order: i }));
-    });
-  }
-  function patchHost(idx: number, patch: Partial<HostRow>) {
-    setHosts((xs) => xs.map((h, i) => (i === idx ? { ...h, ...patch } : h)));
-  }
-
-  const existingGuestUserIds = guests
-    .map((g) => g.userId)
-    .filter(Boolean) as string[];
-  const existingHostUserIds = hosts.map((h) => h.userId!).filter(Boolean);
+    return { guestOnly, errs };
+  }, [people, guestsUnified, guestsSharedProvisioned, form.appearanceType]);
 
   // Submit
   const [submitting, setSubmitting] = React.useState(false);
@@ -813,22 +606,30 @@ export default function NewBookingPage() {
     e.preventDefault();
     setError(null);
 
-    // Build guests[] payload (order preserved)
+    if (blocked) {
+      setError("You don’t have permission to create bookings.");
+      return;
+    }
+
+    // Build guests[] payload from non-hosts (order preserved among non-hosts)
+    const nonHosts = people.filter((p) => !p.isHost);
     const guestsPayload =
-      guests.length === 0
+      nonHosts.length === 0
         ? []
-        : guests.map((g, i) => {
+        : nonHosts.map((g, i) => {
             const unifiedType = (form.appearanceType ??
               "ONLINE") as TAppearance;
             const type =
               form.appearanceScope === "UNIFIED"
                 ? unifiedType
                 : g.appearanceType;
+
             return {
               userId: g.userId,
               name: g.name,
-              kind: g.kind,
-              order: i,
+              // if the backend uses "kind" it can ignore missing
+              kind: g.kind ?? undefined,
+              order: i, // order among guests only
               appearanceType: type,
               joinUrl:
                 form.appearanceScope === "UNIFIED"
@@ -868,7 +669,6 @@ export default function NewBookingPage() {
             };
           });
 
-    // Create payload (NO legacy single-host mirrors)
     const payload: any = {
       subject: form.subject,
       newsroomName: form.newsroomName,
@@ -877,7 +677,7 @@ export default function NewBookingPage() {
       startAt: new Date(form.startAt).toISOString(),
       durationMins: Number(form.durationMins),
 
-      // Guests model
+      // guest appearance model (non-hosts)
       appearanceScope: form.appearanceScope,
       accessProvisioning: form.accessProvisioning,
       appearanceType:
@@ -887,25 +687,17 @@ export default function NewBookingPage() {
       locationAddress: form.locationAddress || null,
       dialInfo: form.dialInfo || null,
 
-      // guests[] (BOOKING_GUESTS_V2 path)
       guests: guestsPayload,
-
-      // Hosts defaults for future edits / view (if your API accepts them on create)
-      hostAppearanceScope: form.hostAppearanceScope,
-      hostAccessProvisioning: form.hostAccessProvisioning,
-      hostAppearanceType: form.hostAppearanceType,
-      hostLocationUrl: form.hostLocationUrl || null,
-      hostLocationName: form.hostLocationName || null,
-      hostLocationAddress: form.hostLocationAddress || null,
-      hostDialInfo: form.hostDialInfo || null,
-      // NOTE: we intentionally do NOT send hosts[] here; persistence of hosts is via participants below.
     };
 
     try {
       setSubmitting(true);
       const res = await fetch("/api/bookings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(effectiveOrgId ? { "x-org-id": effectiveOrgId } : {}),
+        },
         credentials: "include",
         body: JSON.stringify(payload),
       });
@@ -913,29 +705,36 @@ export default function NewBookingPage() {
       if (!res.ok) throw new Error(j?.error || "Failed to create booking");
 
       const bookingId: string = j.booking?.id ?? j?.id;
-      if (bookingId && MULTI_PARTICIPANTS_ENABLED && hosts.length > 0) {
-        // Batch-add hosts as participants (role=HOST). Ignore soft errors.
-        const toAdd = hosts
-          .map((h) => String(h.userId ?? ""))
-          .filter(Boolean)
-          .map((userId) => ({ userId, roleInBooking: "HOST" as const }));
 
-        if (toAdd.length) {
-          try {
-            await fetch(`/api/bookings/${bookingId}/participants`, {
-              method: "POST",
-              credentials: "include",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ participants: toAdd }),
-            });
-          } catch {
-            // swallow — creation should still succeed
-          }
+      // Batch-add hosts as participants (role=HOST)
+      const hostAdds = people
+        .filter((p) => p.isHost)
+        .map((p) => p.userId)
+        .filter(Boolean)
+        .map((userId) => ({ userId, roleInBooking: "HOST" as const }));
+
+      if (bookingId && MULTI_PARTICIPANTS_ENABLED && hostAdds.length) {
+        try {
+          await fetch(`/api/bookings/${bookingId}/participants`, {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              ...(effectiveOrgId ? { "x-org-id": effectiveOrgId } : {}),
+            },
+            body: JSON.stringify({ participants: hostAdds }),
+          });
+        } catch {
+          // ignore; creation succeeded
         }
       }
 
       // Navigate to View page
-      router.push(`/modules/booking/${bookingId}`);
+      if (bookingId) {
+        router.push(`/modules/booking/${bookingId}`);
+      } else {
+        router.push(`/modules/booking`);
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to create booking");
     } finally {
@@ -943,668 +742,407 @@ export default function NewBookingPage() {
     }
   }
 
+  /* ---------------------------- Render ---------------------------- */
   return (
-    <form
-      className="mx-auto flex max-w-4xl flex-col gap-6 p-4"
-      onSubmit={onSubmit}
-    >
+    <main className="mx-auto max-w-3xl p-6 space-y-6">
       <h1 className="text-2xl font-semibold">New booking</h1>
 
-      {error && <UIAlert intent="error">{error}</UIAlert>}
-
-      {/* When */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-sm">Start at</span>
-          <input
-            type="datetime-local"
-            value={toDatetimeLocalValue(form.startAt)}
-            onChange={(e) =>
-              setForm((f) => ({
-                ...f,
-                startAt: new Date(e.target.value).toISOString(),
-              }))
-            }
-            required
-            className="w-full rounded-md border px-3 py-2"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm">Duration (mins)</span>
-          <input
-            inputMode="numeric"
-            value={form.durationMins}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, durationMins: Number(e.target.value) }))
-            }
-            required
-            className="w-full rounded-md border px-3 py-2"
-          />
-        </label>
-      </div>
-
-      {/* What */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-sm">Subject</span>
-          <input
-            value={form.subject}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, subject: e.target.value }))
-            }
-            required
-            className="w-full rounded-md border px-3 py-2"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm">Newsroom name</span>
-          <input
-            value={form.newsroomName}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, newsroomName: e.target.value }))
-            }
-            required
-            className="w-full rounded-md border px-3 py-2"
-          />
-        </label>
-      </div>
-
-      {/* Guests model controls */}
-      <section className="rounded-md border p-3">
-        <h2 className="mb-2 text-lg font-medium">Guests</h2>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-sm">Appearance scope (guests)</span>
-            <select
-              value={form.appearanceScope}
-              onChange={(e) => {
-                const next = e.target.value as TScope;
-                if (next === "PER_GUEST") {
-                  setForm((f) => ({
-                    ...f,
-                    appearanceScope: next,
-                    accessProvisioning: "PER_GUEST",
-                  }));
-                } else {
-                  setForm((f) => ({ ...f, appearanceScope: next }));
-                }
-              }}
-              className="w-full rounded-md border px-3 py-2"
-            >
-              <option value="UNIFIED">UNIFIED (single)</option>
-              <option value="PER_GUEST">PER_GUEST</option>
-            </select>
-          </label>
-
-          {form.appearanceScope === "UNIFIED" ? (
-            <>
-              <label className="flex flex-col gap-1">
-                <span className="text-sm">Access provisioning (guests)</span>
-                <select
-                  value={form.accessProvisioning}
-                  onChange={(e) =>
-                    setForm((f) => ({
-                      ...f,
-                      accessProvisioning: e.target.value as TProvisioning,
-                    }))
-                  }
-                  className="w-full rounded-md border px-3 py-2"
-                >
-                  <option value="SHARED">SHARED</option>
-                  <option value="PER_GUEST">PER_GUEST</option>
-                </select>
-              </label>
-
-              <label className="flex flex-col gap-1">
-                <span className="text-sm">Unified type (guests)</span>
-                <select
-                  value={form.appearanceType ?? "ONLINE"}
-                  onChange={(e) =>
-                    setForm((f) => ({
-                      ...f,
-                      appearanceType: e.target.value as TAppearance,
-                    }))
-                  }
-                  className="w-full rounded-md border px-3 py-2"
-                >
-                  <option value="ONLINE">ONLINE</option>
-                  <option value="IN_PERSON">IN_PERSON</option>
-                  {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
-                </select>
-              </label>
-            </>
-          ) : (
-            <div className="text-sm text-gray-700 md:col-span-2">
-              Each guest selects their own appearance and access. Provisioning
-              is per guest.
-            </div>
-          )}
+      {session.kind === "loading" ? (
+        <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm">
+          Checking your access…
         </div>
+      ) : blocked ? (
+        <UIAlert variant="warning">
+          You must be <strong>staff</strong> with an <strong>org</strong> to
+          create bookings. Guests can’t create bookings.
+        </UIAlert>
+      ) : null}
 
-        {/* Guest defaults (UNIFIED + SHARED) */}
-        {guestsUnified && guestsSharedProvisioned && (
-          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-            {(form.appearanceType ?? "ONLINE") === "ONLINE" && (
-              <label className="flex flex-col gap-1 md:col-span-2">
-                <span className="text-sm">Default meeting link (guests)</span>
-                <input
-                  value={form.locationUrl}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, locationUrl: e.target.value }))
-                  }
-                  className="w-full rounded-md border px-3 py-2"
-                  placeholder="https://…"
-                />
+      {error && (
+        <UIAlert variant="error">
+          <div className="text-sm">{error}</div>
+        </UIAlert>
+      )}
+
+      <form onSubmit={onSubmit} className="space-y-6" aria-disabled={blocked}>
+        {/* What */}
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">What</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium">Subject</label>
+              <input
+                value={form.subject}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, subject: e.target.value }))
+                }
+                required
+                className="w-full rounded-md border px-3 py-2"
+                disabled={blocked}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium">Newsroom name</label>
+              <input
+                value={form.newsroomName}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, newsroomName: e.target.value }))
+                }
+                required
+                className="w-full rounded-md border px-3 py-2"
+                disabled={blocked}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Participants (Guests + Hosts via toggle) */}
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">Participants</h2>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div>
+              <label className="block text-sm font-medium">
+                Appearance scope (non-hosts)
               </label>
-            )}
+              <select
+                value={form.appearanceScope}
+                onChange={(e) => {
+                  const next = e.target.value as TScope;
+                  if (next === "PER_GUEST") {
+                    setForm((f) => ({
+                      ...f,
+                      appearanceScope: next,
+                      accessProvisioning: "PER_GUEST",
+                    }));
+                  } else {
+                    setForm((f) => ({ ...f, appearanceScope: next }));
+                  }
+                }}
+                className="w-full rounded-md border px-3 py-2"
+                disabled={blocked}
+              >
+                <option value="UNIFIED">UNIFIED (single)</option>
+                <option value="PER_GUEST">PER_GUEST</option>
+              </select>
+            </div>
 
-            {(form.appearanceType ?? "ONLINE") === "IN_PERSON" && (
+            {form.appearanceScope === "UNIFIED" ? (
               <>
-                <label className="flex flex-col gap-1">
-                  <span className="text-sm">Default venue name (guests)</span>
-                  <input
-                    value={form.locationName}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, locationName: e.target.value }))
-                    }
-                    className="w-full rounded-md border px-3 py-2"
-                    placeholder="Studio A"
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-sm">Default address (guests)</span>
-                  <input
-                    value={form.locationAddress}
+                <div>
+                  <label className="block text-sm font-medium">
+                    Access provisioning (non-hosts)
+                  </label>
+                  <select
+                    value={form.accessProvisioning}
                     onChange={(e) =>
                       setForm((f) => ({
                         ...f,
-                        locationAddress: e.target.value,
+                        accessProvisioning: e.target.value as TProvisioning,
                       }))
                     }
                     className="w-full rounded-md border px-3 py-2"
-                    placeholder="123 Example St…"
-                  />
-                </label>
+                    disabled={blocked}
+                  >
+                    <option value="SHARED">SHARED</option>
+                    <option value="PER_GUEST">PER_GUEST</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text sm font-medium">
+                    Unified type (non-hosts)
+                  </label>
+                  <select
+                    value={form.appearanceType ?? "ONLINE"}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        appearanceType: e.target.value as TAppearance,
+                      }))
+                    }
+                    className="w-full rounded-md border px-3 py-2"
+                    disabled={blocked}
+                  >
+                    <option value="ONLINE">ONLINE</option>
+                    <option value="IN_PERSON">IN_PERSON</option>
+                    {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <div className="sm:col-span-2 text-sm opacity-70">
+                Each non-host selects their own appearance and access.
+              </div>
+            )}
+          </div>
+
+          {/* Defaults for non-hosts when UNIFIED + SHARED */}
+          {form.appearanceScope === "UNIFIED" &&
+            form.accessProvisioning === "SHARED" && (
+              <>
+                {(form.appearanceType ?? "ONLINE") === "ONLINE" && (
+                  <div>
+                    <label className="block text-sm font-medium">
+                      Default meeting link (non-hosts)
+                    </label>
+                    <input
+                      value={form.locationUrl}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, locationUrl: e.target.value }))
+                      }
+                      placeholder="https://…"
+                      className="w-full rounded-md border px-3 py-2"
+                      disabled={blocked}
+                    />
+                  </div>
+                )}
+
+                {(form.appearanceType ?? "ONLINE") === "IN_PERSON" && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium">
+                        Default venue name (non-hosts)
+                      </label>
+                      <input
+                        value={form.locationName}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            locationName: e.target.value,
+                          }))
+                        }
+                        placeholder="Studio A"
+                        className="w-full rounded-md border px-3 py-2"
+                        disabled={blocked}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium">
+                        Default address (non-hosts)
+                      </label>
+                      <input
+                        value={form.locationAddress}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            locationAddress: e.target.value,
+                          }))
+                        }
+                        placeholder="123 Example St…"
+                        className="w-full rounded-md border px-3 py-2"
+                        disabled={blocked}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {PHONE_ENABLED &&
+                  (form.appearanceType ?? "ONLINE") === "PHONE" && (
+                    <div>
+                      <label className="block text-sm font-medium">
+                        Default dial info (non-hosts)
+                      </label>
+                      <input
+                        value={form.dialInfo}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, dialInfo: e.target.value }))
+                        }
+                        placeholder="e.g., +1 555 123 4567 PIN 0000"
+                        className="w-full rounded-md border px-3 py-2"
+                        disabled={blocked}
+                      />
+                    </div>
+                  )}
               </>
             )}
 
-            {PHONE_ENABLED && (form.appearanceType ?? "ONLINE") === "PHONE" && (
-              <label className="flex flex-col gap-1 md:col-span-2">
-                <span className="text-sm">Default dial info (guests)</span>
-                <input
-                  value={form.dialInfo}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, dialInfo: e.target.value }))
-                  }
-                  className="w-full rounded-md border px-3 py-2"
-                  placeholder="e.g., +1 555 123 4567 PIN 0000"
-                />
-              </label>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* Guests list */}
-      <section className="flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <div className="font-medium">Guests</div>
-          <div className="text-xs text-gray-500">{guests.length} selected</div>
-        </div>
-
-        {guests.length === 0 && (
-          <div className="rounded-md border p-3 text-sm text-gray-600">
-            No guests yet. Use “Add guest” below to append experts or reporters.
-          </div>
-        )}
-
-        <div className="flex flex-col gap-3">
-          {guests.map((g, idx) => {
-            const ge = guestErrors[idx] || {};
-            const unifiedType = (form.appearanceType ??
-              "ONLINE") as TAppearance;
-            return (
-              <div key={`${g.userId}-${idx}`} className="rounded-md border p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
-                    #{idx + 1}
-                  </span>
-                  <span className="font-medium">{g.name}</span>
-                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
-                    {g.kind}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeGuest(idx)}
-                    className="ml-auto rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
-                    title="Remove guest"
-                  >
-                    Remove
-                  </button>
-                </div>
-
-                {/* Per-guest fields based on scope/provisioning */}
-                {form.appearanceScope === "UNIFIED" ? (
-                  <>
-                    {form.accessProvisioning === "SHARED" ? (
-                      <div className="text-sm text-gray-700">
-                        Using unified settings (
-                        {form.appearanceType ?? "ONLINE"}). No per-guest access
-                        fields.
-                      </div>
-                    ) : (
-                      <>
-                        {unifiedType === "ONLINE" && (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-sm">Join URL</span>
-                            <input
-                              value={g.joinUrl ?? ""}
-                              onChange={(ev) =>
-                                patchGuest(idx, { joinUrl: ev.target.value })
-                              }
-                              className={clsx(
-                                "w-full rounded-md border px-3 py-2",
-                                ge.joinUrl && "border-red-500"
-                              )}
-                              placeholder="https://…"
-                            />
-                          </label>
-                        )}
-
-                        {unifiedType === "IN_PERSON" && (
-                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                            <label className="flex flex-col gap-1">
-                              <span className="text-sm">Venue name</span>
-                              <input
-                                value={g.venueName ?? ""}
-                                onChange={(ev) =>
-                                  patchGuest(idx, {
-                                    venueName: ev.target.value,
-                                  })
-                                }
-                                className={clsx(
-                                  "w-full rounded-md border px-3 py-2",
-                                  ge.venueName && "border-red-500"
-                                )}
-                                placeholder="Studio A"
-                              />
-                            </label>
-
-                            <label className="flex flex-col gap-1">
-                              <span className="text-sm">Venue address</span>
-                              <input
-                                value={g.venueAddress ?? ""}
-                                onChange={(ev) =>
-                                  patchGuest(idx, {
-                                    venueAddress: ev.target.value,
-                                  })
-                                }
-                                className={clsx(
-                                  "w-full rounded-md border px-3 py-2",
-                                  ge.venueAddress && "border-red-500"
-                                )}
-                                placeholder="123 Example St…"
-                              />
-                            </label>
-                          </div>
-                        )}
-
-                        {PHONE_ENABLED && unifiedType === "PHONE" && (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-sm">Dial info</span>
-                            <input
-                              value={g.dialInfo ?? ""}
-                              onChange={(ev) =>
-                                patchGuest(idx, { dialInfo: ev.target.value })
-                              }
-                              className={clsx(
-                                "w-full rounded-md border px-3 py-2",
-                                ge.dialInfo && "border-red-500"
-                              )}
-                              placeholder="e.g., +1 555 123 4567 PIN 0000"
-                            />
-                          </label>
-                        )}
-                      </>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-sm">Appearance</span>
-                      <select
-                        value={g.appearanceType}
-                        onChange={(ev) =>
-                          patchGuest(idx, {
-                            appearanceType: ev.target.value as TAppearance,
-                            joinUrl: null,
-                            venueName: null,
-                            venueAddress: null,
-                            dialInfo: null,
-                          })
-                        }
-                        className="w-full rounded-md border px-3 py-2"
-                      >
-                        <option value="ONLINE">ONLINE</option>
-                        <option value="IN_PERSON">IN_PERSON</option>
-                        {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
-                      </select>
-                    </label>
-
-                    {g.appearanceType === "ONLINE" && (
-                      <label className="flex flex-col gap-1">
-                        <span className="text-sm">Join URL</span>
-                        <input
-                          value={g.joinUrl ?? ""}
-                          onChange={(ev) =>
-                            patchGuest(idx, { joinUrl: ev.target.value })
-                          }
-                          className={clsx(
-                            "w-full rounded-md border px-3 py-2",
-                            ge.joinUrl && "border-red-500"
-                          )}
-                          placeholder="https://…"
-                        />
-                      </label>
-                    )}
-
-                    {g.appearanceType === "IN_PERSON" && (
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <label className="flex flex-col gap-1">
-                          <span className="text-sm">Venue name</span>
-                          <input
-                            value={g.venueName ?? ""}
-                            onChange={(ev) =>
-                              patchGuest(idx, { venueName: ev.target.value })
-                            }
-                            className={clsx(
-                              "w-full rounded-md border px-3 py-2",
-                              ge.venueName && "border-red-500"
-                            )}
-                            placeholder="Studio A"
-                          />
-                        </label>
-
-                        <label className="flex flex-col gap-1">
-                          <span className="text-sm">Venue address</span>
-                          <input
-                            value={g.venueAddress ?? ""}
-                            onChange={(ev) =>
-                              patchGuest(idx, { venueAddress: ev.target.value })
-                            }
-                            className={clsx(
-                              "w-full rounded-md border px-3 py-2",
-                              ge.venueAddress && "border-red-500"
-                            )}
-                            placeholder="123 Example St…"
-                          />
-                        </label>
-                      </div>
-                    )}
-
-                    {PHONE_ENABLED && g.appearanceType === "PHONE" && (
-                      <label className="flex flex-col gap-1">
-                        <span className="text-sm">Dial info</span>
-                        <input
-                          value={g.dialInfo ?? ""}
-                          onChange={(ev) =>
-                            patchGuest(idx, { dialInfo: ev.target.value })
-                          }
-                          className={clsx(
-                            "w-full rounded-md border px-3 py-2",
-                            ge.dialInfo && "border-red-500"
-                          )}
-                          placeholder="e.g., +1 555 123 4567 PIN 0000"
-                        />
-                      </label>
-                    )}
-                  </>
-                )}
+          {/* People list */}
+          <div className="mt-3 rounded-md border p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm font-medium">
+                People{" "}
+                <span className="opacity-60">({people.length} selected)</span>
               </div>
-            );
-          })}
-        </div>
-
-        {/* Add guest */}
-        <AddGuestPicker
-          onPick={(row) => addPerson(row)}
-          existingIds={existingGuestUserIds}
-          startAtISO={form.startAt}
-          durationMins={form.durationMins}
-        />
-      </section>
-
-      {/* Hosts (visible only if legacy multi-host UI is enabled) */}
-      {MULTI_HOSTS_ENABLED && (
-        <>
-          <section className="rounded-md border p-3">
-            <h2 className="mb-2 text-lg font-medium">Hosts</h2>
-
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-sm">Appearance scope (hosts)</span>
-                <select
-                  value={form.hostAppearanceScope}
-                  onChange={(e) => {
-                    const next = e.target.value as THostScope;
-                    if (next === "PER_HOST") {
-                      setForm((f) => ({
-                        ...f,
-                        hostAppearanceScope: next,
-                        hostAccessProvisioning: "PER_HOST",
-                      }));
-                    } else {
-                      setForm((f) => ({ ...f, hostAppearanceScope: next }));
-                    }
-                  }}
-                  className="w-full rounded-md border px-3 py-2"
-                >
-                  <option value="UNIFIED">UNIFIED (single)</option>
-                  <option value="PER_HOST">PER_HOST</option>
-                </select>
-              </label>
-
-              {form.hostAppearanceScope === "UNIFIED" ? (
-                <>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-sm">Access provisioning (hosts)</span>
-                    <select
-                      value={form.hostAccessProvisioning}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          hostAccessProvisioning: e.target
-                            .value as THostProvisioning,
-                        }))
-                      }
-                      className="w-full rounded-md border px-3 py-2"
-                    >
-                      <option value="SHARED">SHARED</option>
-                      <option value="PER_HOST">PER_HOST</option>
-                    </select>
-                  </label>
-
-                  <label className="flex flex-col gap-1">
-                    <span className="text-sm">Unified type (hosts)</span>
-                    <select
-                      value={form.hostAppearanceType ?? "ONLINE"}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          hostAppearanceType: e.target.value as TAppearance,
-                        }))
-                      }
-                      className="w-full rounded-md border px-3 py-2"
-                    >
-                      <option value="ONLINE">ONLINE</option>
-                      <option value="IN_PERSON">IN_PERSON</option>
-                      {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
-                    </select>
-                  </label>
-                </>
-              ) : (
-                <div className="text-sm text-gray-700 md:col-span-2">
-                  Each host selects their own appearance and access.
-                  Provisioning is per host.
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* Hosts list */}
-          <section className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div className="font-medium">Selected hosts</div>
-              <div className="text-xs text-gray-500">
-                {hosts.length} selected
-              </div>
+              <PeoplePicker
+                startAtISO={form.startAt}
+                durationMins={form.durationMins}
+                onPick={addPersonFromDirectory}
+                existingIds={existingIds}
+                orgId={effectiveOrgId}
+              />
             </div>
 
-            {hosts.length === 0 && (
-              <div className="rounded-md border p-3 text-sm text-gray-600">
-                No hosts yet. Use “Add host” to append hosts.
+            {people.length === 0 && (
+              <div className="text-sm opacity-70">
+                No participants yet. Use “Add person” to append internal staff
+                or public experts.
               </div>
             )}
 
-            <div className="flex flex-col gap-3">
-              {hosts.map((h, idx) => {
-                const he = hostErrors[idx] || {};
+            <div className="space-y-3">
+              {people.map((p, idx) => {
+                // errors array lines up with non-hosts only
+                const guestIndex = people
+                  .filter((x) => !x.isHost)
+                  .findIndex((x, i) => i === idx && !p.isHost);
+                const ge =
+                  !p.isHost && guestIndex >= 0
+                    ? guestErrors.errs[guestIndex] || {}
+                    : {};
+
+                const unifiedType = (form.appearanceType ??
+                  "ONLINE") as TAppearance;
+
                 return (
                   <div
-                    key={`${h.userId}-${idx}`}
+                    key={`${p.userId}-${idx}`}
                     className="rounded-md border p-3"
                   >
                     <div className="mb-2 flex items-center gap-2">
-                      <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
-                        #{idx + 1}
-                      </span>
-                      <span className="font-medium">{h.name || "Host"}</span>
-
-                      <div className="ml-auto flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => moveHost(idx, -1)}
-                          className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-                          title="Move up"
-                        >
-                          Up
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => moveHost(idx, +1)}
-                          className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-                          title="Move down"
-                        >
-                          Down
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removeHost(idx)}
-                          className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
-                          title="Remove host"
-                        >
-                          Remove
-                        </button>
+                      <div className="font-medium">
+                        #{idx + 1} &nbsp; {p.name}{" "}
+                        <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px]">
+                          {p.source.toUpperCase()}
+                        </span>
+                        {p.kind && (
+                          <span className="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px]">
+                            {p.kind}
+                          </span>
+                        )}
                       </div>
+
+                      <label className="ml-auto inline-flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={p.isHost}
+                          onChange={(e) => toggleHost(idx, e.target.checked)}
+                        />
+                        Host
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => removePerson(idx)}
+                        className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                        title="Remove"
+                      >
+                        Remove
+                      </button>
                     </div>
 
-                    {/* Host per-item access fields, same rules as Edit */}
-                    {form.hostAppearanceScope === "UNIFIED" ? (
+                    {/* Guest-only fields (hidden/disabled when Host) */}
+                    {p.isHost ? (
+                      <div className="text-sm opacity-70">
+                        Marked as <strong>Host</strong>. No guest access fields
+                        required.
+                      </div>
+                    ) : form.appearanceScope === "UNIFIED" ? (
                       <>
-                        {form.hostAccessProvisioning === "SHARED" ? (
-                          <div className="text-sm text-gray-700">
-                            Using host defaults (
-                            {form.hostAppearanceType ?? "ONLINE"}).
+                        {form.accessProvisioning === "SHARED" ? (
+                          <div className="text-sm opacity-70">
+                            Using unified settings (
+                            {form.appearanceType ?? "ONLINE"}). No per-guest
+                            access fields.
                           </div>
                         ) : (
                           <>
-                            {hostUnifiedType === "ONLINE" && (
-                              <label className="flex flex-col gap-1">
-                                <span className="text-sm">Join URL</span>
+                            {unifiedType === "ONLINE" && (
+                              <div>
+                                <label className="block text-sm font-medium">
+                                  Join URL
+                                </label>
                                 <input
-                                  value={h.joinUrl ?? ""}
+                                  value={p.joinUrl ?? ""}
                                   onChange={(ev) =>
-                                    patchHost(idx, { joinUrl: ev.target.value })
+                                    patchPerson(idx, {
+                                      joinUrl: ev.target.value,
+                                    })
                                   }
                                   className={clsx(
                                     "w-full rounded-md border px-3 py-2",
-                                    he.joinUrl && "border-red-500"
+                                    (ge as any).joinUrl && "border-red-500"
                                   )}
                                   placeholder="https://…"
                                 />
-                              </label>
+                              </div>
                             )}
 
-                            {hostUnifiedType === "IN_PERSON" && (
-                              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                                <label className="flex flex-col gap-1">
-                                  <span className="text-sm">Venue name</span>
+                            {unifiedType === "IN_PERSON" && (
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <div>
+                                  <label className="block text-sm font-medium">
+                                    Venue name
+                                  </label>
                                   <input
-                                    value={h.venueName ?? ""}
+                                    value={p.venueName ?? ""}
                                     onChange={(ev) =>
-                                      patchHost(idx, {
+                                      patchPerson(idx, {
                                         venueName: ev.target.value,
                                       })
                                     }
                                     className={clsx(
                                       "w-full rounded-md border px-3 py-2",
-                                      he.venueName && "border-red-500"
+                                      (ge as any).venueName && "border-red-500"
                                     )}
                                     placeholder="Studio A"
                                   />
-                                </label>
-
-                                <label className="flex flex-col gap-1">
-                                  <span className="text-sm">Venue address</span>
+                                </div>
+                                <div>
+                                  <label className="block text-sm font-medium">
+                                    Venue address
+                                  </label>
                                   <input
-                                    value={h.venueAddress ?? ""}
+                                    value={p.venueAddress ?? ""}
                                     onChange={(ev) =>
-                                      patchHost(idx, {
+                                      patchPerson(idx, {
                                         venueAddress: ev.target.value,
                                       })
                                     }
                                     className={clsx(
                                       "w-full rounded-md border px-3 py-2",
-                                      he.venueAddress && "border-red-500"
+                                      (ge as any).venueAddress &&
+                                        "border-red-500"
                                     )}
                                     placeholder="123 Example St…"
                                   />
-                                </label>
+                                </div>
                               </div>
                             )}
 
-                            {PHONE_ENABLED && hostUnifiedType === "PHONE" && (
-                              <label className="flex flex-col gap-1">
-                                <span className="text-sm">Dial info</span>
+                            {PHONE_ENABLED && unifiedType === "PHONE" && (
+                              <div>
+                                <label className="block text-sm font-medium">
+                                  Dial info
+                                </label>
                                 <input
-                                  value={h.dialInfo ?? ""}
+                                  value={p.dialInfo ?? ""}
                                   onChange={(ev) =>
-                                    patchHost(idx, {
+                                    patchPerson(idx, {
                                       dialInfo: ev.target.value,
                                     })
                                   }
                                   className={clsx(
                                     "w-full rounded-md border px-3 py-2",
-                                    he.dialInfo && "border-red-500"
+                                    (ge as any).dialInfo && "border-red-500"
                                   )}
                                   placeholder="e.g., +1 555 123 4567 PIN 0000"
                                 />
-                              </label>
+                              </div>
                             )}
                           </>
                         )}
                       </>
                     ) : (
                       <>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-sm">Appearance</span>
+                        <div>
+                          <label className="block text-sm font-medium">
+                            Appearance
+                          </label>
                           <select
-                            value={h.appearanceType}
+                            value={p.appearanceType}
                             onChange={(ev) =>
-                              patchHost(idx, {
+                              patchPerson(idx, {
                                 appearanceType: ev.target.value as TAppearance,
                                 joinUrl: null,
                                 venueName: null,
@@ -1620,76 +1158,85 @@ export default function NewBookingPage() {
                               <option value="PHONE">PHONE</option>
                             )}
                           </select>
-                        </label>
+                        </div>
 
-                        {h.appearanceType === "ONLINE" && (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-sm">Join URL</span>
+                        {p.appearanceType === "ONLINE" && (
+                          <div>
+                            <label className="block text-sm font-medium">
+                              Join URL
+                            </label>
                             <input
-                              value={h.joinUrl ?? ""}
+                              value={p.joinUrl ?? ""}
                               onChange={(ev) =>
-                                patchHost(idx, { joinUrl: ev.target.value })
+                                patchPerson(idx, { joinUrl: ev.target.value })
                               }
                               className={clsx(
-                                "w-full rounded-md border px-3 py-2",
-                                he.joinUrl && "border-red-500"
+                                "w/full rounded-md border px-3 py-2",
+                                (ge as any).joinUrl && "border-red-500"
                               )}
                               placeholder="https://…"
                             />
-                          </label>
+                          </div>
                         )}
 
-                        {h.appearanceType === "IN_PERSON" && (
-                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                            <label className="flex flex-col gap-1">
-                              <span className="text-sm">Venue name</span>
+                        {p.appearanceType === "IN_PERSON" && (
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div>
+                              <label className="block text-sm font-medium">
+                                Venue name
+                              </label>
                               <input
-                                value={h.venueName ?? ""}
+                                value={p.venueName ?? ""}
                                 onChange={(ev) =>
-                                  patchHost(idx, { venueName: ev.target.value })
+                                  patchPerson(idx, {
+                                    venueName: ev.target.value,
+                                  })
                                 }
                                 className={clsx(
                                   "w-full rounded-md border px-3 py-2",
-                                  he.venueName && "border-red-500"
+                                  (ge as any).venueName && "border-red-500"
                                 )}
                                 placeholder="Studio A"
                               />
-                            </label>
-
-                            <label className="flex flex-col gap-1">
-                              <span className="text-sm">Venue address</span>
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium">
+                                Venue address
+                              </label>
                               <input
-                                value={h.venueAddress ?? ""}
+                                value={p.venueAddress ?? ""}
                                 onChange={(ev) =>
-                                  patchHost(idx, {
+                                  patchPerson(idx, {
                                     venueAddress: ev.target.value,
                                   })
                                 }
                                 className={clsx(
                                   "w-full rounded-md border px-3 py-2",
-                                  he.venueAddress && "border-red-500"
+                                  (ge as any).venueAddress && "border-red-500"
                                 )}
                                 placeholder="123 Example St…"
                               />
-                            </label>
+                            </div>
                           </div>
                         )}
 
-                        {PHONE_ENABLED && h.appearanceType === "PHONE" && (
-                          <label className="flex flex-col gap-1">
-                            <span className="text-sm">Dial info</span>
+                        {PHONE_ENABLED && p.appearanceType === "PHONE" && (
+                          <div>
+                            <label className="block text-sm font-medium">
+                              Dial info
+                            </label>
                             <input
-                              value={h.dialInfo ?? ""}
+                              value={p.dialInfo ?? ""}
                               onChange={(ev) =>
-                                patchHost(idx, { dialInfo: ev.target.value })
+                                patchPerson(idx, { dialInfo: ev.target.value })
                               }
                               className={clsx(
                                 "w-full rounded-md border px-3 py-2",
-                                he.dialInfo && "border-red-500"
+                                (ge as any).dialInfo && "border-red-500"
                               )}
                               placeholder="e.g., +1 555 123 4567 PIN 0000"
                             />
-                          </label>
+                          </div>
                         )}
                       </>
                     )}
@@ -1697,26 +1244,66 @@ export default function NewBookingPage() {
                 );
               })}
             </div>
+          </div>
+        </section>
 
-            {/* Add host */}
-            <AddHostPicker
-              onPick={(row) => addHost(row)}
-              existingIds={existingHostUserIds}
-              startAtISO={form.startAt}
-              durationMins={form.durationMins}
-            />
-          </section>
-        </>
-      )}
+        {/* When */}
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">When</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium">Start at</label>
+              <input
+                type="datetime-local"
+                value={toDatetimeLocalValue(form.startAt)}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    startAt: new Date(e.target.value).toISOString(),
+                  }))
+                }
+                required
+                className="w-full rounded-md border px-3 py-2"
+                disabled={blocked}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium">
+                Duration (mins)
+              </label>
+              <input
+                type="number"
+                min={5}
+                max={600}
+                step={5}
+                value={form.durationMins}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    durationMins: Number(e.target.value),
+                  }))
+                }
+                required
+                className="w-full rounded-md border px-3 py-2"
+                disabled={blocked}
+              />
+            </div>
+          </div>
+        </section>
 
-      <div className="flex items-center gap-3">
-        <UIButton type="submit" disabled={submitting}>
-          {submitting ? "Creating…" : "Create booking"}
-        </UIButton>
-        <a href="/modules/booking" className="text-sm text-gray-600 underline">
-          Cancel
-        </a>
-      </div>
-    </form>
+        <div className="flex items-center justify-end gap-2">
+          <UIButton
+            type="button"
+            variant="secondary"
+            onClick={() => router.back()}
+          >
+            Cancel
+          </UIButton>
+          <UIButton type="submit" disabled={blocked || submitting}>
+            {submitting ? "Creating…" : "Create booking"}
+          </UIButton>
+        </div>
+      </form>
+    </main>
   );
 }

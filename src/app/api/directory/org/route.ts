@@ -83,6 +83,7 @@ type OrgDirectoryItem = {
   roleLabel?: string | null;
   inviteable?: boolean; // derived
   listed_internal?: boolean; // derived
+  bookable?: boolean; // derived (present only when roles data is available)
 };
 
 function isAdminFromSession(session: any, roles: Set<string>) {
@@ -289,12 +290,17 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Derive Bookable flags by consulting /api/org/roles (single org roundtrip)
-  // - listed_internal: allow  => listed
-  // - inviteable:      allow  => inviteable
+  // Derive eligibility by consulting /api/org/roles (single org roundtrip)
+  // - listed_internal: effective contains "directory:listed_internal"
+  // - inviteable/bookable: effective contains "booking:inviteable"
   let listedSlots = new Set<number>();
   let inviteSlots = new Set<number>();
+  let bookableSlots = new Set<number>();
   let rolesFetchError: string | null = null;
+
+  // Only apply any flags (and non-admin filtering) when roles data is available.
+  let rolesHadData = false;
+
   try {
     const rolesRes = await fetch(
       new URL(
@@ -307,14 +313,30 @@ export async function GET(req: NextRequest) {
       const rolesJson: any = await rolesRes.json();
       const slots: Array<{
         slot: number;
-        overrides: Array<{ key: string; allowed: boolean }>;
+        effective?: string[];
+        overrides?: Array<{ key: string; allowed: boolean }>;
       }> = Array.isArray(rolesJson?.slots) ? rolesJson.slots : [];
 
+      rolesHadData = true;
+
       for (const s of slots) {
-        const ov = new Map(s.overrides.map((o) => [o.key, o.allowed === true]));
-        if (ov.get("directory:listed_internal") === true)
-          listedSlots.add(s.slot);
-        if (ov.get("booking:inviteable") === true) inviteSlots.add(s.slot);
+        // Prefer "effective" (deny-aware, includes template + overrides + activity)
+        const effKeys: string[] = Array.isArray((s as any).effective)
+          ? (s as any).effective
+          : Array.isArray(s.overrides)
+          ? (s.overrides as any[])
+              .filter((o) => o && o.allowed === true)
+              .map((o) => String(o.key))
+          : [];
+
+        const has = (k: string) =>
+          effKeys.includes(k) || effKeys.includes(k.replace(":", ""));
+
+        if (has("directory:listed_internal")) listedSlots.add(s.slot);
+        if (has("booking:inviteable")) {
+          inviteSlots.add(s.slot);
+          bookableSlots.add(s.slot);
+        }
       }
     } else {
       rolesFetchError = `${rolesRes.status} ${rolesRes.statusText}`;
@@ -323,11 +345,14 @@ export async function GET(req: NextRequest) {
     rolesFetchError = e?.message || "fetch-failed";
   }
 
-  // Mark flags on each item
+  // Mark flags on each item (only when roles data is present)
   for (const it of items) {
     const slot = it.roleSlot ?? 0;
-    it.listed_internal = listedSlots.has(slot);
-    it.inviteable = inviteSlots.has(slot);
+    if (rolesHadData) {
+      it.listed_internal = listedSlots.has(slot);
+      it.inviteable = inviteSlots.has(slot); // alias of booking:inviteable
+      it.bookable = bookableSlots.has(slot); // single source of truth
+    }
   }
 
   // === (A) Intersect with ACTIVE users from /api/org/users (excludes pending/invited) ===
@@ -394,7 +419,8 @@ export async function GET(req: NextRequest) {
   const isAdmin = isAdminFromSession(session, roles);
   const countPre = items.length;
   let filtered = false;
-  if (!isAdmin) {
+  // Only apply listing filter when roles data was actually loaded
+  if (!isAdmin && rolesHadData) {
     items = items.filter((x) => x.listed_internal === true);
     filtered = true;
   }
