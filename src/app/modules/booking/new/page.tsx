@@ -764,7 +764,7 @@ export default function NewBookingPage() {
         </UIAlert>
       )}
 
-      <form onSubmit={onSubmit} className="space-y-6" aria-disabled={blocked}>
+      <form onSubmit={onSubmit} className="space-y-6">
         {/* What */}
         <section className="space-y-2">
           <h2 className="text-lg font-medium">What</h2>
