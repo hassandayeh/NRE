@@ -55,24 +55,15 @@ async function deriveOrgId(
   seed?: string | null,
   viewer?: any
 ): Promise<string | null> {
-  // 1) body/orgId if provided
   if (typeof seed === "string" && seed.trim()) return seed.trim();
-
-  // 2) header
   const h = req.headers.get("x-org-id");
   if (h && h.trim()) return h.trim();
-
-  // 3) query
   const q = new URL(req.url).searchParams.get("orgId");
   if (q && q.trim()) return q.trim();
-
-  // 4) viewer (if resolver attaches org)
   const vOrg =
     (viewer?.orgId as string | undefined) ??
     (viewer?.org?.id as string | undefined);
   if (vOrg && vOrg.trim()) return vOrg.trim();
-
-  // 5) session fallback
   try {
     const session = await getServerSession(authOptions);
     const sOrg =
@@ -80,17 +71,11 @@ async function deriveOrgId(
         (session as any)?.orgId) ||
       null;
     if (sOrg && String(sOrg).trim()) return String(sOrg).trim();
-  } catch {
-    // ignore
-  }
-
+  } catch {}
   return null;
 }
 
 // ---------------- GET /api/bookings ----------------
-// Query params:
-//   orgId (derived: query | header | viewer | session)
-//   take (optional, default 50), skip (optional, default 0)
 export async function GET(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -166,11 +151,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ---------------- POST /api/bookings ----------------
-// Body:
-//   subject (required), startAt (required ISO), durationMins (required number)
-//   Optional: appearanceType | locationUrl | locationName | locationAddress | dialInfo | orgId
-// Behavior:
-//   orgId is derived automatically from: body → x-org-id → query → viewer → session.
 export async function POST(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -191,6 +171,19 @@ export async function POST(req: NextRequest) {
       locationName: string | null;
       locationAddress: string | null;
       dialInfo: string | null;
+
+      // Non-hosts from the New page:
+      guests: Array<{
+        userId: string | null;
+        name?: string | null;
+        kind?: "EXPERT" | "REPORTER";
+        order?: number;
+        appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE";
+        joinUrl?: string | null;
+        venueName?: string | null;
+        venueAddress?: string | null;
+        dialInfo?: string | null;
+      }>;
     }>;
 
     const orgId =
@@ -290,6 +283,69 @@ export async function POST(req: NextRequest) {
         updatedAt: true,
       },
     });
+
+    // ---- Persist non-host participants from body.guests (if provided)
+    try {
+      const guests = Array.isArray((body as any).guests)
+        ? ((body as any).guests as Array<any>)
+        : [];
+
+      if (guests.length) {
+        // Validate which provided IDs correspond to real Users.
+        const candidateIds = Array.from(
+          new Set(
+            guests
+              .map((g) =>
+                g && typeof g.userId === "string" ? g.userId.trim() : ""
+              )
+              .filter(Boolean)
+          )
+        );
+
+        const existingUsers = candidateIds.length
+          ? await prisma.user.findMany({
+              where: { id: { in: candidateIds } },
+              select: { id: true },
+            })
+          : [];
+
+        const validUserId = new Set(existingUsers.map((u) => u.id));
+
+        const now = new Date();
+        const rows = guests
+          .filter((g) => g) // keep all rows; userId may be null for public experts
+          .map((g) => {
+            const kind = String(g.kind ?? "").toUpperCase();
+            const isReporter = kind === "REPORTER";
+            const roleSlot = isReporter ? 2 : 3; // 2: Producer (reporter), 3: Expert
+            const roleLabelSnapshot = isReporter ? "Producer" : "Expert";
+            const proposedId =
+              typeof g.userId === "string" ? g.userId.trim() : null;
+
+            return {
+              bookingId: created.id,
+              // Only keep userId if it actually exists in our Users table; otherwise store null.
+              userId:
+                proposedId && validUserId.has(proposedId) ? proposedId : null,
+              roleSlot,
+              roleLabelSnapshot,
+              inviteStatus: "PENDING" as const,
+              invitedByUserId: viewer.userId,
+              invitedAt: now,
+            };
+          });
+
+        if (rows.length) {
+          await prisma.bookingParticipant.createMany({
+            data: rows,
+            skipDuplicates: true,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("POST /api/bookings: guests persistence skipped", e);
+      // Don’t fail the booking creation flow if participant insert has issues.
+    }
 
     return NextResponse.json(
       { ok: true, booking: shapeBooking(created) },

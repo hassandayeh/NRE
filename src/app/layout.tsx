@@ -72,7 +72,7 @@ export default async function RootLayout({
 
   // Authenticated tabs (guests keep their existing rules)
   const AUTH_LINKS: NavLink[] = [
-    { href: "/modules/booking", label: "Bookings" },
+    { href: "/modules/booking/view", label: "Bookings" }, // ← updated
     { href: settingsHref, label: "Settings" },
     {
       href: isGuest
