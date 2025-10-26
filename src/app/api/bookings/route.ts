@@ -7,6 +7,10 @@ import { AppearanceType, BookingStatus } from "@prisma/client";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../lib/auth";
 
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 type BookingRow = {
   id: string;
   orgId: string;
@@ -19,6 +23,8 @@ type BookingRow = {
   locationName: string | null;
   locationAddress: string | null;
   dialInfo: string | null;
+  newsroomName: string | null; // NEW
+  accessConfig: any | null; // NEW
   createdAt: Date;
   updatedAt: Date;
 };
@@ -36,6 +42,8 @@ function shapeBooking(b: BookingRow) {
     locationName: b.locationName,
     locationAddress: b.locationAddress,
     dialInfo: b.dialInfo,
+    newsroomName: b.newsroomName ?? null, // NEW
+    accessConfig: b.accessConfig ?? null, // NEW
     createdAt: b.createdAt.toISOString(),
     updatedAt: b.updatedAt.toISOString(),
   };
@@ -132,6 +140,8 @@ export async function GET(req: NextRequest) {
         locationName: true,
         locationAddress: true,
         dialInfo: true,
+        newsroomName: true, // NEW
+        accessConfig: true, // NEW
         createdAt: true,
         updatedAt: true,
       },
@@ -171,8 +181,10 @@ export async function POST(req: NextRequest) {
       locationName: string | null;
       locationAddress: string | null;
       dialInfo: string | null;
+      newsroomName: string | null; // NEW
+      accessConfig: Record<string, any>; // NEW
 
-      // Non-hosts from the New page:
+      // Non-hosts from the New page (kept as-is)
       guests: Array<{
         userId: string | null;
         name?: string | null;
@@ -266,6 +278,13 @@ export async function POST(req: NextRequest) {
           body.dialInfo === null || typeof body.dialInfo === "string"
             ? body.dialInfo ?? null
             : null,
+        newsroomName:
+          body.newsroomName === null || typeof body.newsroomName === "string"
+            ? body.newsroomName?.trim() || null
+            : null,
+        ...(isPlainObject(body.accessConfig)
+          ? { accessConfig: body.accessConfig }
+          : {}),
       },
       select: {
         id: true,
@@ -279,19 +298,20 @@ export async function POST(req: NextRequest) {
         locationName: true,
         locationAddress: true,
         dialInfo: true,
+        newsroomName: true, // NEW
+        accessConfig: true, // NEW
         createdAt: true,
         updatedAt: true,
       },
     });
 
-    // ---- Persist non-host participants from body.guests (if provided)
+    // ---- Persist non-host participants from body.guests (kept as-is)
     try {
       const guests = Array.isArray((body as any).guests)
         ? ((body as any).guests as Array<any>)
         : [];
 
       if (guests.length) {
-        // Validate which provided IDs correspond to real Users.
         const candidateIds = Array.from(
           new Set(
             guests
@@ -313,7 +333,7 @@ export async function POST(req: NextRequest) {
 
         const now = new Date();
         const rows = guests
-          .filter((g) => g) // keep all rows; userId may be null for public experts
+          .filter((g) => g)
           .map((g) => {
             const kind = String(g.kind ?? "").toUpperCase();
             const isReporter = kind === "REPORTER";
@@ -324,7 +344,6 @@ export async function POST(req: NextRequest) {
 
             return {
               bookingId: created.id,
-              // Only keep userId if it actually exists in our Users table; otherwise store null.
               userId:
                 proposedId && validUserId.has(proposedId) ? proposedId : null,
               roleSlot,
@@ -344,11 +363,10 @@ export async function POST(req: NextRequest) {
       }
     } catch (e) {
       console.warn("POST /api/bookings: guests persistence skipped", e);
-      // Don’t fail the booking creation flow if participant insert has issues.
     }
 
     return NextResponse.json(
-      { ok: true, booking: shapeBooking(created) },
+      { ok: true, booking: shapeBooking(created as any) },
       { status: 201 }
     );
   } catch (err) {

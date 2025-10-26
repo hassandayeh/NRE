@@ -6,9 +6,9 @@ generator client {
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
-  directUrl  = env("DIRECT_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 /**
@@ -112,55 +112,55 @@ enum ContactType {
  * =========================
  */
 model Organization {
-  id               String                     @id @default(cuid())
-  name             String                     @db.VarChar(200)
+  id   String @id @default(cuid())
+  name String @db.VarChar(200)
 
   // Access control
-  orgRoles         OrgRole[]
-  userRoles        UserRole[]
+  orgRoles  OrgRole[]
+  userRoles UserRole[]
 
   // Modes & access (additive)
-  modes            OrganizationMode[]
-  modePresets      OrganizationModePreset[]
-  accessPresets    OrganizationAccessPreset[]
+  modes         OrganizationMode[]
+  modePresets   OrganizationModePreset[]
+  accessPresets OrganizationAccessPreset[]
 
   // Domain bookings
-  bookings         Booking[]
+  bookings Booking[]
 
   // NEW: claimed domains (DB-backed, replaces any .env usage)
-  domains          OrganizationDomain[]
+  domains OrganizationDomain[]
 
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([name])
 }
 
 model User {
-  id                    String               @id @default(cuid())
-  email                 String               @unique @db.VarChar(320)
-  hashedPassword        String               @db.VarChar(255)
+  id             String @id @default(cuid())
+  email          String @unique @db.VarChar(320)
+  hashedPassword String @db.VarChar(255)
 
-  displayName           String?              @db.VarChar(200)
-  avatarUrl             String?              @db.Text
-  bio                   String?              @db.Text
+  displayName String? @db.VarChar(200)
+  avatarUrl   String? @db.Text
+  bio         String? @db.Text
 
-  languages             String[]             @default([])
-  tags                  String[]             @default([])
+  languages String[] @default([])
+  tags      String[] @default([])
 
-  supportsOnline        Boolean              @default(false)
-  supportsInPerson      Boolean              @default(false)
+  supportsOnline   Boolean @default(false)
+  supportsInPerson Boolean @default(false)
 
-  city                  String?              @db.VarChar(200)
-  countryCode           String?              @db.VarChar(2)
-  timeZone              String?              @db.VarChar(64)
+  city        String? @db.VarChar(200)
+  countryCode String? @db.VarChar(2)
+  timeZone    String? @db.VarChar(64)
 
-  userRoles             UserRole[]
-  bookingParticipants   BookingParticipant[]
-  notes                 BookingNote[]
+  userRoles           UserRole[]
+  bookingParticipants BookingParticipant[]
+  notes               BookingNote[]
 
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([displayName])
   @@index([countryCode])
@@ -172,55 +172,55 @@ model User {
  * =========================
  */
 model PermissionKey {
-  id              String                     @id @default(cuid())
-  key             String                     @unique @db.VarChar(120)
-  description     String?                    @db.Text
-  createdAt       DateTime                   @default(now())
+  id          String   @id @default(cuid())
+  key         String   @unique @db.VarChar(120)
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
 
   // NEW: claimed domains (DB-backed, replaces any .env usage)
-  domains         OrganizationDomain[]
+  domains OrganizationDomain[]
 
-  updatedAt       DateTime                   @updatedAt
+  updatedAt DateTime @updatedAt
 
-  templateLinks   RoleTemplatePermission[]
-  orgLinks        OrgRolePermission[]
+  templateLinks RoleTemplatePermission[]
+  orgLinks      OrgRolePermission[]
 }
 
 model RoleTemplate {
-  id                 String                  @id @default(cuid())
-  slot               Int                     @unique
-  defaultLabel       String                  @db.VarChar(100)
-  isActiveByDefault  Boolean                 @default(false)
-  createdAt          DateTime                @default(now())
-  updatedAt          DateTime                @updatedAt
+  id                String   @id @default(cuid())
+  slot              Int      @unique
+  defaultLabel      String   @db.VarChar(100)
+  isActiveByDefault Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  permissions        RoleTemplatePermission[]
+  permissions RoleTemplatePermission[]
 }
 
 model RoleTemplatePermission {
   roleTemplateId  String
   permissionKeyId String
 
-  roleTemplate    RoleTemplate   @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
-  permissionKey   PermissionKey  @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
+  roleTemplate  RoleTemplate  @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
+  permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([roleTemplateId, permissionKeyId])
 }
 
 model OrgRole {
-  id           String             @id @default(cuid())
-  orgId        String
-  slot         Int
-  label        String             @db.VarChar(100)
-  isActive     Boolean            @default(false)
+  id       String  @id @default(cuid())
+  orgId    String
+  slot     Int
+  label    String  @db.VarChar(100)
+  isActive Boolean @default(false)
 
-  organization Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  permissions  OrgRolePermission[]
-  assignments  UserRole[]         @relation("OrgRoleAssignments")
+  permissions OrgRolePermission[]
+  assignments UserRole[]          @relation("OrgRoleAssignments")
 
   @@unique([orgId, slot])
   @@index([orgId])
@@ -229,10 +229,10 @@ model OrgRole {
 model OrgRolePermission {
   orgRoleId       String
   permissionKeyId String
-  allowed         Boolean         @default(true)
+  allowed         Boolean @default(true)
 
-  orgRole         OrgRole         @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
-  permissionKey   PermissionKey   @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
+  orgRole       OrgRole       @relation(fields: [orgRoleId], references: [id], onDelete: Cascade)
+  permissionKey PermissionKey @relation(fields: [permissionKeyId], references: [id], onDelete: Cascade)
 
   @@id([orgRoleId, permissionKeyId])
 }
@@ -241,8 +241,8 @@ model UserRole {
   userId     String
   orgId      String
   slot       Int
-  assignedAt DateTime   @default(now())
-  orgManaged Boolean    @default(false)
+  assignedAt DateTime @default(now())
+  orgManaged Boolean  @default(false)
 
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -264,35 +264,37 @@ model UserRole {
  * We expose `active` but map it to the existing DB column `isActive`.
  */
 model OrganizationMode {
-  id               String    @id @default(cuid())
+  id               String  @id @default(cuid())
   orgId            String
   slot             Int
-  label            String    @db.VarChar(120)
-  active           Boolean   @default(false) @map("isActive") // maps to existing column
+  label            String  @db.VarChar(120)
+  active           Boolean @default(false) @map("isActive") // maps to existing column
   accessFieldLabel String?
 
-  organization     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   // *** Back-relations required by Prisma (additive, no DB changes) ***
-  presets          OrganizationModePreset[]
-  accessPresets    OrganizationAccessPreset[]
+  presets       OrganizationModePreset[]
+  accessPresets OrganizationAccessPreset[]
 
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([orgId, slot])
   @@index([orgId])
 }
 
-/** Catalog of access fields toggled per mode */
+/**
+ * Catalog of access fields toggled per mode
+ */
 model OrganizationAccessField {
-  id          String   @id @default(cuid())
-  key         String   @unique @db.VarChar(120)
-  label       String   @db.VarChar(200)
-  description String?  @db.Text
+  id          String  @id @default(cuid())
+  key         String  @unique @db.VarChar(120)
+  label       String  @db.VarChar(200)
+  description String? @db.Text
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Two different relations from AccessPreset -> AccessField need names
   presetsByAccessId OrganizationAccessPreset[] @relation("AccessPresetByAccessFieldId")
@@ -305,21 +307,21 @@ model OrganizationAccessField {
  * Legacy orgId/slot/label/active kept OPTIONAL (no drops).
  */
 model OrganizationModePreset {
-  id          String   @id @default(cuid())
-  orgModeId   String
-  value       String
+  id        String @id @default(cuid())
+  orgModeId String
+  value     String
 
   // legacy/optional (kept for compatibility)
-  orgId       String?
-  slot        Int?
-  label       String?
-  active      Boolean? @default(false)
+  orgId  String?
+  slot   Int?
+  label  String?
+  active Boolean? @default(false)
 
   organizationMode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
   organization     Organization?    @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([orgId, slot]) // legacy uniqueness (null-friendly)
   @@index([orgModeId])
@@ -332,27 +334,27 @@ model OrganizationModePreset {
  * Legacy orgId/modeSlot/fieldId/allowed kept OPTIONAL (no drops).
  */
 model OrganizationAccessPreset {
-  id           String   @id @default(cuid())
-  orgModeId    String
+  id            String  @id @default(cuid())
+  orgModeId     String
   accessFieldId String
-  value        String?
+  value         String?
 
   // legacy/optional (kept for compatibility)
-  orgId        String?
-  modeSlot     Int?
-  fieldId      String?
-  allowed      Boolean? @default(true)
+  orgId    String?
+  modeSlot Int?
+  fieldId  String?
+  allowed  Boolean? @default(true)
 
-  organizationMode OrganizationMode        @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
+  organizationMode OrganizationMode @relation(fields: [orgModeId], references: [id], onDelete: Cascade)
 
   // *** disambiguated relations ***
-  accessField  OrganizationAccessField     @relation("AccessPresetByAccessFieldId", fields: [accessFieldId], references: [id], onDelete: Cascade)
-  field        OrganizationAccessField?    @relation("AccessPresetByLegacyFieldId", fields: [fieldId], references: [id], onDelete: SetNull)
+  accessField OrganizationAccessField  @relation("AccessPresetByAccessFieldId", fields: [accessFieldId], references: [id], onDelete: Cascade)
+  field       OrganizationAccessField? @relation("AccessPresetByLegacyFieldId", fields: [fieldId], references: [id], onDelete: SetNull)
 
-  organization Organization?               @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([orgId, modeSlot, fieldId]) // legacy uniqueness (null-friendly)
   @@index([orgModeId])
@@ -366,51 +368,55 @@ model OrganizationAccessPreset {
  * =========================
  */
 model Booking {
-  id              String           @id @default(cuid())
-  orgId           String
-  organization    Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  subject         String           @db.VarChar(300)
-  status          BookingStatus    @default(PENDING)
+  id           String        @id @default(cuid())
+  orgId        String
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  subject      String        @db.VarChar(300)
+  status       BookingStatus @default(PENDING)
 
-  startAt         DateTime
-  durationMins    Int
+  startAt      DateTime
+  durationMins Int
 
   appearanceType  AppearanceType?
   locationUrl     String?
-  locationName    String?          @db.VarChar(300)
+  locationName    String?         @db.VarChar(300)
   locationAddress String?
   dialInfo        String?
+  /// Stores New-page access knobs (scopes/provisioning/unified type/default link)
+  accessConfig    Json?
+  /// Optional newsroom label shown in New page's "What" section
+  newsroomName    String?
 
-  participants    BookingParticipant[]
-  notes           BookingNote[]
+  participants BookingParticipant[]
+  notes        BookingNote[]
 
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([orgId])
   @@index([startAt])
 }
 
 model BookingParticipant {
-  id                 String         @id @default(cuid())
-  bookingId          String
-  booking            Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        String  @id @default(cuid())
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  userId             String?
-  user               User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  roleSlot           Int
-  roleLabelSnapshot  String?        @db.VarChar(100)
+  roleSlot          Int
+  roleLabelSnapshot String? @db.VarChar(100)
 
-  inviteStatus       InviteStatus   @default(PENDING)
-  invitedByUserId    String?
-  invitedAt          DateTime?
-  respondedAt        DateTime?
+  inviteStatus    InviteStatus @default(PENDING)
+  invitedByUserId String?
+  invitedAt       DateTime?
+  respondedAt     DateTime?
 
-  notes              String?        @db.Text
+  notes String? @db.Text
 
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([bookingId, userId])
   @@index([bookingId])
@@ -419,17 +425,17 @@ model BookingParticipant {
 }
 
 model BookingNote {
-  id          String     @id @default(cuid())
-  bookingId   String
-  booking     Booking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        String  @id @default(cuid())
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  authorId    String
-  author      User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
-  body        String     @db.Text
+  body String @db.Text
 
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([bookingId, createdAt])
 }
@@ -440,163 +446,163 @@ model BookingNote {
  * =========================
  */
 model GuestProfile {
-  id             String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Account
-  personalEmail  String   @unique @db.VarChar(320)
-  passwordHash   String?  @db.VarChar(255) // hashed password for guest sign-in
+  personalEmail String  @unique @db.VarChar(320)
+  passwordHash  String? @db.VarChar(255) // hashed password for guest sign-in
 
   // Core (existing)
-  displayName    String?
-  avatarUrl      String?
-  listedPublic   Boolean  @default(false)
-  inviteable     Boolean  @default(true)
+  displayName  String?
+  avatarUrl    String?
+  listedPublic Boolean @default(false)
+  inviteable   Boolean @default(true)
 
   // Identity (NEW)
-  honorific      Honorific?
-  nativeName     String?  @db.VarChar(200)
-  pronouns       Pronouns?
+  honorific  Honorific?
+  nativeName String?    @db.VarChar(200)
+  pronouns   Pronouns?
 
   // Headline & Summary (NEW)
-  headline       String?  @db.VarChar(120)
-  shortBio       String?  @db.VarChar(280)
-  fullBio        String?  @db.Text
+  headline String? @db.VarChar(120)
+  shortBio String? @db.VarChar(280)
+  fullBio  String? @db.Text
 
   // Expertise & Coverage (NEW: facets as arrays for MVP)
-  topicKeys      String[] @default([])
-  regionCodes    String[] @default([])
+  topicKeys   String[] @default([])
+  regionCodes String[] @default([])
 
   // Logistics (NEW)
-  countryCode    String?  @db.VarChar(2)
-  city           String?  @db.VarChar(200)
-  timezone       String?  @db.VarChar(64)
+  countryCode     String?          @db.VarChar(2)
+  city            String?          @db.VarChar(200)
+  timezone        String?          @db.VarChar(64)
   appearanceTypes AppearanceType[] @default([])
   travelReadiness TravelReadiness?
 
   // Children (NEW)
-  languages      GuestLanguage[]
-  experience     GuestExperience[]
-  education      GuestEducation[]
-  publications   GuestPublication[]
-  media          GuestMediaAppearance[]
+  languages        GuestLanguage[]
+  experience       GuestExperience[]
+  education        GuestEducation[]
+  publications     GuestPublication[]
+  media            GuestMediaAppearance[]
   additionalEmails GuestAdditionalEmail[]
-  contacts       GuestContactMethod[]
+  contacts         GuestContactMethod[]
 
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // Child tables for guest-owned fields
 
 model GuestLanguage {
-  id        String     @id @default(cuid())
+  id        String       @id @default(cuid())
   profileId String
   profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  isoCode   String     @db.VarChar(16) // ISO-639-1 (+ room for tags)
-  level     CEFRLevel
+  isoCode String    @db.VarChar(16) // ISO-639-1 (+ room for tags)
+  level   CEFRLevel
 
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([profileId, isoCode])
   @@index([profileId])
 }
 
 model GuestExperience {
-  id         String       @id @default(cuid())
-  profileId  String
-  profile    GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  orgName    String       @db.VarChar(200)
-  roleTitle  String?      @db.VarChar(200)
-  from       DateTime?
-  to         DateTime?
-  isCurrent  Boolean      @default(false)
+  orgName   String    @db.VarChar(200)
+  roleTitle String?   @db.VarChar(200)
+  from      DateTime?
+  to        DateTime?
+  isCurrent Boolean   @default(false)
 
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([profileId, isCurrent])
 }
 
 model GuestEducation {
-  id            String       @id @default(cuid())
-  profileId     String
-  profile       GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  institution   String       @db.VarChar(200)
-  credential    String?      @db.VarChar(200)
-  fieldOfStudy  String?      @db.VarChar(200)
-  from          DateTime?
-  to            DateTime?
+  institution  String    @db.VarChar(200)
+  credential   String?   @db.VarChar(200)
+  fieldOfStudy String?   @db.VarChar(200)
+  from         DateTime?
+  to           DateTime?
 
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([profileId])
 }
 
 model GuestPublication {
-  id         String       @id @default(cuid())
-  profileId  String
-  profile    GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  title      String       @db.VarChar(300)
-  outlet     String?      @db.VarChar(200)
-  year       Int?
-  url        String?      @db.Text
+  title  String  @db.VarChar(300)
+  outlet String? @db.VarChar(200)
+  year   Int?
+  url    String? @db.Text
 
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([profileId, year])
 }
 
 model GuestMediaAppearance {
-  id         String       @id @default(cuid())
-  profileId  String
-  profile    GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  title      String       @db.VarChar(300)
-  outlet     String?      @db.VarChar(200)
-  date       DateTime?
-  url        String?      @db.Text
-  type       MediaType?
+  title  String     @db.VarChar(300)
+  outlet String?    @db.VarChar(200)
+  date   DateTime?
+  url    String?    @db.Text
+  type   MediaType?
 
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([profileId, date])
 }
 
 model GuestAdditionalEmail {
-  id         String            @id @default(cuid())
-  profileId  String
-  profile    GuestProfile      @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
   email      String            @db.VarChar(320)
   verifiedAt DateTime?
   visibility ContactVisibility @default(INTERNAL)
 
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([profileId, email])
   @@index([profileId, visibility])
 }
 
 model GuestContactMethod {
-  id         String            @id @default(cuid())
-  profileId  String
-  profile    GuestProfile      @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  profileId String
+  profile   GuestProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
   type       ContactType
   value      String            @db.VarChar(200)
   visibility ContactVisibility @default(INTERNAL)
 
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([profileId, type])
 }
@@ -607,24 +613,24 @@ model GuestContactMethod {
  * =========================
  */
 model OrganizationDomain {
-  id                String        @id @default(cuid())
-  orgId             String
-  organization      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id           String       @id @default(cuid())
+  orgId        String
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   /// Stored lowercased by UI; length allows full email domain spec.
-  domain            String        @db.VarChar(320)
+  domain String @db.VarChar(320)
 
   /// Manual for now (no verification infra yet)
-  status            DomainStatus  @default(VERIFIED)
-  isPrimary         Boolean       @default(false)
-  verifiedAt        DateTime?
-  verifiedByUserId  String?
+  status           DomainStatus @default(VERIFIED)
+  isPrimary        Boolean      @default(false)
+  verifiedAt       DateTime?
+  verifiedByUserId String?
 
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  PermissionKey     PermissionKey? @relation(fields: [permissionKeyId], references: [id])
-  permissionKeyId   String?
+  PermissionKey   PermissionKey? @relation(fields: [permissionKeyId], references: [id])
+  permissionKeyId String?
 
   @@unique([orgId, domain]) // unique per org
   @@index([domain])
@@ -634,11 +640,11 @@ model OrganizationDomain {
 /// We keep org/guest/user as strings to avoid coupling to existing relations.
 model OrgGuestNote {
   id           String   @id @default(cuid())
-  orgId        String   // organization that owns this note
-  guestId      String   // the public guest profile this note is attached to
-  authorUserId String   // staff user id who posted the note
-  authorName   String?  // cached display name for convenience
-  body         String   // note text (markdown/plain)
+  orgId        String // organization that owns this note
+  guestId      String // the public guest profile this note is attached to
+  authorUserId String // staff user id who posted the note
+  authorName   String? // cached display name for convenience
+  body         String // note text (markdown/plain)
   createdAt    DateTime @default(now())
 
   @@index([orgId, guestId, createdAt])

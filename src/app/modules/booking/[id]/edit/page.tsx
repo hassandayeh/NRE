@@ -13,10 +13,15 @@ type BookingDTO = {
   startAt: string; // ISO
   durationMins: number;
   appearanceType: "ONLINE" | "IN_PERSON" | "PHONE" | null;
+
+  // legacy fields still returned by API (not edited here)
   locationUrl: string | null;
   locationName: string | null;
   locationAddress: string | null;
   dialInfo: string | null;
+
+  newsroomName: string | null; // edited here
+  accessConfig: any | null; // non-host access knobs
   createdAt: string;
   updatedAt: string;
 };
@@ -58,15 +63,19 @@ function fromLocalInputValue(val: string) {
 function groupByRole(items: ParticipantDTO[]) {
   const out = new Map<string, ParticipantDTO[]>();
   for (const it of items) {
-    const key = (
-      it.roleLabel?.trim() ||
-      (typeof it.roleSlot === "number" ? `Role ${it.roleSlot}` : "Role")
-    ).toString();
+    const key =
+      (it.roleLabel?.trim() ||
+        (typeof it.roleSlot === "number" ? `Role ${it.roleSlot}` : "Role")) +
+      "";
     if (!out.has(key)) out.set(key, []);
     out.get(key)!.push(it);
   }
   return out;
 }
+
+type AppearanceScope = "UNIFIED" | "PER_GUEST";
+type AccessProvisioning = "SHARED" | "PER_GUEST";
+type UnifiedType = "ONLINE" | "IN_PERSON" | "PHONE" | null;
 
 export default function BookingEditPage({
   params,
@@ -80,19 +89,26 @@ export default function BookingEditPage({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // form state
+  // What (mirrors New)
   const [subject, setSubject] = useState("");
+  const [newsroomName, setNewsroomName] = useState("");
+
+  // When / basics (mirrors New)
   const [appearanceType, setAppearanceType] = useState<
     "ONLINE" | "IN_PERSON" | "PHONE" | ""
   >("");
   const [startAtLocal, setStartAtLocal] = useState("");
   const [durationMins, setDurationMins] = useState<number | "">("");
-  const [locationUrl, setLocationUrl] = useState("");
-  const [locationName, setLocationName] = useState("");
-  const [locationAddress, setLocationAddress] = useState("");
-  const [dialInfo, setDialInfo] = useState("");
 
-  // participants (read-only)
+  // Non-host access config (mirrors New)
+  const [nhAppearanceScope, setNhAppearanceScope] =
+    useState<AppearanceScope>("UNIFIED");
+  const [nhAccessProvisioning, setNhAccessProvisioning] =
+    useState<AccessProvisioning>("SHARED");
+  const [nhUnifiedType, setNhUnifiedType] = useState<UnifiedType>("ONLINE");
+  const [nhDefaultLink, setNhDefaultLink] = useState<string>("");
+
+  // Participants (read-only slice for now)
   const [participants, setParticipants] = useState<ParticipantDTO[]>([]);
   const grouped = useMemo(() => groupByRole(participants), [participants]);
 
@@ -132,13 +148,22 @@ export default function BookingEditPage({
 
         const b = bJson.booking;
         setSubject(b.subject || "");
+        setNewsroomName(b.newsroomName || "");
         setAppearanceType((b.appearanceType as any) || "");
         setStartAtLocal(toLocalInputValue(b.startAt));
         setDurationMins(b.durationMins ?? "");
-        setLocationUrl(b.locationUrl || "");
-        setLocationName(b.locationName || "");
-        setLocationAddress(b.locationAddress || "");
-        setDialInfo(b.dialInfo || "");
+
+        // accessConfig → state (non-host)
+        const nonHost = (b.accessConfig?.nonHost ?? {}) as Record<string, any>;
+        const scope = (nonHost.appearanceScope as AppearanceScope) || "UNIFIED";
+        const prov =
+          (nonHost.accessProvisioning as AccessProvisioning) || "SHARED";
+        const uType = (nonHost.unifiedType as UnifiedType) ?? "ONLINE";
+        const link = (nonHost.defaultJoinUrl as string | null) ?? "";
+        setNhAppearanceScope(scope);
+        setNhAccessProvisioning(prov);
+        setNhUnifiedType(uType);
+        setNhDefaultLink(link || "");
 
         const list = (pJson as any).participants ?? (pJson as any).items ?? [];
         setParticipants(Array.isArray(list) ? list : []);
@@ -166,17 +191,27 @@ export default function BookingEditPage({
     setError(null);
     try {
       const payload: any = {
+        // What
         subject: subject.trim(),
+        newsroomName: newsroomName.trim() ? newsroomName.trim() : null,
+
+        // When
         startAt: fromLocalInputValue(startAtLocal),
         durationMins:
           typeof durationMins === "number"
             ? durationMins
             : parseInt(String(durationMins || "0"), 10),
         appearanceType: appearanceType || null,
-        locationUrl: locationUrl.trim() ? locationUrl.trim() : null,
-        locationName: locationName.trim() ? locationName.trim() : null,
-        locationAddress: locationAddress.trim() ? locationAddress.trim() : null,
-        dialInfo: dialInfo.trim() ? dialInfo.trim() : null,
+
+        // Non-host access config
+        accessConfig: {
+          nonHost: {
+            appearanceScope: nhAppearanceScope,
+            accessProvisioning: nhAccessProvisioning,
+            unifiedType: nhUnifiedType,
+            defaultJoinUrl: nhDefaultLink.trim() || null,
+          },
+        },
       };
 
       const res = await fetch(`/api/bookings/${encodeURIComponent(id)}`, {
@@ -283,153 +318,186 @@ export default function BookingEditPage({
       </div>
 
       <form onSubmit={handleSave} className="space-y-6">
-        {/* Basics */}
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="rounded-xl border bg-white p-4">
-            <h2 className="mb-3 text-sm font-medium text-gray-700">Basics</h2>
+        {/* What */}
+        <div className="rounded-xl border bg-white p-4">
+          <h2 className="mb-3 text-sm font-medium text-gray-700">What</h2>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="subject"
-            >
-              Subject
-            </label>
-            <input
-              id="subject"
-              name="subject"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="e.g., Morning Show"
-              required
-            />
+          <label className="mb-2 block text-sm text-gray-700" htmlFor="subject">
+            Subject
+          </label>
+          <input
+            id="subject"
+            name="subject"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="e.g., Morning Show"
+            required
+          />
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="appearanceType"
-            >
-              Appearance
-            </label>
-            <select
-              id="appearanceType"
-              name="appearanceType"
-              value={appearanceType}
-              onChange={(e) => setAppearanceType(e.target.value as any)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="">—</option>
-              <option value="ONLINE">ONLINE</option>
-              <option value="IN_PERSON">IN_PERSON</option>
-              <option value="PHONE">PHONE</option>
-            </select>
+          <label
+            className="mb-2 block text-sm text-gray-700"
+            htmlFor="newsroomName"
+          >
+            Newsroom name
+          </label>
+          <input
+            id="newsroomName"
+            name="newsroomName"
+            value={newsroomName}
+            onChange={(e) => setNewsroomName(e.target.value)}
+            className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="e.g., Newsroom"
+          />
+        </div>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="startAt"
-            >
-              Start at
-            </label>
-            <input
-              id="startAt"
-              name="startAt"
-              type="datetime-local"
-              value={startAtLocal}
-              onChange={(e) => setStartAtLocal(e.target.value)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              required
-            />
+        {/* When */}
+        <div className="rounded-xl border bg-white p-4">
+          <h2 className="mb-3 text-sm font-medium text-gray-700">When</h2>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="durationMins"
-            >
-              Duration (mins)
-            </label>
-            <input
-              id="durationMins"
-              name="durationMins"
-              type="number"
-              min={1}
-              value={durationMins}
-              onChange={(e) =>
-                setDurationMins(
-                  e.target.value === "" ? "" : Number(e.target.value)
-                )
-              }
-              className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              required
-            />
-          </div>
+          <label
+            className="mb-2 block text-sm text-gray-700"
+            htmlFor="appearanceType"
+          >
+            Appearance
+          </label>
+          <select
+            id="appearanceType"
+            name="appearanceType"
+            value={appearanceType}
+            onChange={(e) => setAppearanceType(e.target.value as any)}
+            className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="">—</option>
+            <option value="ONLINE">ONLINE</option>
+            <option value="IN_PERSON">IN_PERSON</option>
+            <option value="PHONE">PHONE</option>
+          </select>
 
-          {/* Location */}
-          <div className="rounded-xl border bg-white p-4">
-            <h2 className="mb-3 text-sm font-medium text-gray-700">
-              Location & Access
-            </h2>
+          <label className="mb-2 block text-sm text-gray-700" htmlFor="startAt">
+            Start at
+          </label>
+          <input
+            id="startAt"
+            name="startAt"
+            type="datetime-local"
+            value={startAtLocal}
+            onChange={(e) => setStartAtLocal(e.target.value)}
+            className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            required
+          />
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="locationName"
-            >
-              Location name
-            </label>
-            <input
-              id="locationName"
-              name="locationName"
-              value={locationName}
-              onChange={(e) => setLocationName(e.target.value)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Studio A"
-            />
+          <label
+            className="mb-2 block text-sm text-gray-700"
+            htmlFor="durationMins"
+          >
+            Duration (mins)
+          </label>
+          <input
+            id="durationMins"
+            name="durationMins"
+            type="number"
+            min={1}
+            value={durationMins}
+            onChange={(e) =>
+              setDurationMins(
+                e.target.value === "" ? "" : Number(e.target.value)
+              )
+            }
+            className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            required
+          />
+        </div>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="locationAddress"
-            >
-              Address
-            </label>
-            <input
-              id="locationAddress"
-              name="locationAddress"
-              value={locationAddress}
-              onChange={(e) => setLocationAddress(e.target.value)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="123 Main St"
-            />
+        {/* Non-host access controls (mirror New) */}
+        <div className="rounded-xl border bg-white p-4">
+          <h2 className="mb-3 text-sm font-medium text-gray-700">
+            Participants — access & appearance (non-hosts)
+          </h2>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="locationUrl"
-            >
-              URL
-            </label>
-            <input
-              id="locationUrl"
-              name="locationUrl"
-              value={locationUrl}
-              onChange={(e) => setLocationUrl(e.target.value)}
-              className="mb-4 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 break-words"
-              placeholder="https://…"
-            />
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label
+                className="mb-2 block text-sm text-gray-700"
+                htmlFor="nhScope"
+              >
+                Appearance scope (non-hosts)
+              </label>
+              <select
+                id="nhScope"
+                value={nhAppearanceScope}
+                onChange={(e) =>
+                  setNhAppearanceScope(e.target.value as AppearanceScope)
+                }
+                className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="UNIFIED">UNIFIED (single)</option>
+                <option value="PER_GUEST">PER_GUEST</option>
+              </select>
+            </div>
 
-            <label
-              className="mb-2 block text-sm text-gray-700"
-              htmlFor="dialInfo"
-            >
-              Dial info
-            </label>
-            <textarea
-              id="dialInfo"
-              name="dialInfo"
-              value={dialInfo}
-              onChange={(e) => setDialInfo(e.target.value)}
-              className="min-h-[96px] w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Zoom ID, phone bridge, etc."
-            />
+            <div>
+              <label
+                className="mb-2 block text-sm text-gray-700"
+                htmlFor="nhProv"
+              >
+                Access provisioning (non-hosts)
+              </label>
+              <select
+                id="nhProv"
+                value={nhAccessProvisioning}
+                onChange={(e) =>
+                  setNhAccessProvisioning(e.target.value as AccessProvisioning)
+                }
+                className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="SHARED">SHARED</option>
+                <option value="PER_GUEST">PER_GUEST</option>
+              </select>
+            </div>
+
+            {nhAppearanceScope === "UNIFIED" ? (
+              <div>
+                <label
+                  className="mb-2 block text-sm text-gray-700"
+                  htmlFor="nhUnifiedType"
+                >
+                  Unified type (non-hosts)
+                </label>
+                <select
+                  id="nhUnifiedType"
+                  value={nhUnifiedType ?? ""}
+                  onChange={(e) =>
+                    setNhUnifiedType((e.target.value || null) as UnifiedType)
+                  }
+                  className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="ONLINE">ONLINE</option>
+                  <option value="IN_PERSON">IN_PERSON</option>
+                  <option value="PHONE">PHONE</option>
+                </select>
+              </div>
+            ) : null}
+
+            <div className="md:col-span-2">
+              <label
+                className="mb-2 block text-sm text-gray-700"
+                htmlFor="nhDefaultLink"
+              >
+                Default meeting link (non-hosts)
+              </label>
+              <input
+                id="nhDefaultLink"
+                value={nhDefaultLink}
+                onChange={(e) => setNhDefaultLink(e.target.value)}
+                className="w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 break-words"
+                placeholder="https://…"
+              />
+            </div>
           </div>
         </div>
 
-        {/* Participants (read-only) */}
+        {/* Participants (read-only for this slice) */}
         <div className="rounded-xl border bg-white p-4">
           <h2 className="mb-3 text-sm font-medium text-gray-700">
             Participants
@@ -464,8 +532,8 @@ export default function BookingEditPage({
             </div>
           )}
           <p className="mt-3 text-xs text-gray-500">
-            Participant status is managed on the participant’s side. Editing
-            participants will ship in a later slice.
+            Editing participants will ship next; status is managed on the
+            participant’s side.
           </p>
         </div>
 
