@@ -53,10 +53,20 @@ async function loadModesAndAccess(orgId: string): Promise<ModesApiResponse> {
   const base = `${proto}://${host}`;
 
   const url = `${base}/api/org/modes?orgId=${encodeURIComponent(orgId)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) return { modes: [], access: [] };
 
-  const data = (await res.json()) as ModesApiResponse;
+  // Forward cookies so the API doesn't redirect to /auth/signin (HTML).
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: { cookie: h.get("cookie") ?? "" },
+  });
+
+  // If we got HTML or a non-OK, fail safe (prevents "<!DOCTYPE" JSON crash).
+  const ctype = (res.headers.get("content-type") || "").toLowerCase();
+  if (!res.ok || !ctype.includes("application/json")) {
+    return { modes: [], access: [] };
+  }
+
+  const data = (await res.json().catch(() => null)) as ModesApiResponse | null;
   if (!data || !Array.isArray(data.modes) || !Array.isArray(data.access)) {
     return { modes: [], access: [] };
   }
@@ -140,14 +150,14 @@ async function resolveOrgIdServer(): Promise<string | null> {
 /** ===================== Server actions — Modes ===================== */
 /**
  * Save behavior:
- * - If a label is provided OR radio=active → upsert via API (becomes active).
- * - If radio=inactive AND no label → delete the row (becomes inactive).
+ * - If a label is provided OR active checkbox is checked → upsert via API (becomes active).
+ * - If checkbox is unchecked AND no label → delete the row (becomes inactive).
  */
 async function saveMode(formData: FormData) {
   "use server";
   const orgId = String(formData.get("orgId") ?? "").trim();
   const slot = Number(formData.get("slot") ?? 0);
-  const activeRadio = String(formData.get("active") ?? ""); // "1" | "0" | ""
+  const activeVal = String(formData.get("active") ?? ""); // "on" when checked
   const labelRaw = String(formData.get("label") ?? "").trim();
 
   if (!orgId || !slot || slot < 1 || slot > 10) {
@@ -155,19 +165,23 @@ async function saveMode(formData: FormData) {
     return;
   }
 
-  const wantsActive = activeRadio === "1" || !!labelRaw;
+  const wantsActive = activeVal === "on" || !!labelRaw;
   const label = labelRaw || `Mode ${slot}`;
 
   if (wantsActive) {
-    // Upsert through the API
+    // Upsert through the API — forward cookies so it doesn't redirect to /auth/signin.
     const h = headers();
     const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
     const proto = h.get("x-forwarded-proto") ?? "http";
     const base = `${proto}://${host}`;
+    const cookie = h.get("cookie") ?? "";
 
-    await fetch(`${base}/api/org/modes`, {
+    const res = await fetch(`${base}/api/org/modes`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        cookie,
+      },
       body: JSON.stringify({
         action: "mode:update",
         orgId,
@@ -176,6 +190,16 @@ async function saveMode(formData: FormData) {
       }),
       cache: "no-store",
     });
+
+    // Non-JSON? bail quietly but keep UX stable.
+    const ctype = (res.headers.get("content-type") || "").toLowerCase();
+    if (!res.ok || !ctype.includes("application/json")) {
+      revalidatePath("/modules/settings/modes-access");
+      redirect(
+        `/modules/settings/modes-access?orgId=${encodeURIComponent(orgId)}`
+      );
+      return;
+    }
   } else {
     // Explicit inactivate: remove the row; presets cascade via FK.
     await prisma.$executeRawUnsafe(
@@ -186,26 +210,9 @@ async function saveMode(formData: FormData) {
   }
 
   revalidatePath("/modules/settings/modes-access");
-}
-
-async function resetMode(formData: FormData) {
-  "use server";
-  const orgId = String(formData.get("orgId") ?? "").trim();
-  const slot = Number(formData.get("slot") ?? 0);
-
-  if (!orgId || !slot || slot < 1 || slot > 10) {
-    revalidatePath("/modules/settings/modes-access");
-    return;
-  }
-
-  // Reset = remove the mode row entirely
-  await prisma.$executeRawUnsafe(
-    `DELETE FROM "OrganizationMode" WHERE "orgId" = $1 AND "slot" = $2`,
-    orgId,
-    slot
+  redirect(
+    `/modules/settings/modes-access?orgId=${encodeURIComponent(orgId)}&saved=1`
   );
-
-  revalidatePath("/modules/settings/modes-access");
 }
 
 /** ===================== Server actions — Access (Mode, Label, Details) ===================== */
@@ -251,7 +258,6 @@ async function createModeAccess(formData: FormData) {
   const label = labelRaw.slice(0, 80);
   const details = detailsRaw.slice(0, 240);
 
-  // AccessField upsert with timestamps
   await prisma.$executeRawUnsafe(
     `
     INSERT INTO "OrganizationAccessField" ("id","key","label","createdAt","updatedAt")
@@ -272,7 +278,6 @@ async function createModeAccess(formData: FormData) {
   if (!accessFieldId)
     throw new Error("Failed to create or fetch access field.");
 
-  // Preset insert with timestamps (guarded)
   await prisma.$executeRawUnsafe(
     `
     INSERT INTO "OrganizationAccessPreset" ("id","accessFieldId","value","orgModeId","createdAt","updatedAt")
@@ -290,6 +295,10 @@ async function createModeAccess(formData: FormData) {
   );
 
   revalidatePath("/modules/settings/modes-access");
+  // Force a fresh render so the form fields reset to their initial (empty) state.
+  redirect(
+    `/modules/settings/modes-access?orgId=${encodeURIComponent(orgId)}&saved=1`
+  );
 }
 
 async function deleteModeAccess(formData: FormData) {
@@ -344,6 +353,7 @@ export default async function ModesAndAccessPage({
   }
 
   const orgId = orgIdFromQuery;
+  const justSaved = searchParams.saved === "1";
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
@@ -357,17 +367,22 @@ export default async function ModesAndAccessPage({
             just a Label and Details.
           </p>
         </div>
-        <Link
-          href="/modules/settings"
-          className="inline-flex h-9 items-center rounded-xl border px-3 text-sm"
-        >
-          Settings
-        </Link>
+        <div className="flex items-center gap-2">
+          {justSaved ? (
+            <span className="inline-flex items-center rounded-full border px-2 py-1 text-xs">
+              Saved
+            </span>
+          ) : null}
+          <Link
+            href="/modules/settings"
+            className="inline-flex h-9 items-center rounded-xl border px-3 text-sm"
+          >
+            Settings
+          </Link>
+        </div>
       </header>
 
-      <p className="mb-6 text-sm text-neutral-600">
-        <span className="font-medium">Org:</span> {orgId || "—"}
-      </p>
+      {/* Org line removed per request */}
 
       {!orgId ? (
         <div className="rounded-xl border p-4 text-sm">
@@ -423,19 +438,8 @@ async function Content({ orgId }: { orgId: string }) {
                   <div className="col-span-3 flex items-center gap-3 py-2">
                     <label className="inline-flex items-center gap-2">
                       <input
-                        type="radio"
+                        type="checkbox"
                         name="active"
-                        value="0"
-                        defaultChecked={!m?.active}
-                        aria-label="inactive"
-                      />
-                      <span className="text-neutral-600">inactive</span>
-                    </label>
-                    <label className="inline-flex items-center gap-2">
-                      <input
-                        type="radio"
-                        name="active"
-                        value="1"
                         defaultChecked={!!m?.active}
                         aria-label="active"
                       />
@@ -487,21 +491,18 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mb-8 rounded-2xl border p-4">
-      <div className="mb-3 flex items-center justify-between">
+    <details open className="mb-8 rounded-2xl border">
+      <summary className="flex cursor-pointer select-none items-center justify-between p-4">
         <div>
           <h2 className="text-base font-semibold">{title}</h2>
           {description ? (
             <p className="mt-1 text-sm text-neutral-600">{description}</p>
           ) : null}
         </div>
-        <details className="text-sm">
-          <summary className="cursor-pointer select-none">▾</summary>
-          <div className="sr-only">toggle</div>
-        </details>
-      </div>
-      <div>{children}</div>
-    </section>
+        <span aria-hidden>▾</span>
+      </summary>
+      <div className="px-4 pb-4">{children}</div>
+    </details>
   );
 }
 
@@ -532,8 +533,14 @@ function SlotPills({ modes }: { modes: ModeDto[] }) {
 async function AddAccessForm({ orgId }: { orgId: string }) {
   const { modes } = await loadModesAndAccess(orgId);
 
+  // Force a fresh form mount on each render so inputs reset after a save/redirect
+  const formKey = `${Date.now().toString(36)}${Math.random()
+    .toString(36)
+    .slice(2)}`;
+
   return (
     <form
+      key={formKey}
       action={createModeAccess}
       className="mb-6 grid grid-cols-12 gap-2 text-sm"
     >
@@ -542,6 +549,7 @@ async function AddAccessForm({ orgId }: { orgId: string }) {
         <label className="mb-1 block text-xs text-neutral-500">Mode</label>
         <select
           name="modeSlot"
+          defaultValue=""
           className="w-full rounded-xl border px-3 py-2"
           required
         >
@@ -559,6 +567,7 @@ async function AddAccessForm({ orgId }: { orgId: string }) {
         <label className="mb-1 block text-xs text-neutral-500">Label</label>
         <input
           name="label"
+          defaultValue=""
           placeholder="e.g., HQ address"
           className="w-full rounded-xl border px-3 py-2"
           required
@@ -568,6 +577,7 @@ async function AddAccessForm({ orgId }: { orgId: string }) {
         <label className="mb-1 block text-xs text-neutral-500">Details</label>
         <input
           name="details"
+          defaultValue=""
           placeholder="e.g., 123 Queens Street…"
           className="w-full rounded-xl border px-3 py-2"
           required
