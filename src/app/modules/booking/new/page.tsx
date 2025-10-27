@@ -8,6 +8,11 @@
  * - Only non-hosts are sent as "guests" in the create payload.
  * - After create, we batch-add toggled hosts via /participants.
  * - Org context is threaded via query param + x-org-id header.
+ *
+ * v+Modes & Access (org-driven, no hard-coded enums)
+ * - Three controls (Mode → Label → Details) that mirror Settings → Access.
+ * - Toggle "Use access presets": off → free-text Label & Details.
+ * - Sends copied values in `accessConfig` on POST (portable vs future preset changes).
  */
 
 import * as React from "react";
@@ -124,6 +129,27 @@ type SelectedPerson = {
   dialInfo: string | null;
 };
 
+/* ---------- Modes & Access (org-driven) ---------- */
+type ModeDto = { slot: number; active: boolean; label?: string | null };
+type ModesApiResponse = {
+  modes: ModeDto[];
+  access: { key: string; label: string; presets?: string[] }[]; // not used here, but kept for parity
+};
+type AccessPresetRow = {
+  modeSlot: number;
+  modeLabel: string | null;
+  label: string; // e.g., Teams, Zoom, Street, Café
+  details: string; // e.g., a URL or address
+};
+type BookingAccessConfig =
+  | {
+      mode: { slot: number; label?: string | null };
+      label: string;
+      details: string;
+      source: "preset" | "custom";
+    }
+  | undefined;
+
 /* ===============================================================
    Unified People Picker (Org | Public | Both)
    ===============================================================*/
@@ -224,10 +250,6 @@ function PeoplePicker(props: {
       ? j.users
       : [];
 
-    // Align to the route’s shape: prefer an explicit boolean if present.
-    // 1) If any row has `bookable`, filter by it.
-    // 2) Else if any row has `inviteable`, filter by it.
-    // 3) Else show all (route did not provide a flag).
     const hasBookable = (arr as any[]).some((u) =>
       Object.prototype.hasOwnProperty.call(u ?? {}, "bookable")
     );
@@ -507,7 +529,152 @@ export default function NewBookingPage() {
   const guestsUnified = form.appearanceScope === "UNIFIED";
   const guestsSharedProvisioned = form.accessProvisioning === "SHARED";
 
-  // Form helpers
+  // --------- NEW: Modes & Access presets (no hard-coded enums) ---------
+  const [modes, setModes] = React.useState<ModeDto[]>([]);
+  const [selectedModeSlot, setSelectedModeSlot] = React.useState<number | null>(
+    null
+  );
+  const [selectedModeLabel, setSelectedModeLabel] = React.useState<
+    string | null
+  >(null);
+
+  const [usePresets, setUsePresets] = React.useState(true);
+  const [presets, setPresets] = React.useState<AccessPresetRow[]>([]);
+
+  // Dependent options
+  const [labelOptions, setLabelOptions] = React.useState<string[]>([]);
+  const [selectedLabel, setSelectedLabel] = React.useState<string>("");
+  const [detailsOptions, setDetailsOptions] = React.useState<string[]>([]);
+  const [selectedDetails, setSelectedDetails] = React.useState<string>("");
+
+  // Custom (free-text) inputs when presets are OFF
+  const [customLabel, setCustomLabel] = React.useState("");
+  const [customDetails, setCustomDetails] = React.useState("");
+
+  // Load org modes
+  React.useEffect(() => {
+    if (session.kind !== "ready") return;
+    const orgId = effectiveOrgId;
+    if (!orgId) return;
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/org/modes?orgId=${encodeURIComponent(orgId)}`,
+          {
+            cache: "no-store",
+            credentials: "include",
+            headers: { ...(orgId ? { "x-org-id": orgId } : {}) },
+          }
+        );
+        const j: ModesApiResponse = await res.json();
+        const active = (j?.modes ?? []).filter((m) => m.active);
+        setModes(active);
+        if (active.length === 1) {
+          setSelectedModeSlot(active[0].slot);
+          setSelectedModeLabel(active[0].label ?? null);
+        }
+      } catch {
+        // silent; page remains usable
+      }
+    })();
+  }, [session.kind, effectiveOrgId]);
+
+  // Load presets mirror
+  React.useEffect(() => {
+    if (session.kind !== "ready") return;
+    const orgId = effectiveOrgId;
+    if (!orgId) return;
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/org/modes/presets?orgId=${encodeURIComponent(orgId)}`,
+          {
+            cache: "no-store",
+            credentials: "include",
+            headers: { ...(orgId ? { "x-org-id": orgId } : {}) },
+          }
+        );
+        if (!res.ok) throw new Error("no presets");
+        const rows: AccessPresetRow[] = await res.json();
+        setPresets(Array.isArray(rows) ? rows : []);
+        // If we have no rows, default to custom
+        if (!rows?.length) setUsePresets(false);
+      } catch {
+        setUsePresets(false);
+      }
+    })();
+  }, [session.kind, effectiveOrgId]);
+
+  // When Mode changes → compute Label options and reset downstream
+  function handleModeChange(slotStr: string) {
+    const s = Number(slotStr);
+    if (Number.isNaN(s)) {
+      setSelectedModeSlot(null);
+      setSelectedModeLabel(null);
+      setLabelOptions([]);
+      setSelectedLabel("");
+      setDetailsOptions([]);
+      setSelectedDetails("");
+      return;
+    }
+    const m = modes.find((x) => x.slot === s) || null;
+    setSelectedModeSlot(s);
+    setSelectedModeLabel(m?.label ?? null);
+
+    const labels = Array.from(
+      new Set(
+        presets
+          .filter((r) => r.modeSlot === s)
+          .map((r) => r.label)
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+
+    setLabelOptions(labels);
+    // Auto-select if only one label exists
+    const autoLabel = labels.length === 1 ? labels[0] : "";
+    setSelectedLabel(autoLabel);
+
+    // Seed details for the auto label (if any)
+    const details = Array.from(
+      new Set(
+        presets
+          .filter(
+            (r) =>
+              r.modeSlot === s && (autoLabel ? r.label === autoLabel : true)
+          )
+          .map((r) => r.details)
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    setDetailsOptions(autoLabel ? details : []);
+    setSelectedDetails(details.length === 1 ? details[0] : "");
+  }
+
+  // When Label changes → compute Details options
+  function handleLabelChange(label: string) {
+    setSelectedLabel(label);
+    const s = selectedModeSlot;
+    if (s == null) {
+      setDetailsOptions([]);
+      setSelectedDetails("");
+      return;
+    }
+    const details = Array.from(
+      new Set(
+        presets
+          .filter((r) => r.modeSlot === s && r.label === label)
+          .map((r) => r.details)
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    setDetailsOptions(details);
+    setSelectedDetails(details.length === 1 ? details[0] : "");
+  }
+
+  // Selected participants (helpers)
   function addPersonFromDirectory(row: DirectoryItem) {
     setPeople((xs) => {
       if (xs.some((p) => p.userId === row.id)) return xs;
@@ -541,7 +708,6 @@ export default function NewBookingPage() {
           ? {
               ...p,
               isHost,
-              // Clear guest-only fields when toggled to Host
               ...(isHost
                 ? {
                     joinUrl: null,
@@ -627,7 +793,6 @@ export default function NewBookingPage() {
             return {
               userId: g.userId,
               name: g.name,
-              // if the backend uses "kind" it can ignore missing
               kind: g.kind ?? undefined,
               order: i, // order among guests only
               appearanceType: type,
@@ -669,6 +834,33 @@ export default function NewBookingPage() {
             };
           });
 
+    // Build accessConfig from presets or custom
+    let accessConfig: BookingAccessConfig = undefined;
+    if (selectedModeSlot != null) {
+      if (usePresets) {
+        if (selectedLabel && (selectedDetails || detailsOptions.length === 1)) {
+          const detailsFinal =
+            selectedDetails ||
+            (detailsOptions.length === 1 ? detailsOptions[0] : "");
+          accessConfig = {
+            mode: { slot: selectedModeSlot, label: selectedModeLabel ?? null },
+            label: selectedLabel,
+            details: detailsFinal,
+            source: "preset",
+          };
+        }
+      } else {
+        if (customLabel.trim() || customDetails.trim()) {
+          accessConfig = {
+            mode: { slot: selectedModeSlot, label: selectedModeLabel ?? null },
+            label: customLabel.trim(),
+            details: customDetails.trim(),
+            source: "custom",
+          };
+        }
+      }
+    }
+
     const payload: any = {
       subject: form.subject,
       newsroomName: form.newsroomName,
@@ -687,6 +879,7 @@ export default function NewBookingPage() {
       locationAddress: form.locationAddress || null,
       dialInfo: form.dialInfo || null,
 
+      ...(accessConfig ? { accessConfig } : {}),
       guests: guestsPayload,
     };
 
@@ -794,6 +987,137 @@ export default function NewBookingPage() {
               />
             </div>
           </div>
+        </section>
+
+        {/* Mode & Access (presets mirror) */}
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">Mode &amp; Access</h2>
+
+          {/* Toggle: Use presets */}
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={usePresets}
+              onChange={(e) => setUsePresets(e.target.checked)}
+              disabled={blocked || presets.length === 0}
+            />
+            Use access presets
+            {presets.length === 0 && (
+              <span className="text-xs text-gray-500">(no presets found)</span>
+            )}
+          </label>
+
+          {/* Mode */}
+          <div>
+            <label className="mb-1 block text-sm font-medium">Mode</label>
+            <select
+              value={selectedModeSlot ?? ""}
+              onChange={(e) => handleModeChange(e.target.value)}
+              className="w-full rounded-md border px-3 py-2"
+              disabled={blocked || modes.length === 0}
+            >
+              <option value="" disabled>
+                {modes.length ? "Select a mode…" : "No active modes configured"}
+              </option>
+              {modes.map((m) => (
+                <option key={m.slot} value={m.slot}>
+                  {m.label ?? `Mode ${m.slot}`}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Label + Details (preset or custom) */}
+          {usePresets ? (
+            <>
+              {/* Label (depends on mode) */}
+              <div>
+                <label className="mb-1 block text-sm font-medium">Label</label>
+                <select
+                  value={selectedLabel}
+                  onChange={(e) => handleLabelChange(e.target.value)}
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={
+                    blocked ||
+                    selectedModeSlot == null ||
+                    labelOptions.length === 0
+                  }
+                >
+                  <option value="" disabled>
+                    {selectedModeSlot == null
+                      ? "Select mode first"
+                      : labelOptions.length
+                      ? "Select a label…"
+                      : "No labels for this mode"}
+                  </option>
+                  {labelOptions.map((l) => (
+                    <option key={l} value={l}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Details (auto or selectable if multiple for same label) */}
+              <div>
+                <label className="mb-1 block text-sm font-medium">
+                  Details
+                </label>
+                {detailsOptions.length <= 1 ? (
+                  <input
+                    type="text"
+                    readOnly
+                    value={detailsOptions[0] ?? ""}
+                    className="w-full cursor-not-allowed rounded-md border bg-gray-50 px-3 py-2"
+                    placeholder={
+                      selectedLabel ? "Auto-filled from preset" : "Select label"
+                    }
+                  />
+                ) : (
+                  <select
+                    value={selectedDetails}
+                    onChange={(e) => setSelectedDetails(e.target.value)}
+                    className="w-full rounded-md border px-3 py-2"
+                    disabled={blocked}
+                  >
+                    <option value="" disabled>
+                      Select details…
+                    </option>
+                    {detailsOptions.map((d, i) => (
+                      <option key={`${d}-${i}`} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className="mb-1 block text-sm font-medium">Label</label>
+                <input
+                  value={customLabel}
+                  onChange={(e) => setCustomLabel(e.target.value)}
+                  className="w-full rounded-md border px-3 py-2"
+                  placeholder="e.g., Teams / HQ address"
+                  disabled={blocked}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium">
+                  Details
+                </label>
+                <input
+                  value={customDetails}
+                  onChange={(e) => setCustomDetails(e.target.value)}
+                  className="w-full rounded-md border px-3 py-2"
+                  placeholder="https://… or address / info"
+                  disabled={blocked}
+                />
+              </div>
+            </>
+          )}
         </section>
 
         {/* Participants (Guests + Hosts via toggle) */}
