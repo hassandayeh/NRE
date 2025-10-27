@@ -369,7 +369,7 @@ function PeoplePicker(props: {
           onClick={() => setOpen((v) => !v)}
           className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
         >
-          {open ? "Hide" : "Add"}&nbsp; person
+          {open ? "Hide" : "Find"}
         </button>
 
         <input
@@ -471,6 +471,86 @@ function PeoplePicker(props: {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------------------- Lightweight Rich Text ---------------------- */
+function RtButton({
+  onClick,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className="rounded px-2 py-1 text-xs hover:bg-gray-100 focus:outline-none focus:ring-1 focus:ring-black/10"
+      aria-label={title}
+    >
+      {children}
+    </button>
+  );
+}
+
+function RichTextEditor({
+  value = "",
+  disabled,
+  onChange,
+}: {
+  value?: string;
+  disabled?: boolean;
+  onChange?: (html: string) => void;
+}) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+
+  // Initialize once; do NOT control value on each render (keeps caret stable)
+  React.useEffect(() => {
+    if (ref.current) ref.current.innerHTML = value || "";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const exec = (cmd: string, val?: string) => {
+    if (disabled) return;
+    ref.current?.focus();
+    document.execCommand(cmd, false, val);
+    onChange?.(ref.current?.innerHTML ?? "");
+  };
+
+  return (
+    <div className="rounded-md border overflow-hidden">
+      <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border-b">
+        <RtButton onClick={() => exec("bold")} title="Bold">
+          <span className="font-semibold">B</span>
+        </RtButton>
+        <RtButton onClick={() => exec("italic")} title="Italic">
+          <span className="italic">I</span>
+        </RtButton>
+        <RtButton onClick={() => exec("underline")} title="Underline">
+          <span className="underline">U</span>
+        </RtButton>
+        <RtButton onClick={() => exec("removeFormat")} title="Clear formatting">
+          Clear format
+        </RtButton>
+      </div>
+
+      <div
+        ref={ref}
+        contentEditable={!disabled}
+        role="textbox"
+        aria-multiline="true"
+        onInput={() => onChange?.(ref.current?.innerHTML ?? "")}
+        className={clsx(
+          "h-40 min-h-[120px] w-full px-3 py-2 resize-y overflow-auto focus:outline-none focus:ring-0",
+          disabled ? "bg-gray-50 cursor-not-allowed" : "bg-white"
+        )}
+        suppressContentEditableWarning
+      />
     </div>
   );
 }
@@ -890,8 +970,6 @@ export default function NewBookingPage() {
   /* ---------------------------- Render ---------------------------- */
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-6">
-      <h1 className="text-2xl font-semibold">New booking</h1>
-
       {session.kind === "loading" ? (
         <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm">
           Checking your access…
@@ -910,33 +988,96 @@ export default function NewBookingPage() {
       )}
 
       <form onSubmit={onSubmit} className="space-y-6">
-        {/* What */}
-        <section className="space-y-2">
-          <h2 className="text-lg font-medium">What</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium">Subject</label>
-              <input
-                value={form.subject}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, subject: e.target.value }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-                disabled={blocked}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium">Newsroom name</label>
-              <input
-                value={form.newsroomName}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, newsroomName: e.target.value }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-                disabled={blocked}
-              />
+        {/* Basic Info */}
+        <section className="space-y-3">
+          <h2 className="text-lg font-medium">Basic Info</h2>
+          <div className="rounded-md border p-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Subject */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Subject
+                </label>
+                <input
+                  value={form.subject}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, subject: e.target.value }))
+                  }
+                  required
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={blocked}
+                />
+              </div>
+
+              {/* Newsroom name */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Newsroom name
+                </label>
+                <input
+                  value={form.newsroomName}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, newsroomName: e.target.value }))
+                  }
+                  required
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={blocked}
+                />
+              </div>
+
+              {/* Start at */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Start at
+                </label>
+                <input
+                  type="datetime-local"
+                  value={toDatetimeLocalValue(form.startAt)}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      startAt: new Date(e.target.value).toISOString(),
+                    }))
+                  }
+                  required
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={blocked}
+                />
+              </div>
+
+              {/* Duration (mins) */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Duration (mins)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={form.durationMins}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      durationMins: Number(e.target.value),
+                    }))
+                  }
+                  required
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={blocked}
+                />
+              </div>
+              {/* Talking points (rich text) */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-1">
+                  Talking points
+                </label>
+                <RichTextEditor
+                  value={form.talkingPoints}
+                  disabled={blocked}
+                  onChange={(html) =>
+                    setForm((f) => ({ ...f, talkingPoints: html }))
+                  }
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -944,178 +1085,179 @@ export default function NewBookingPage() {
         {/* Mode Level + Booking-level Mode & Access (if applicable) */}
         <section className="space-y-3">
           <h2 className="text-lg font-medium">Mode &amp; Access</h2>
-
-          {/* Mode Level (single driver) */}
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium">Mode Level</label>
-              <select
-                value={modeLevel}
-                onChange={(e) => setModeLevel(e.target.value as ModeLevel)}
-                className="w-full rounded-md border px-3 py-2"
-                disabled={blocked}
-              >
-                <option value="BOOKING">Booking</option>
-                <option value="PARTICIPANT">Participant</option>
-              </select>
+          <div className="rounded-md border p-4 space-y-3">
+            {/* Mode Level (single driver) */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium">Mode Level</label>
+                <select
+                  value={modeLevel}
+                  onChange={(e) => setModeLevel(e.target.value as ModeLevel)}
+                  className="w-full rounded-md border px-3 py-2"
+                  disabled={blocked}
+                >
+                  <option value="BOOKING">Booking</option>
+                  <option value="PARTICIPANT">Participant</option>
+                </select>
+              </div>
             </div>
-          </div>
 
-          {/* Booking-level block (hidden for PARTICIPANT) */}
-          {!bookingLevelHidden && (
-            <div className="rounded-md border p-3 space-y-3">
-              {/* Toggle: Use presets */}
-              <label className="inline-flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={usePresets}
-                  onChange={(e) => setUsePresets(e.target.checked)}
-                  disabled={blocked || presets.length === 0}
-                />
-                Use access presets
-                {presets.length === 0 && (
-                  <span className="text-xs text-gray-500">
-                    (no presets found)
-                  </span>
-                )}
-              </label>
+            {/* Booking-level block (hidden for PARTICIPANT) */}
+            {!bookingLevelHidden && (
+              <div className="p-3 space-y-3">
+                {/* Toggle: Use presets */}
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={usePresets}
+                    onChange={(e) => setUsePresets(e.target.checked)}
+                    disabled={blocked || presets.length === 0}
+                  />
+                  Use access presets
+                  {presets.length === 0 && (
+                    <span className="text-xs text-gray-500">
+                      (no presets found)
+                    </span>
+                  )}
+                </label>
 
-              {usePresets ? (
-                <>
-                  {/* Mode (dropdown) */}
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Mode
-                    </label>
-                    <select
-                      value={selectedModeSlot ?? ""}
-                      onChange={(e) => handleModeChange(e.target.value)}
-                      className="w-full rounded-md border px-3 py-2"
-                      disabled={blocked || modes.length === 0}
-                    >
-                      <option value="" disabled>
-                        {modes.length
-                          ? "Select a mode…"
-                          : "No active modes configured"}
-                      </option>
-                      {modes.map((m) => (
-                        <option key={m.slot} value={m.slot}>
-                          {m.label ?? `Mode ${m.slot}`}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Label */}
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Label
-                    </label>
-                    <select
-                      value={selectedLabel}
-                      onChange={(e) => handleLabelChange(e.target.value)}
-                      className="w-full rounded-md border px-3 py-2"
-                      disabled={
-                        blocked ||
-                        selectedModeSlot == null ||
-                        labelOptions.length === 0
-                      }
-                    >
-                      <option value="" disabled>
-                        {selectedModeSlot == null
-                          ? "Select mode first"
-                          : labelOptions.length
-                          ? "Select a label…"
-                          : "No labels for this mode"}
-                      </option>
-                      {labelOptions.map((l) => (
-                        <option key={l} value={l}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Details */}
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Details
-                    </label>
-                    {detailsOptions.length <= 1 ? (
-                      <input
-                        type="text"
-                        readOnly
-                        value={detailsOptions[0] ?? ""}
-                        className="w-full cursor-not-allowed rounded-md border bg-gray-50 px-3 py-2"
-                        placeholder={
-                          selectedLabel
-                            ? "Auto-filled from preset"
-                            : "Select label"
-                        }
-                      />
-                    ) : (
+                {usePresets ? (
+                  <>
+                    {/* Mode (dropdown) */}
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Mode
+                      </label>
                       <select
-                        value={selectedDetails}
-                        onChange={(e) => setSelectedDetails(e.target.value)}
+                        value={selectedModeSlot ?? ""}
+                        onChange={(e) => handleModeChange(e.target.value)}
                         className="w-full rounded-md border px-3 py-2"
-                        disabled={blocked}
+                        disabled={blocked || modes.length === 0}
                       >
                         <option value="" disabled>
-                          Select details…
+                          {modes.length
+                            ? "Select a mode…"
+                            : "No active modes configured"}
                         </option>
-                        {detailsOptions.map((d, i) => (
-                          <option key={`${d}-${i}`} value={d}>
-                            {d}
+                        {modes.map((m) => (
+                          <option key={m.slot} value={m.slot}>
+                            {m.label ?? `Mode ${m.slot}`}
                           </option>
                         ))}
                       </select>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {/* CUSTOM: Mode textbox */}
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Mode
-                    </label>
-                    <input
-                      value={customModeText}
-                      onChange={(e) => setCustomModeText(e.target.value)}
-                      className="w-full rounded-md border px-3 py-2"
-                      placeholder="e.g., Online / In-person / Phone"
-                      disabled={blocked}
-                    />
-                  </div>
-                  {/* CUSTOM: Label & Details */}
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Label
-                    </label>
-                    <input
-                      value={customLabel}
-                      onChange={(e) => setCustomLabel(e.target.value)}
-                      className="w-full rounded-md border px-3 py-2"
-                      placeholder="e.g., Teams / HQ address"
-                      disabled={blocked}
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">
-                      Details
-                    </label>
-                    <input
-                      value={customDetails}
-                      onChange={(e) => setCustomDetails(e.target.value)}
-                      className="w-full rounded-md border px-3 py-2"
-                      placeholder="https://… or address / info"
-                      disabled={blocked}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+                    </div>
+
+                    {/* Label */}
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Label
+                      </label>
+                      <select
+                        value={selectedLabel}
+                        onChange={(e) => handleLabelChange(e.target.value)}
+                        className="w-full rounded-md border px-3 py-2"
+                        disabled={
+                          blocked ||
+                          selectedModeSlot == null ||
+                          labelOptions.length === 0
+                        }
+                      >
+                        <option value="" disabled>
+                          {selectedModeSlot == null
+                            ? "Select mode first"
+                            : labelOptions.length
+                            ? "Select a label…"
+                            : "No labels for this mode"}
+                        </option>
+                        {labelOptions.map((l) => (
+                          <option key={l} value={l}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Details */}
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Details
+                      </label>
+                      {detailsOptions.length <= 1 ? (
+                        <input
+                          type="text"
+                          readOnly
+                          value={detailsOptions[0] ?? ""}
+                          className="w-full cursor-not-allowed rounded-md border bg-gray-50 px-3 py-2"
+                          placeholder={
+                            selectedLabel
+                              ? "Auto-filled from preset"
+                              : "Select label"
+                          }
+                        />
+                      ) : (
+                        <select
+                          value={selectedDetails}
+                          onChange={(e) => setSelectedDetails(e.target.value)}
+                          className="w-full rounded-md border px-3 py-2"
+                          disabled={blocked}
+                        >
+                          <option value="" disabled>
+                            Select details…
+                          </option>
+                          {detailsOptions.map((d, i) => (
+                            <option key={`${d}-${i}`} value={d}>
+                              {d}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* CUSTOM: Mode textbox */}
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Mode
+                      </label>
+                      <input
+                        value={customModeText}
+                        onChange={(e) => setCustomModeText(e.target.value)}
+                        className="w-full rounded-md border px-3 py-2"
+                        placeholder="e.g., Online / In-person / Phone"
+                        disabled={blocked}
+                      />
+                    </div>
+                    {/* CUSTOM: Label & Details */}
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Label
+                      </label>
+                      <input
+                        value={customLabel}
+                        onChange={(e) => setCustomLabel(e.target.value)}
+                        className="w-full rounded-md border px-3 py-2"
+                        placeholder="e.g., Teams / HQ address"
+                        disabled={blocked}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Details
+                      </label>
+                      <input
+                        value={customDetails}
+                        onChange={(e) => setCustomDetails(e.target.value)}
+                        className="w-full rounded-md border px-3 py-2"
+                        placeholder="https://… or address / info"
+                        disabled={blocked}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </section>
 
         {/* Participants */}
@@ -1124,10 +1266,6 @@ export default function NewBookingPage() {
 
           <div className="mt-1 rounded-md border p-3">
             <div className="mb-2 flex items-center justify-between">
-              <div className="text-sm font-medium">
-                People{" "}
-                <span className="opacity-60">({people.length} selected)</span>
-              </div>
               <PeoplePicker
                 startAtISO={form.startAt}
                 durationMins={form.durationMins}
@@ -1138,10 +1276,7 @@ export default function NewBookingPage() {
             </div>
 
             {people.length === 0 && (
-              <div className="text-sm opacity-70">
-                No participants yet. Use “Add person” to append internal staff
-                or public experts.
-              </div>
+              <div className="text-sm opacity-70">No participants yet.</div>
             )}
 
             <div className="space-y-3">
@@ -1442,50 +1577,6 @@ export default function NewBookingPage() {
                   </div>
                 );
               })}
-            </div>
-          </div>
-        </section>
-
-        {/* When */}
-        <section className="space-y-2">
-          <h2 className="text-lg font-medium">When</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium">Start at</label>
-              <input
-                type="datetime-local"
-                value={toDatetimeLocalValue(form.startAt)}
-                onChange={(e) =>
-                  setForm((f) => ({
-                    ...f,
-                    startAt: new Date(e.target.value).toISOString(),
-                  }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-                disabled={blocked}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium">
-                Duration (mins)
-              </label>
-              <input
-                type="number"
-                min={5}
-                max={600}
-                step={5}
-                value={form.durationMins}
-                onChange={(e) =>
-                  setForm((f) => ({
-                    ...f,
-                    durationMins: Number(e.target.value),
-                  }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-                disabled={blocked}
-              />
             </div>
           </div>
         </section>
