@@ -2,17 +2,24 @@
 "use client";
 
 /**
- * New Booking — Unified People Picker + Host toggle (slot-safe)
- * - One picker (Org | Public | Both). No label/role-name filtering.
- * - Add people once; mark any as Host via toggle (default: Guest).
- * - Only non-hosts are sent as "guests" in the create payload.
- * - After create, we batch-add toggled hosts via /participants.
- * - Org context is threaded via query param + x-org-id header.
+ * New Booking — People picker + Mode Level (Booking | Participant)
  *
- * v+Modes & Access (org-driven, no hard-coded enums)
- * - Three controls (Mode → Label → Details) that mirror Settings → Access.
- * - Toggle "Use access presets": off → free-text Label & Details.
- * - Sends copied values in `accessConfig` on POST (portable vs future preset changes).
+ * Modes & Access (org-driven presets):
+ * - Preset path: Mode (dropdown) → Label (dropdown) → Details (auto or dropdown)
+ * - Custom path: "Use access presets" OFF → Mode becomes TEXTBOX; Label & Details are TEXTBOXES
+ * - Sends copied values so bookings remain stable if org presets change later.
+ *
+ * Mode Level drives visibility:
+ * - BOOKING      → one booking-level block (no per-participant blocks)
+ * - PARTICIPANT  → per-participant blocks (hosts included); booking-level block hidden
+ *
+ * POST payload:
+ * - modeLevel: "BOOKING" | "PARTICIPANT"
+ * - If BOOKING: accessConfig: { mode:{slot,label?}, label, details, source }
+ * - If PARTICIPANT: participantsAccess: Array<{ userId, accessConfig }>
+ *
+ * Note on custom Mode text: we send slot:-1 and label:"<text>" (source:"custom")
+ * to keep API shape consistent without schema changes.
  */
 
 import * as React from "react";
@@ -26,12 +33,6 @@ const UIButton: React.ElementType =
 import * as AlertModule from "../../../../components/ui/Alert";
 const UIAlert: React.ElementType =
   (AlertModule as any).Alert ?? (AlertModule as any).default;
-
-/* ---------- Flags (env) ---------- */
-const PHONE_ENABLED =
-  (process.env.NEXT_PUBLIC_APPEARANCE_PHONE ?? "true") !== "false";
-const MULTI_PARTICIPANTS_ENABLED =
-  (process.env.NEXT_PUBLIC_MULTI_PARTICIPANTS_ENABLED ?? "true") !== "false";
 
 /* ---------- Utils ---------- */
 const clsx = (...xs: any[]) => xs.filter(Boolean).join(" ");
@@ -94,11 +95,7 @@ function useSessionIdentity() {
 }
 
 /* ---------- Types ---------- */
-type TAppearance = "ONLINE" | "IN_PERSON" | "PHONE";
-type TScope = "UNIFIED" | "PER_GUEST";
-type TProvisioning = "SHARED" | "PER_GUEST";
 type TKind = "EXPERT" | "REPORTER"; // optional hint if the API provides it
-
 type DirectoryItem = {
   id: string;
   name: string | null;
@@ -113,42 +110,52 @@ type DirectoryItem = {
 type SelectedPerson = {
   userId: string;
   name: string;
-  // presentation
   source: "org" | "public";
   kind?: TKind | null;
-
-  // host toggle
   isHost: boolean;
-
-  // guest-appearance fields (used only when !isHost)
   order: number;
-  appearanceType: TAppearance;
-  joinUrl: string | null;
-  venueName: string | null;
-  venueAddress: string | null;
-  dialInfo: string | null;
+
+  // Per-participant Mode & Access (only used when modeLevel === "PARTICIPANT")
+  modeAccess?: PersonModeAccessState;
 };
 
-/* ---------- Modes & Access (org-driven) ---------- */
 type ModeDto = { slot: number; active: boolean; label?: string | null };
 type ModesApiResponse = {
   modes: ModeDto[];
-  access: { key: string; label: string; presets?: string[] }[]; // not used here, but kept for parity
+  access: { key: string; label: string; presets?: string[] }[]; // parity only
 };
 type AccessPresetRow = {
   modeSlot: number;
   modeLabel: string | null;
   label: string; // e.g., Teams, Zoom, Street, Café
-  details: string; // e.g., a URL or address
+  details: string; // e.g., URL or address
 };
-type BookingAccessConfig =
-  | {
-      mode: { slot: number; label?: string | null };
-      label: string;
-      details: string;
-      source: "preset" | "custom";
-    }
-  | undefined;
+type BookingAccessConfig = {
+  mode: { slot: number; label?: string | null };
+  label: string;
+  details: string;
+  source: "preset" | "custom";
+};
+
+type ModeLevel = "BOOKING" | "PARTICIPANT";
+
+/* ---------- Per-participant Mode & Access state ---------- */
+type PersonModeAccessState = {
+  usePresets: boolean;
+
+  // PRESET path
+  selectedModeSlot: number | null;
+  selectedModeLabel: string | null;
+  labelOptions: string[];
+  selectedLabel: string;
+  detailsOptions: string[];
+  selectedDetails: string;
+
+  // CUSTOM path
+  modeText: string; // free-text Mode when presets OFF
+  customLabel: string;
+  customDetails: string;
+};
 
 /* ===============================================================
    Unified People Picker (Org | Public | Both)
@@ -486,7 +493,7 @@ export default function NewBookingPage() {
   const effectiveOrgId =
     session.kind === "ready" ? session.user?.orgId ?? null : null;
 
-  // Core booking fields (guests model retained; "guests" === non-host participants)
+  // Core booking fields
   const [form, setForm] = React.useState<{
     subject: string;
     newsroomName: string;
@@ -494,17 +501,6 @@ export default function NewBookingPage() {
     talkingPoints: string;
     startAt: string; // ISO
     durationMins: number;
-
-    // Guest appearance model (applies only to non-hosts)
-    appearanceScope: TScope;
-    accessProvisioning: TProvisioning;
-    appearanceType: TAppearance | null; // when UNIFIED
-
-    // UNIFIED defaults (non-hosts)
-    locationUrl: string;
-    locationName: string;
-    locationAddress: string;
-    dialInfo: string;
   }>({
     subject: "",
     newsroomName: "",
@@ -512,44 +508,39 @@ export default function NewBookingPage() {
     talkingPoints: "",
     startAt: nextFullHourLocalISO(),
     durationMins: 30,
-
-    appearanceScope: "UNIFIED",
-    accessProvisioning: "SHARED",
-    appearanceType: "ONLINE",
-    locationUrl: "",
-    locationName: "",
-    locationAddress: "",
-    dialInfo: "",
   });
 
-  // Selected participants (single list, each with Host toggle)
+  // Selected participants
   const [people, setPeople] = React.useState<SelectedPerson[]>([]);
+  const existingIds = people.map((p) => p.userId);
 
-  // Derived
-  const guestsUnified = form.appearanceScope === "UNIFIED";
-  const guestsSharedProvisioned = form.accessProvisioning === "SHARED";
+  // ---------- NEW: Mode Level ----------
+  const [modeLevel, setModeLevel] = React.useState<ModeLevel>("BOOKING");
+  const bookingLevelHidden = modeLevel !== "BOOKING";
 
-  // --------- NEW: Modes & Access presets (no hard-coded enums) ---------
+  // ---------- Org Modes + Presets (booking-level & for seeding per-person) ----------
   const [modes, setModes] = React.useState<ModeDto[]>([]);
+  const [presets, setPresets] = React.useState<AccessPresetRow[]>([]);
+
+  // Booking-level state
+  const [usePresets, setUsePresets] = React.useState(true);
+
+  // PRESET path (booking-level)
   const [selectedModeSlot, setSelectedModeSlot] = React.useState<number | null>(
     null
   );
   const [selectedModeLabel, setSelectedModeLabel] = React.useState<
     string | null
   >(null);
-
-  const [usePresets, setUsePresets] = React.useState(true);
-  const [presets, setPresets] = React.useState<AccessPresetRow[]>([]);
-
-  // Dependent options
   const [labelOptions, setLabelOptions] = React.useState<string[]>([]);
   const [selectedLabel, setSelectedLabel] = React.useState<string>("");
   const [detailsOptions, setDetailsOptions] = React.useState<string[]>([]);
   const [selectedDetails, setSelectedDetails] = React.useState<string>("");
 
-  // Custom (free-text) inputs when presets are OFF
-  const [customLabel, setCustomLabel] = React.useState("");
-  const [customDetails, setCustomDetails] = React.useState("");
+  // CUSTOM path (booking-level)
+  const [customModeText, setCustomModeText] = React.useState<string>("");
+  const [customLabel, setCustomLabel] = React.useState<string>("");
+  const [customDetails, setCustomDetails] = React.useState<string>("");
 
   // Load org modes
   React.useEffect(() => {
@@ -580,7 +571,7 @@ export default function NewBookingPage() {
     })();
   }, [session.kind, effectiveOrgId]);
 
-  // Load presets mirror
+  // Load presets
   React.useEffect(() => {
     if (session.kind !== "ready") return;
     const orgId = effectiveOrgId;
@@ -599,7 +590,6 @@ export default function NewBookingPage() {
         if (!res.ok) throw new Error("no presets");
         const rows: AccessPresetRow[] = await res.json();
         setPresets(Array.isArray(rows) ? rows : []);
-        // If we have no rows, default to custom
         if (!rows?.length) setUsePresets(false);
       } catch {
         setUsePresets(false);
@@ -607,7 +597,7 @@ export default function NewBookingPage() {
     })();
   }, [session.kind, effectiveOrgId]);
 
-  // When Mode changes → compute Label options and reset downstream
+  // Booking-level: when Mode (dropdown) changes → recompute Label/Details options
   function handleModeChange(slotStr: string) {
     const s = Number(slotStr);
     if (Number.isNaN(s)) {
@@ -633,11 +623,9 @@ export default function NewBookingPage() {
     ).sort((a, b) => a.localeCompare(b));
 
     setLabelOptions(labels);
-    // Auto-select if only one label exists
     const autoLabel = labels.length === 1 ? labels[0] : "";
     setSelectedLabel(autoLabel);
 
-    // Seed details for the auto label (if any)
     const details = Array.from(
       new Set(
         presets
@@ -653,7 +641,6 @@ export default function NewBookingPage() {
     setSelectedDetails(details.length === 1 ? details[0] : "");
   }
 
-  // When Label changes → compute Details options
   function handleLabelChange(label: string) {
     setSelectedLabel(label);
     const s = selectedModeSlot;
@@ -678,22 +665,19 @@ export default function NewBookingPage() {
   function addPersonFromDirectory(row: DirectoryItem) {
     setPeople((xs) => {
       if (xs.some((p) => p.userId === row.id)) return xs;
-      return [
-        ...xs,
-        {
-          userId: row.id,
-          name: row.name || (row.kind ? row.kind : "Person"),
-          source: row.source,
-          kind: row.kind ?? null,
-          isHost: false, // default to Guest
-          order: xs.length,
-          appearanceType: (form.appearanceType ?? "ONLINE") as TAppearance,
-          joinUrl: null,
-          venueName: null,
-          venueAddress: null,
-          dialInfo: null,
-        },
-      ];
+      const base: SelectedPerson = {
+        userId: row.id,
+        name: row.name || (row.kind ? row.kind : "Person"),
+        source: row.source,
+        kind: row.kind ?? null,
+        isHost: false, // default to Guest
+        order: xs.length,
+      };
+      // Seed per-participant modeAccess if we’re in PARTICIPANT mode
+      if (modeLevel === "PARTICIPANT") {
+        base.modeAccess = seedPersonModeAccess();
+      }
+      return [...xs, base];
     });
   }
   function removePerson(idx: number) {
@@ -708,14 +692,6 @@ export default function NewBookingPage() {
           ? {
               ...p,
               isHost,
-              ...(isHost
-                ? {
-                    joinUrl: null,
-                    venueName: null,
-                    venueAddress: null,
-                    dialInfo: null,
-                  }
-                : {}),
             }
           : p
       )
@@ -724,45 +700,134 @@ export default function NewBookingPage() {
   function patchPerson(idx: number, patch: Partial<SelectedPerson>) {
     setPeople((xs) => xs.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
   }
+  function patchPersonMA(idx: number, patch: Partial<PersonModeAccessState>) {
+    setPeople((xs) =>
+      xs.map((p, i) =>
+        i === idx
+          ? {
+              ...p,
+              modeAccess: {
+                ...(p.modeAccess ?? seedPersonModeAccess()),
+                ...patch,
+              },
+            }
+          : p
+      )
+    );
+  }
+  function seedPersonModeAccess(): PersonModeAccessState {
+    // If org has zero presets, default to custom path
+    const hasAnyPresets = (presets?.length ?? 0) > 0;
+    return {
+      usePresets: hasAnyPresets,
+      selectedModeSlot: modes.length === 1 ? modes[0].slot : null,
+      selectedModeLabel: modes.length === 1 ? modes[0].label ?? null : null,
+      labelOptions: [],
+      selectedLabel: "",
+      detailsOptions: [],
+      selectedDetails: "",
+      modeText: "",
+      customLabel: "",
+      customDetails: "",
+    };
+  }
 
-  const existingIds = people.map((p) => p.userId);
+  // For PARTICIPANT mode, keep person.modeAccess seeded
+  React.useEffect(() => {
+    if (modeLevel !== "PARTICIPANT") return;
+    setPeople((xs) =>
+      xs.map((p) =>
+        p.modeAccess ? p : { ...p, modeAccess: seedPersonModeAccess() }
+      )
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modeLevel, presets.length, modes.length]);
 
-  // Validations — apply ONLY to non-hosts (guests)
-  const guestErrors = React.useMemo(() => {
-    const guestOnly = people.filter((p) => !p.isHost);
-    const errs: Array<Partial<Record<keyof SelectedPerson, string>>> =
-      guestOnly.map(() => ({}));
+  // Build booking-level accessConfig (or undefined)
+  function buildBookingAccess(): BookingAccessConfig | undefined {
+    if (bookingLevelHidden) return undefined;
 
-    if (guestsUnified) {
-      if (!guestsSharedProvisioned) {
-        // UNIFIED + PER_GUEST → each guest provides access
-        guestOnly.forEach((g, idx) => {
-          const type = (form.appearanceType ?? "ONLINE") as TAppearance;
-          if (type === "ONLINE" && !g.joinUrl)
-            errs[idx].joinUrl = "Link required.";
-          if (type === "IN_PERSON") {
-            if (!g.venueName) errs[idx].venueName = "Venue name required.";
-            if (!g.venueAddress) errs[idx].venueAddress = "Address required.";
-          }
-          if (PHONE_ENABLED && type === "PHONE" && !g.dialInfo)
-            errs[idx].dialInfo = "Dial info required.";
+    if (usePresets) {
+      if (selectedModeSlot == null) return undefined;
+      if (!selectedLabel) return undefined;
+
+      const finalDetails =
+        selectedDetails ||
+        (detailsOptions.length === 1 ? detailsOptions[0] : "");
+      if (!finalDetails) return undefined;
+
+      return {
+        mode: { slot: selectedModeSlot, label: selectedModeLabel ?? null },
+        label: selectedLabel,
+        details: finalDetails,
+        source: "preset",
+      };
+    }
+
+    // custom path
+    const modeLabel = customModeText.trim();
+    const lbl = customLabel.trim();
+    const det = customDetails.trim();
+    if (!modeLabel && !lbl && !det) return undefined; // nothing filled
+
+    return {
+      mode: { slot: -1, label: modeLabel || null },
+      label: lbl,
+      details: det,
+      source: "custom",
+    };
+  }
+
+  // Build per-participant access for PARTICIPANT mode
+  function buildParticipantsAccess():
+    | Array<{ userId: string; accessConfig: BookingAccessConfig }>
+    | undefined {
+    if (modeLevel !== "PARTICIPANT") return undefined;
+
+    const out: Array<{ userId: string; accessConfig: BookingAccessConfig }> =
+      [];
+    for (const p of people) {
+      const ma = p.modeAccess ?? seedPersonModeAccess();
+
+      if (ma.usePresets) {
+        if (ma.selectedModeSlot == null) continue;
+        if (!ma.selectedLabel) continue;
+        const det =
+          ma.selectedDetails ||
+          (ma.detailsOptions.length === 1 ? ma.detailsOptions[0] : "");
+        if (!det) continue;
+
+        out.push({
+          userId: p.userId,
+          accessConfig: {
+            mode: {
+              slot: ma.selectedModeSlot,
+              label: ma.selectedModeLabel ?? null,
+            },
+            label: ma.selectedLabel,
+            details: det,
+            source: "preset",
+          },
+        });
+      } else {
+        const modeLbl = ma.modeText.trim();
+        const lbl = ma.customLabel.trim();
+        const det = ma.customDetails.trim();
+        if (!modeLbl && !lbl && !det) continue;
+
+        out.push({
+          userId: p.userId,
+          accessConfig: {
+            mode: { slot: -1, label: modeLbl || null },
+            label: lbl,
+            details: det,
+            source: "custom",
+          },
         });
       }
-    } else {
-      // PER_GUEST → each guest chooses type and access
-      guestOnly.forEach((g, idx) => {
-        if (g.appearanceType === "ONLINE" && !g.joinUrl)
-          errs[idx].joinUrl = "Link required.";
-        if (g.appearanceType === "IN_PERSON") {
-          if (!g.venueName) errs[idx].venueName = "Venue name required.";
-          if (!g.venueAddress) errs[idx].venueAddress = "Address required.";
-        }
-        if (PHONE_ENABLED && g.appearanceType === "PHONE" && !g.dialInfo)
-          errs[idx].dialInfo = "Dial info required.";
-      });
     }
-    return { guestOnly, errs };
-  }, [people, guestsUnified, guestsSharedProvisioned, form.appearanceType]);
+    return out;
+  }
 
   // Submit
   const [submitting, setSubmitting] = React.useState(false);
@@ -777,89 +842,8 @@ export default function NewBookingPage() {
       return;
     }
 
-    // Build guests[] payload from non-hosts (order preserved among non-hosts)
-    const nonHosts = people.filter((p) => !p.isHost);
-    const guestsPayload =
-      nonHosts.length === 0
-        ? []
-        : nonHosts.map((g, i) => {
-            const unifiedType = (form.appearanceType ??
-              "ONLINE") as TAppearance;
-            const type =
-              form.appearanceScope === "UNIFIED"
-                ? unifiedType
-                : g.appearanceType;
-
-            return {
-              userId: g.userId,
-              name: g.name,
-              kind: g.kind ?? undefined,
-              order: i, // order among guests only
-              appearanceType: type,
-              joinUrl:
-                form.appearanceScope === "UNIFIED"
-                  ? form.accessProvisioning === "PER_GUEST" && type === "ONLINE"
-                    ? g.joinUrl || null
-                    : null
-                  : type === "ONLINE"
-                  ? g.joinUrl || null
-                  : null,
-              venueName:
-                form.appearanceScope === "UNIFIED"
-                  ? form.accessProvisioning === "PER_GUEST" &&
-                    type === "IN_PERSON"
-                    ? g.venueName || null
-                    : null
-                  : type === "IN_PERSON"
-                  ? g.venueName || null
-                  : null,
-              venueAddress:
-                form.appearanceScope === "UNIFIED"
-                  ? form.accessProvisioning === "PER_GUEST" &&
-                    type === "IN_PERSON"
-                    ? g.venueAddress || null
-                    : null
-                  : type === "IN_PERSON"
-                  ? g.venueAddress || null
-                  : null,
-              dialInfo: PHONE_ENABLED
-                ? form.appearanceScope === "UNIFIED"
-                  ? form.accessProvisioning === "PER_GUEST" && type === "PHONE"
-                    ? g.dialInfo || null
-                    : null
-                  : type === "PHONE"
-                  ? g.dialInfo || null
-                  : null
-                : null,
-            };
-          });
-
-    // Build accessConfig from presets or custom
-    let accessConfig: BookingAccessConfig = undefined;
-    if (selectedModeSlot != null) {
-      if (usePresets) {
-        if (selectedLabel && (selectedDetails || detailsOptions.length === 1)) {
-          const detailsFinal =
-            selectedDetails ||
-            (detailsOptions.length === 1 ? detailsOptions[0] : "");
-          accessConfig = {
-            mode: { slot: selectedModeSlot, label: selectedModeLabel ?? null },
-            label: selectedLabel,
-            details: detailsFinal,
-            source: "preset",
-          };
-        }
-      } else {
-        if (customLabel.trim() || customDetails.trim()) {
-          accessConfig = {
-            mode: { slot: selectedModeSlot, label: selectedModeLabel ?? null },
-            label: customLabel.trim(),
-            details: customDetails.trim(),
-            source: "custom",
-          };
-        }
-      }
-    }
+    const accessConfig = buildBookingAccess();
+    const participantsAccess = buildParticipantsAccess();
 
     const payload: any = {
       subject: form.subject,
@@ -869,18 +853,11 @@ export default function NewBookingPage() {
       startAt: new Date(form.startAt).toISOString(),
       durationMins: Number(form.durationMins),
 
-      // guest appearance model (non-hosts)
-      appearanceScope: form.appearanceScope,
-      accessProvisioning: form.accessProvisioning,
-      appearanceType:
-        form.appearanceScope === "UNIFIED" ? form.appearanceType : null,
-      locationUrl: form.locationUrl || null,
-      locationName: form.locationName || null,
-      locationAddress: form.locationAddress || null,
-      dialInfo: form.dialInfo || null,
-
-      ...(accessConfig ? { accessConfig } : {}),
-      guests: guestsPayload,
+      modeLevel,
+      ...(modeLevel === "BOOKING" && accessConfig ? { accessConfig } : {}),
+      ...(modeLevel === "PARTICIPANT" && participantsAccess
+        ? { participantsAccess }
+        : {}),
     };
 
     try {
@@ -898,31 +875,6 @@ export default function NewBookingPage() {
       if (!res.ok) throw new Error(j?.error || "Failed to create booking");
 
       const bookingId: string = j.booking?.id ?? j?.id;
-
-      // Batch-add hosts as participants (role=HOST)
-      const hostAdds = people
-        .filter((p) => p.isHost)
-        .map((p) => p.userId)
-        .filter(Boolean)
-        .map((userId) => ({ userId, roleInBooking: "HOST" as const }));
-
-      if (bookingId && MULTI_PARTICIPANTS_ENABLED && hostAdds.length) {
-        try {
-          await fetch(`/api/bookings/${bookingId}/participants`, {
-            method: "POST",
-            credentials: "include",
-            headers: {
-              "Content-Type": "application/json",
-              ...(effectiveOrgId ? { "x-org-id": effectiveOrgId } : {}),
-            },
-            body: JSON.stringify({ participants: hostAdds }),
-          });
-        } catch {
-          // ignore; creation succeeded
-        }
-      }
-
-      // Navigate to View page
       if (bookingId) {
         router.push(`/modules/booking/${bookingId}`);
       } else {
@@ -989,300 +941,188 @@ export default function NewBookingPage() {
           </div>
         </section>
 
-        {/* Mode & Access (presets mirror) */}
-        <section className="space-y-2">
+        {/* Mode Level + Booking-level Mode & Access (if applicable) */}
+        <section className="space-y-3">
           <h2 className="text-lg font-medium">Mode &amp; Access</h2>
 
-          {/* Toggle: Use presets */}
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={usePresets}
-              onChange={(e) => setUsePresets(e.target.checked)}
-              disabled={blocked || presets.length === 0}
-            />
-            Use access presets
-            {presets.length === 0 && (
-              <span className="text-xs text-gray-500">(no presets found)</span>
-            )}
-          </label>
-
-          {/* Mode */}
-          <div>
-            <label className="mb-1 block text-sm font-medium">Mode</label>
-            <select
-              value={selectedModeSlot ?? ""}
-              onChange={(e) => handleModeChange(e.target.value)}
-              className="w-full rounded-md border px-3 py-2"
-              disabled={blocked || modes.length === 0}
-            >
-              <option value="" disabled>
-                {modes.length ? "Select a mode…" : "No active modes configured"}
-              </option>
-              {modes.map((m) => (
-                <option key={m.slot} value={m.slot}>
-                  {m.label ?? `Mode ${m.slot}`}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Label + Details (preset or custom) */}
-          {usePresets ? (
-            <>
-              {/* Label (depends on mode) */}
-              <div>
-                <label className="mb-1 block text-sm font-medium">Label</label>
-                <select
-                  value={selectedLabel}
-                  onChange={(e) => handleLabelChange(e.target.value)}
-                  className="w-full rounded-md border px-3 py-2"
-                  disabled={
-                    blocked ||
-                    selectedModeSlot == null ||
-                    labelOptions.length === 0
-                  }
-                >
-                  <option value="" disabled>
-                    {selectedModeSlot == null
-                      ? "Select mode first"
-                      : labelOptions.length
-                      ? "Select a label…"
-                      : "No labels for this mode"}
-                  </option>
-                  {labelOptions.map((l) => (
-                    <option key={l} value={l}>
-                      {l}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Details (auto or selectable if multiple for same label) */}
-              <div>
-                <label className="mb-1 block text-sm font-medium">
-                  Details
-                </label>
-                {detailsOptions.length <= 1 ? (
-                  <input
-                    type="text"
-                    readOnly
-                    value={detailsOptions[0] ?? ""}
-                    className="w-full cursor-not-allowed rounded-md border bg-gray-50 px-3 py-2"
-                    placeholder={
-                      selectedLabel ? "Auto-filled from preset" : "Select label"
-                    }
-                  />
-                ) : (
-                  <select
-                    value={selectedDetails}
-                    onChange={(e) => setSelectedDetails(e.target.value)}
-                    className="w-full rounded-md border px-3 py-2"
-                    disabled={blocked}
-                  >
-                    <option value="" disabled>
-                      Select details…
-                    </option>
-                    {detailsOptions.map((d, i) => (
-                      <option key={`${d}-${i}`} value={d}>
-                        {d}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </>
-          ) : (
-            <>
-              <div>
-                <label className="mb-1 block text-sm font-medium">Label</label>
-                <input
-                  value={customLabel}
-                  onChange={(e) => setCustomLabel(e.target.value)}
-                  className="w-full rounded-md border px-3 py-2"
-                  placeholder="e.g., Teams / HQ address"
-                  disabled={blocked}
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium">
-                  Details
-                </label>
-                <input
-                  value={customDetails}
-                  onChange={(e) => setCustomDetails(e.target.value)}
-                  className="w-full rounded-md border px-3 py-2"
-                  placeholder="https://… or address / info"
-                  disabled={blocked}
-                />
-              </div>
-            </>
-          )}
-        </section>
-
-        {/* Participants (Guests + Hosts via toggle) */}
-        <section className="space-y-2">
-          <h2 className="text-lg font-medium">Participants</h2>
-
-          <div className="grid gap-3 sm:grid-cols-3">
+          {/* Mode Level (single driver) */}
+          <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <label className="block text-sm font-medium">
-                Appearance scope (non-hosts)
-              </label>
+              <label className="block text-sm font-medium">Mode Level</label>
               <select
-                value={form.appearanceScope}
-                onChange={(e) => {
-                  const next = e.target.value as TScope;
-                  if (next === "PER_GUEST") {
-                    setForm((f) => ({
-                      ...f,
-                      appearanceScope: next,
-                      accessProvisioning: "PER_GUEST",
-                    }));
-                  } else {
-                    setForm((f) => ({ ...f, appearanceScope: next }));
-                  }
-                }}
+                value={modeLevel}
+                onChange={(e) => setModeLevel(e.target.value as ModeLevel)}
                 className="w-full rounded-md border px-3 py-2"
                 disabled={blocked}
               >
-                <option value="UNIFIED">UNIFIED (single)</option>
-                <option value="PER_GUEST">PER_GUEST</option>
+                <option value="BOOKING">Booking</option>
+                <option value="PARTICIPANT">Participant</option>
               </select>
             </div>
-
-            {form.appearanceScope === "UNIFIED" ? (
-              <>
-                <div>
-                  <label className="block text-sm font-medium">
-                    Access provisioning (non-hosts)
-                  </label>
-                  <select
-                    value={form.accessProvisioning}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        accessProvisioning: e.target.value as TProvisioning,
-                      }))
-                    }
-                    className="w-full rounded-md border px-3 py-2"
-                    disabled={blocked}
-                  >
-                    <option value="SHARED">SHARED</option>
-                    <option value="PER_GUEST">PER_GUEST</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text sm font-medium">
-                    Unified type (non-hosts)
-                  </label>
-                  <select
-                    value={form.appearanceType ?? "ONLINE"}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        appearanceType: e.target.value as TAppearance,
-                      }))
-                    }
-                    className="w-full rounded-md border px-3 py-2"
-                    disabled={blocked}
-                  >
-                    <option value="ONLINE">ONLINE</option>
-                    <option value="IN_PERSON">IN_PERSON</option>
-                    {PHONE_ENABLED && <option value="PHONE">PHONE</option>}
-                  </select>
-                </div>
-              </>
-            ) : (
-              <div className="sm:col-span-2 text-sm opacity-70">
-                Each non-host selects their own appearance and access.
-              </div>
-            )}
           </div>
 
-          {/* Defaults for non-hosts when UNIFIED + SHARED */}
-          {form.appearanceScope === "UNIFIED" &&
-            form.accessProvisioning === "SHARED" && (
-              <>
-                {(form.appearanceType ?? "ONLINE") === "ONLINE" && (
+          {/* Booking-level block (hidden for PARTICIPANT) */}
+          {!bookingLevelHidden && (
+            <div className="rounded-md border p-3 space-y-3">
+              {/* Toggle: Use presets */}
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={usePresets}
+                  onChange={(e) => setUsePresets(e.target.checked)}
+                  disabled={blocked || presets.length === 0}
+                />
+                Use access presets
+                {presets.length === 0 && (
+                  <span className="text-xs text-gray-500">
+                    (no presets found)
+                  </span>
+                )}
+              </label>
+
+              {usePresets ? (
+                <>
+                  {/* Mode (dropdown) */}
                   <div>
-                    <label className="block text-sm font-medium">
-                      Default meeting link (non-hosts)
+                    <label className="mb-1 block text-sm font-medium">
+                      Mode
+                    </label>
+                    <select
+                      value={selectedModeSlot ?? ""}
+                      onChange={(e) => handleModeChange(e.target.value)}
+                      className="w-full rounded-md border px-3 py-2"
+                      disabled={blocked || modes.length === 0}
+                    >
+                      <option value="" disabled>
+                        {modes.length
+                          ? "Select a mode…"
+                          : "No active modes configured"}
+                      </option>
+                      {modes.map((m) => (
+                        <option key={m.slot} value={m.slot}>
+                          {m.label ?? `Mode ${m.slot}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Label */}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Label
+                    </label>
+                    <select
+                      value={selectedLabel}
+                      onChange={(e) => handleLabelChange(e.target.value)}
+                      className="w-full rounded-md border px-3 py-2"
+                      disabled={
+                        blocked ||
+                        selectedModeSlot == null ||
+                        labelOptions.length === 0
+                      }
+                    >
+                      <option value="" disabled>
+                        {selectedModeSlot == null
+                          ? "Select mode first"
+                          : labelOptions.length
+                          ? "Select a label…"
+                          : "No labels for this mode"}
+                      </option>
+                      {labelOptions.map((l) => (
+                        <option key={l} value={l}>
+                          {l}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Details */}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Details
+                    </label>
+                    {detailsOptions.length <= 1 ? (
+                      <input
+                        type="text"
+                        readOnly
+                        value={detailsOptions[0] ?? ""}
+                        className="w-full cursor-not-allowed rounded-md border bg-gray-50 px-3 py-2"
+                        placeholder={
+                          selectedLabel
+                            ? "Auto-filled from preset"
+                            : "Select label"
+                        }
+                      />
+                    ) : (
+                      <select
+                        value={selectedDetails}
+                        onChange={(e) => setSelectedDetails(e.target.value)}
+                        className="w-full rounded-md border px-3 py-2"
+                        disabled={blocked}
+                      >
+                        <option value="" disabled>
+                          Select details…
+                        </option>
+                        {detailsOptions.map((d, i) => (
+                          <option key={`${d}-${i}`} value={d}>
+                            {d}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* CUSTOM: Mode textbox */}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Mode
                     </label>
                     <input
-                      value={form.locationUrl}
-                      onChange={(e) =>
-                        setForm((f) => ({ ...f, locationUrl: e.target.value }))
-                      }
-                      placeholder="https://…"
+                      value={customModeText}
+                      onChange={(e) => setCustomModeText(e.target.value)}
                       className="w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Online / In-person / Phone"
                       disabled={blocked}
                     />
                   </div>
-                )}
-
-                {(form.appearanceType ?? "ONLINE") === "IN_PERSON" && (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <label className="block text-sm font-medium">
-                        Default venue name (non-hosts)
-                      </label>
-                      <input
-                        value={form.locationName}
-                        onChange={(e) =>
-                          setForm((f) => ({
-                            ...f,
-                            locationName: e.target.value,
-                          }))
-                        }
-                        placeholder="Studio A"
-                        className="w-full rounded-md border px-3 py-2"
-                        disabled={blocked}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium">
-                        Default address (non-hosts)
-                      </label>
-                      <input
-                        value={form.locationAddress}
-                        onChange={(e) =>
-                          setForm((f) => ({
-                            ...f,
-                            locationAddress: e.target.value,
-                          }))
-                        }
-                        placeholder="123 Example St…"
-                        className="w-full rounded-md border px-3 py-2"
-                        disabled={blocked}
-                      />
-                    </div>
+                  {/* CUSTOM: Label & Details */}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Label
+                    </label>
+                    <input
+                      value={customLabel}
+                      onChange={(e) => setCustomLabel(e.target.value)}
+                      className="w-full rounded-md border px-3 py-2"
+                      placeholder="e.g., Teams / HQ address"
+                      disabled={blocked}
+                    />
                   </div>
-                )}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Details
+                    </label>
+                    <input
+                      value={customDetails}
+                      onChange={(e) => setCustomDetails(e.target.value)}
+                      className="w-full rounded-md border px-3 py-2"
+                      placeholder="https://… or address / info"
+                      disabled={blocked}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </section>
 
-                {PHONE_ENABLED &&
-                  (form.appearanceType ?? "ONLINE") === "PHONE" && (
-                    <div>
-                      <label className="block text-sm font-medium">
-                        Default dial info (non-hosts)
-                      </label>
-                      <input
-                        value={form.dialInfo}
-                        onChange={(e) =>
-                          setForm((f) => ({ ...f, dialInfo: e.target.value }))
-                        }
-                        placeholder="e.g., +1 555 123 4567 PIN 0000"
-                        className="w-full rounded-md border px-3 py-2"
-                        disabled={blocked}
-                      />
-                    </div>
-                  )}
-              </>
-            )}
+        {/* Participants */}
+        <section className="space-y-2">
+          <h2 className="text-lg font-medium">Participants</h2>
 
-          {/* People list */}
-          <div className="mt-3 rounded-md border p-3">
+          <div className="mt-1 rounded-md border p-3">
             <div className="mb-2 flex items-center justify-between">
               <div className="text-sm font-medium">
                 People{" "}
@@ -1306,18 +1146,6 @@ export default function NewBookingPage() {
 
             <div className="space-y-3">
               {people.map((p, idx) => {
-                // errors array lines up with non-hosts only
-                const guestIndex = people
-                  .filter((x) => !x.isHost)
-                  .findIndex((x, i) => i === idx && !p.isHost);
-                const ge =
-                  !p.isHost && guestIndex >= 0
-                    ? guestErrors.errs[guestIndex] || {}
-                    : {};
-
-                const unifiedType = (form.appearanceType ??
-                  "ONLINE") as TAppearance;
-
                 return (
                   <div
                     key={`${p.userId}-${idx}`}
@@ -1355,214 +1183,261 @@ export default function NewBookingPage() {
                       </button>
                     </div>
 
-                    {/* Guest-only fields (hidden/disabled when Host) */}
-                    {p.isHost ? (
-                      <div className="text-sm opacity-70">
-                        Marked as <strong>Host</strong>. No guest access fields
-                        required.
-                      </div>
-                    ) : form.appearanceScope === "UNIFIED" ? (
-                      <>
-                        {form.accessProvisioning === "SHARED" ? (
-                          <div className="text-sm opacity-70">
-                            Using unified settings (
-                            {form.appearanceType ?? "ONLINE"}). No per-guest
-                            access fields.
-                          </div>
-                        ) : (
-                          <>
-                            {unifiedType === "ONLINE" && (
-                              <div>
-                                <label className="block text-sm font-medium">
-                                  Join URL
-                                </label>
-                                <input
-                                  value={p.joinUrl ?? ""}
-                                  onChange={(ev) =>
-                                    patchPerson(idx, {
-                                      joinUrl: ev.target.value,
-                                    })
-                                  }
-                                  className={clsx(
-                                    "w-full rounded-md border px-3 py-2",
-                                    (ge as any).joinUrl && "border-red-500"
-                                  )}
-                                  placeholder="https://…"
-                                />
-                              </div>
-                            )}
-
-                            {unifiedType === "IN_PERSON" && (
-                              <div className="grid gap-3 sm:grid-cols-2">
-                                <div>
-                                  <label className="block text-sm font-medium">
-                                    Venue name
-                                  </label>
-                                  <input
-                                    value={p.venueName ?? ""}
-                                    onChange={(ev) =>
-                                      patchPerson(idx, {
-                                        venueName: ev.target.value,
-                                      })
-                                    }
-                                    className={clsx(
-                                      "w-full rounded-md border px-3 py-2",
-                                      (ge as any).venueName && "border-red-500"
-                                    )}
-                                    placeholder="Studio A"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-sm font-medium">
-                                    Venue address
-                                  </label>
-                                  <input
-                                    value={p.venueAddress ?? ""}
-                                    onChange={(ev) =>
-                                      patchPerson(idx, {
-                                        venueAddress: ev.target.value,
-                                      })
-                                    }
-                                    className={clsx(
-                                      "w-full rounded-md border px-3 py-2",
-                                      (ge as any).venueAddress &&
-                                        "border-red-500"
-                                    )}
-                                    placeholder="123 Example St…"
-                                  />
-                                </div>
-                              </div>
-                            )}
-
-                            {PHONE_ENABLED && unifiedType === "PHONE" && (
-                              <div>
-                                <label className="block text-sm font-medium">
-                                  Dial info
-                                </label>
-                                <input
-                                  value={p.dialInfo ?? ""}
-                                  onChange={(ev) =>
-                                    patchPerson(idx, {
-                                      dialInfo: ev.target.value,
-                                    })
-                                  }
-                                  className={clsx(
-                                    "w-full rounded-md border px-3 py-2",
-                                    (ge as any).dialInfo && "border-red-500"
-                                  )}
-                                  placeholder="e.g., +1 555 123 4567 PIN 0000"
-                                />
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <div>
-                          <label className="block text-sm font-medium">
-                            Appearance
-                          </label>
-                          <select
-                            value={p.appearanceType}
-                            onChange={(ev) =>
-                              patchPerson(idx, {
-                                appearanceType: ev.target.value as TAppearance,
-                                joinUrl: null,
-                                venueName: null,
-                                venueAddress: null,
-                                dialInfo: null,
+                    {/* Per-participant Mode & Access (only when modeLevel=PARTICIPANT) */}
+                    {modeLevel === "PARTICIPANT" && (
+                      <div className="rounded-md border p-3 space-y-3 bg-gray-50">
+                        {/* state pre-seeded via useEffect */}
+                        <label className="inline-flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={p.modeAccess?.usePresets ?? false}
+                            onChange={(e) =>
+                              patchPersonMA(idx, {
+                                usePresets: e.target.checked,
                               })
                             }
-                            className="w-full rounded-md border px-3 py-2"
-                          >
-                            <option value="ONLINE">ONLINE</option>
-                            <option value="IN_PERSON">IN_PERSON</option>
-                            {PHONE_ENABLED && (
-                              <option value="PHONE">PHONE</option>
-                            )}
-                          </select>
-                        </div>
+                            disabled={blocked || presets.length === 0}
+                          />
+                          Use access presets
+                          {presets.length === 0 && (
+                            <span className="text-xs text-gray-500">
+                              (no presets found)
+                            </span>
+                          )}
+                        </label>
 
-                        {p.appearanceType === "ONLINE" && (
-                          <div>
-                            <label className="block text-sm font-medium">
-                              Join URL
-                            </label>
-                            <input
-                              value={p.joinUrl ?? ""}
-                              onChange={(ev) =>
-                                patchPerson(idx, { joinUrl: ev.target.value })
-                              }
-                              className={clsx(
-                                "w/full rounded-md border px-3 py-2",
-                                (ge as any).joinUrl && "border-red-500"
-                              )}
-                              placeholder="https://…"
-                            />
-                          </div>
-                        )}
-
-                        {p.appearanceType === "IN_PERSON" && (
-                          <div className="grid gap-3 sm:grid-cols-2">
+                        {p.modeAccess?.usePresets ?? false ? (
+                          <>
+                            {/* Mode (dropdown) */}
                             <div>
-                              <label className="block text-sm font-medium">
-                                Venue name
+                              <label className="mb-1 block text-sm font-medium">
+                                Mode
+                              </label>
+                              <select
+                                value={p.modeAccess?.selectedModeSlot ?? ""}
+                                onChange={(e) => {
+                                  const s = Number(e.target.value);
+                                  if (Number.isNaN(s)) {
+                                    patchPersonMA(idx, {
+                                      selectedModeSlot: null,
+                                      selectedModeLabel: null,
+                                      labelOptions: [],
+                                      selectedLabel: "",
+                                      detailsOptions: [],
+                                      selectedDetails: "",
+                                    });
+                                    return;
+                                  }
+                                  const m =
+                                    modes.find((x) => x.slot === s) || null;
+                                  const labels = Array.from(
+                                    new Set(
+                                      presets
+                                        .filter((r) => r.modeSlot === s)
+                                        .map((r) => r.label)
+                                        .filter(Boolean)
+                                    )
+                                  ).sort((a, b) => a.localeCompare(b));
+                                  const autoLabel =
+                                    labels.length === 1 ? labels[0] : "";
+                                  const details = Array.from(
+                                    new Set(
+                                      presets
+                                        .filter(
+                                          (r) =>
+                                            r.modeSlot === s &&
+                                            (autoLabel
+                                              ? r.label === autoLabel
+                                              : true)
+                                        )
+                                        .map((r) => r.details)
+                                        .filter(Boolean)
+                                    )
+                                  ).sort((a, b) => a.localeCompare(b));
+                                  patchPersonMA(idx, {
+                                    selectedModeSlot: s,
+                                    selectedModeLabel: m?.label ?? null,
+                                    labelOptions: labels,
+                                    selectedLabel: autoLabel,
+                                    detailsOptions: autoLabel ? details : [],
+                                    selectedDetails:
+                                      details.length === 1 ? details[0] : "",
+                                  });
+                                }}
+                                className="w-full rounded-md border px-3 py-2"
+                                disabled={blocked || modes.length === 0}
+                              >
+                                <option value="" disabled>
+                                  {modes.length
+                                    ? "Select a mode…"
+                                    : "No active modes configured"}
+                                </option>
+                                {modes.map((m) => (
+                                  <option key={m.slot} value={m.slot}>
+                                    {m.label ?? `Mode ${m.slot}`}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {/* Label */}
+                            <div>
+                              <label className="mb-1 block text-sm font-medium">
+                                Label
+                              </label>
+                              <select
+                                value={p.modeAccess?.selectedLabel ?? ""}
+                                onChange={(e) => {
+                                  const label = e.target.value;
+                                  const s =
+                                    p.modeAccess?.selectedModeSlot ?? null;
+                                  if (s == null) {
+                                    patchPersonMA(idx, {
+                                      detailsOptions: [],
+                                      selectedDetails: "",
+                                      selectedLabel: "",
+                                    });
+                                    return;
+                                  }
+                                  const details = Array.from(
+                                    new Set(
+                                      presets
+                                        .filter(
+                                          (r) =>
+                                            r.modeSlot === s &&
+                                            r.label === label
+                                        )
+                                        .map((r) => r.details)
+                                        .filter(Boolean)
+                                    )
+                                  ).sort((a, b) => a.localeCompare(b));
+                                  patchPersonMA(idx, {
+                                    selectedLabel: label,
+                                    detailsOptions: details,
+                                    selectedDetails:
+                                      details.length === 1 ? details[0] : "",
+                                  });
+                                }}
+                                className="w-full rounded-md border px-3 py-2"
+                                disabled={
+                                  blocked ||
+                                  p.modeAccess?.selectedModeSlot == null ||
+                                  (p.modeAccess?.labelOptions.length ?? 0) === 0
+                                }
+                              >
+                                <option value="" disabled>
+                                  {p.modeAccess?.selectedModeSlot == null
+                                    ? "Select mode first"
+                                    : p.modeAccess?.labelOptions.length ?? 0
+                                    ? "Select a label…"
+                                    : "No labels for this mode"}
+                                </option>
+                                {(p.modeAccess?.labelOptions ?? []).map((l) => (
+                                  <option key={l} value={l}>
+                                    {l}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {/* Details */}
+                            <div>
+                              <label className="mb-1 block text-sm font-medium">
+                                Details
+                              </label>
+                              {(p.modeAccess?.detailsOptions.length ?? 0) <=
+                              1 ? (
+                                <input
+                                  type="text"
+                                  readOnly
+                                  value={p.modeAccess?.detailsOptions[0] ?? ""}
+                                  className="w-full cursor-not-allowed rounded-md border bg-gray-100 px-3 py-2"
+                                  placeholder={
+                                    p.modeAccess?.selectedLabel ?? ""
+                                      ? "Auto-filled from preset"
+                                      : "Select label"
+                                  }
+                                />
+                              ) : (
+                                <select
+                                  value={p.modeAccess?.selectedDetails ?? ""}
+                                  onChange={(e) =>
+                                    patchPersonMA(idx, {
+                                      selectedDetails: e.target.value,
+                                    })
+                                  }
+                                  className="w-full rounded-md border px-3 py-2"
+                                  disabled={blocked}
+                                >
+                                  <option value="" disabled>
+                                    Select details…
+                                  </option>
+                                  {(p.modeAccess?.detailsOptions ?? []).map(
+                                    (d, i) => (
+                                      <option key={`${d}-${i}`} value={d}>
+                                        {d}
+                                      </option>
+                                    )
+                                  )}
+                                </select>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {/* CUSTOM: Mode textbox */}
+                            <div>
+                              <label className="mb-1 block text-sm font-medium">
+                                Mode
                               </label>
                               <input
-                                value={p.venueName ?? ""}
-                                onChange={(ev) =>
-                                  patchPerson(idx, {
-                                    venueName: ev.target.value,
+                                value={p.modeAccess?.modeText ?? ""}
+                                onChange={(e) =>
+                                  patchPersonMA(idx, {
+                                    modeText: e.target.value,
                                   })
                                 }
-                                className={clsx(
-                                  "w-full rounded-md border px-3 py-2",
-                                  (ge as any).venueName && "border-red-500"
-                                )}
-                                placeholder="Studio A"
+                                className="w-full rounded-md border px-3 py-2"
+                                placeholder="e.g., Online / In-person / Phone"
+                                disabled={blocked}
+                              />
+                            </div>
+                            {/* CUSTOM: Label & Details */}
+                            <div>
+                              <label className="mb-1 block text-sm font-medium">
+                                Label
+                              </label>
+                              <input
+                                value={p.modeAccess?.customLabel ?? ""}
+                                onChange={(e) =>
+                                  patchPersonMA(idx, {
+                                    customLabel: e.target.value,
+                                  })
+                                }
+                                className="w-full rounded-md border px-3 py-2"
+                                placeholder="e.g., Teams / HQ address"
+                                disabled={blocked}
                               />
                             </div>
                             <div>
-                              <label className="block text-sm font-medium">
-                                Venue address
+                              <label className="mb-1 block text-sm font-medium">
+                                Details
                               </label>
                               <input
-                                value={p.venueAddress ?? ""}
-                                onChange={(ev) =>
-                                  patchPerson(idx, {
-                                    venueAddress: ev.target.value,
+                                value={p.modeAccess?.customDetails ?? ""}
+                                onChange={(e) =>
+                                  patchPersonMA(idx, {
+                                    customDetails: e.target.value,
                                   })
                                 }
-                                className={clsx(
-                                  "w-full rounded-md border px-3 py-2",
-                                  (ge as any).venueAddress && "border-red-500"
-                                )}
-                                placeholder="123 Example St…"
+                                className="w-full rounded-md border px-3 py-2"
+                                placeholder="https://… or address / info"
+                                disabled={blocked}
                               />
                             </div>
-                          </div>
+                          </>
                         )}
-
-                        {PHONE_ENABLED && p.appearanceType === "PHONE" && (
-                          <div>
-                            <label className="block text-sm font-medium">
-                              Dial info
-                            </label>
-                            <input
-                              value={p.dialInfo ?? ""}
-                              onChange={(ev) =>
-                                patchPerson(idx, { dialInfo: ev.target.value })
-                              }
-                              className={clsx(
-                                "w-full rounded-md border px-3 py-2",
-                                (ge as any).dialInfo && "border-red-500"
-                              )}
-                              placeholder="e.g., +1 555 123 4567 PIN 0000"
-                            />
-                          </div>
-                        )}
-                      </>
+                      </div>
                     )}
                   </div>
                 );
