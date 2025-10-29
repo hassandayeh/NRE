@@ -1,13 +1,19 @@
 // src/app/api/bookings/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "../../../lib/prisma";
+import {
+  Prisma as PrismaNS,
+  AppearanceType,
+  BookingStatus,
+} from "@prisma/client";
 import { resolveViewerFromRequest } from "../../../lib/viewer";
 import { hasCan } from "../../../lib/access/permissions";
-import { AppearanceType, BookingStatus } from "@prisma/client";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../../lib/auth";
 
-function isPlainObject(v: unknown): v is Record<string, any> {
+/* ========================= helpers & types ========================= */
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
@@ -15,6 +21,8 @@ type BookingRow = {
   id: string;
   orgId: string;
   subject: string;
+  programName: string | null; // NEW
+  talkingPoints: string | null; // NEW (HTML)
   status: BookingStatus;
   startAt: Date;
   durationMins: number;
@@ -23,8 +31,8 @@ type BookingRow = {
   locationName: string | null;
   locationAddress: string | null;
   dialInfo: string | null;
-  newsroomName: string | null; // NEW
-  accessConfig: any | null; // NEW
+  newsroomName: string | null;
+  accessConfig: PrismaNS.JsonValue | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -33,7 +41,10 @@ function shapeBooking(b: BookingRow) {
   return {
     id: b.id,
     orgId: b.orgId,
+    // Program name is now canonical; keep subject for back-compat readers
     subject: b.subject,
+    programName: b.programName ?? null, // NEW
+    talkingPoints: b.talkingPoints ?? null, // NEW
     status: b.status,
     startAt: b.startAt.toISOString(),
     durationMins: b.durationMins,
@@ -42,8 +53,8 @@ function shapeBooking(b: BookingRow) {
     locationName: b.locationName,
     locationAddress: b.locationAddress,
     dialInfo: b.dialInfo,
-    newsroomName: b.newsroomName ?? null, // NEW
-    accessConfig: b.accessConfig ?? null, // NEW
+    newsroomName: b.newsroomName ?? null,
+    accessConfig: b.accessConfig ?? null,
     createdAt: b.createdAt.toISOString(),
     updatedAt: b.updatedAt.toISOString(),
   };
@@ -64,14 +75,18 @@ async function deriveOrgId(
   viewer?: any
 ): Promise<string | null> {
   if (typeof seed === "string" && seed.trim()) return seed.trim();
+
   const h = req.headers.get("x-org-id");
   if (h && h.trim()) return h.trim();
+
   const q = new URL(req.url).searchParams.get("orgId");
   if (q && q.trim()) return q.trim();
+
   const vOrg =
     (viewer?.orgId as string | undefined) ??
     (viewer?.org?.id as string | undefined);
   if (vOrg && vOrg.trim()) return vOrg.trim();
+
   try {
     const session = await getServerSession(authOptions);
     const sOrg =
@@ -80,10 +95,12 @@ async function deriveOrgId(
       null;
     if (sOrg && String(sOrg).trim()) return String(sOrg).trim();
   } catch {}
+
   return null;
 }
 
-// ---------------- GET /api/bookings ----------------
+/* ============================ GET (list) =========================== */
+
 export async function GET(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -97,7 +114,6 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const orgId =
       (await deriveOrgId(req, searchParams.get("orgId"), viewer)) || "";
-
     const take = Math.min(
       Math.max(parseInt(searchParams.get("take") || "50", 10), 1),
       200
@@ -132,6 +148,8 @@ export async function GET(req: NextRequest) {
         id: true,
         orgId: true,
         subject: true,
+        programName: true, // NEW
+        talkingPoints: true, // NEW
         status: true,
         startAt: true,
         durationMins: true,
@@ -140,15 +158,15 @@ export async function GET(req: NextRequest) {
         locationName: true,
         locationAddress: true,
         dialInfo: true,
-        newsroomName: true, // NEW
-        accessConfig: true, // NEW
+        newsroomName: true,
+        accessConfig: true,
         createdAt: true,
         updatedAt: true,
       },
     });
 
     return NextResponse.json(
-      { ok: true, bookings: rows.map(shapeBooking) },
+      { ok: true, bookings: rows.map(shapeBooking as any) },
       { status: 200 }
     );
   } catch (err) {
@@ -160,7 +178,8 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ---------------- POST /api/bookings ----------------
+/* ============================ POST (create) ============================ */
+
 export async function POST(req: NextRequest) {
   try {
     const viewer = await resolveViewerFromRequest(req);
@@ -173,18 +192,29 @@ export async function POST(req: NextRequest) {
 
     const body = (await req.json().catch(() => ({}))) as Partial<{
       orgId: string;
-      subject: string;
+
+      // New canonical field shown in UI
+      programName: string | null; // NEW
+      // Back-compat: still accepted if sent by older clients
+      subject: string | null;
+
+      // Rich text HTML from the editor
+      talkingPoints: string | null; // NEW
+
       startAt: string | Date;
       durationMins: number;
+
       appearanceType: string | null;
       locationUrl: string | null;
       locationName: string | null;
       locationAddress: string | null;
       dialInfo: string | null;
-      newsroomName: string | null; // NEW
-      accessConfig: Record<string, any>; // NEW
 
-      // Non-hosts from the New page (kept as-is)
+      newsroomName: string | null;
+
+      // JSON access knobs from Mode & Access control
+      accessConfig: Record<string, unknown>;
+      // Legacy “guests” persistence (kept as-is)
       guests: Array<{
         userId: string | null;
         name?: string | null;
@@ -224,10 +254,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const subject =
-      typeof body.subject === "string" && body.subject.trim().length > 0
-        ? body.subject.trim()
-        : "";
+    // Canonical title: programName — but keep subject bridge for now.
+    const programName =
+      typeof body.programName === "string" ? body.programName.trim() : "";
+    const subjectRaw =
+      typeof body.subject === "string" ? body.subject.trim() : "";
+    const subject = subjectRaw || programName; // bridge
+
     const startAtRaw = body.startAt;
     const startAt =
       startAtRaw instanceof Date
@@ -235,6 +268,7 @@ export async function POST(req: NextRequest) {
         : typeof startAtRaw === "string"
         ? new Date(startAtRaw)
         : undefined;
+
     const durationMins =
       typeof body.durationMins === "number" &&
       Number.isFinite(body.durationMins)
@@ -253,13 +287,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Normalize talking points: accept string or null (HTML allowed)
+    const talkingPoints =
+      body.talkingPoints === null || typeof body.talkingPoints === "string"
+        ? typeof body.talkingPoints === "string" &&
+          body.talkingPoints.trim().length === 0
+          ? null
+          : (body.talkingPoints as string | null)
+        : null;
+
+    // Normalize accessConfig: only include when it's a plain object.
+    // (Avoid passing `null` to JSON column to satisfy Prisma's input type.)
+    let accessConfigData: PrismaNS.InputJsonValue | undefined = undefined;
+    if (isPlainObject(body.accessConfig)) {
+      accessConfigData =
+        body.accessConfig as unknown as PrismaNS.InputJsonValue;
+    }
+
     const created = await prisma.booking.create({
       data: {
         orgId,
+        // Back-compat & canonical
         subject,
+        programName: programName || null, // NEW
+        talkingPoints, // NEW
+
         startAt,
         durationMins,
         status: BookingStatus.PENDING,
+
         appearanceType: parseAppearanceType(body.appearanceType) ?? null,
         locationUrl:
           body.locationUrl === null || typeof body.locationUrl === "string"
@@ -278,18 +334,22 @@ export async function POST(req: NextRequest) {
           body.dialInfo === null || typeof body.dialInfo === "string"
             ? body.dialInfo ?? null
             : null,
+
         newsroomName:
           body.newsroomName === null || typeof body.newsroomName === "string"
             ? body.newsroomName?.trim() || null
             : null,
-        ...(isPlainObject(body.accessConfig)
-          ? { accessConfig: body.accessConfig }
+
+        ...(accessConfigData !== undefined
+          ? { accessConfig: accessConfigData }
           : {}),
       },
       select: {
         id: true,
         orgId: true,
         subject: true,
+        programName: true, // NEW
+        talkingPoints: true, // NEW
         status: true,
         startAt: true,
         durationMins: true,
@@ -298,14 +358,14 @@ export async function POST(req: NextRequest) {
         locationName: true,
         locationAddress: true,
         dialInfo: true,
-        newsroomName: true, // NEW
-        accessConfig: true, // NEW
+        newsroomName: true,
+        accessConfig: true,
         createdAt: true,
         updatedAt: true,
       },
     });
 
-    // ---- Persist non-host participants from body.guests (kept as-is)
+    /* ---- Persist non-host participants from body.guests (kept as-is) ---- */
     try {
       const guests = Array.isArray((body as any).guests)
         ? ((body as any).guests as Array<any>)
@@ -322,7 +382,7 @@ export async function POST(req: NextRequest) {
           )
         );
 
-        const existingUsers = candidateIds.length
+        const existingUsers: Array<{ id: string }> = candidateIds.length
           ? await prisma.user.findMany({
               where: { id: { in: candidateIds } },
               select: { id: true },
@@ -337,7 +397,7 @@ export async function POST(req: NextRequest) {
           .map((g) => {
             const kind = String(g.kind ?? "").toUpperCase();
             const isReporter = kind === "REPORTER";
-            const roleSlot = isReporter ? 2 : 3; // 2: Producer (reporter), 3: Expert
+            const roleSlot = isReporter ? 2 : 3; // 2: Producer, 3: Expert
             const roleLabelSnapshot = isReporter ? "Producer" : "Expert";
             const proposedId =
               typeof g.userId === "string" ? g.userId.trim() : null;

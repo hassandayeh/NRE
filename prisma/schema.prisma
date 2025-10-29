@@ -368,6 +368,10 @@ model OrganizationAccessPreset {
  * =========================
  */
 model Booking {
+    /// New — replacing “Subject” in the UI (will become canonical soon)
+  programName   String?        @db.VarChar(200)
+  /// New — rich text HTML from the editor
+  talkingPoints String?        @db.Text
   id           String        @id @default(cuid())
   orgId        String
   organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)

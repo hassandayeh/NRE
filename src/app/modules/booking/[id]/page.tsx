@@ -1,390 +1,447 @@
 // src/app/modules/booking/[id]/page.tsx
-import Link from "next/link";
-import { headers, cookies } from "next/headers";
+"use client";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+/**
+ * Single Booking — mirrors the "New" page layout (containers & spacing)
+ * Sections:
+ *  - Basic Info (read-only)
+ *  - Mode & Access (read-only; BOOKING-level summary or participant-level note)
+ *  - Participants (grouped by role)
+ *
+ * Notes:
+ *  - Fresh build (no legacy).
+ *  - Defensive to partial payloads — hides unknown/empty rows.
+ *  - Containers match New: rounded + border + p-4, space-y-4.
+ */
 
-/* --------------------------- Types --------------------------- */
+import * as React from "react";
+import { useRouter, useParams } from "next/navigation";
 
-type BookingDTO = {
-  id: string;
-  orgId: string;
-  subject: string;
-  status: string;
-  startAt: string; // ISO
-  durationMins: number;
-  appearanceType: string | null;
-  locationUrl: string | null;
-  locationName: string | null;
-  locationAddress: string | null;
-  dialInfo: string | null;
-  createdAt: string; // ISO
-  updatedAt: string; // ISO
+/* ---------- Small UI helpers ---------- */
+const clsx = (...xs: any[]) => xs.filter(Boolean).join(" ");
+const pad = (n: number) => String(n).padStart(2, "0");
+const toDatetimeLocalValue = (iso?: string | null) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
 };
 
-type ApiOk<T> = { ok: true } & T;
-type ApiErr = { ok: false; error: string };
+/* ---------- Design system shims (same approach as New page) ---------- */
+import * as ButtonModule from "../../../../components/ui/Button";
+const UIButton: React.ElementType =
+  (ButtonModule as any).Button ?? (ButtonModule as any).default;
 
-type ParticipantsItem = {
+import * as AlertModule from "../../../../components/ui/Alert";
+const UIAlert: React.ElementType =
+  (AlertModule as any).Alert ?? (AlertModule as any).default;
+
+/* ---------- Types (tolerant) ---------- */
+type ModeLevel = "BOOKING" | "PARTICIPANT";
+
+type BookingDetail = {
+  id: string;
+  subject?: string | null;
+  newsroomName?: string | null;
+  programName?: string | null; // optional: only render if exists
+  startAt?: string | null;
+  durationMins?: number | null;
+  talkingPoints?: string | null; // HTML saved by New
+  modeLevel?: ModeLevel | null;
+  accessConfig?: any;
+  access?: any;
+};
+
+type ParticipantItem = {
   id: string;
   userId: string | null;
   displayName: string | null;
   roleSlot: number | null;
-  roleLabel: string | null; // snapshot label
-  inviteStatus: string | null; // PENDING | ACCEPTED | DECLINED | CANCELED
+  roleLabel: string | null;
+  inviteStatus: string | null;
   invitedAt: string | null;
   respondedAt: string | null;
 };
 
-type ParticipantsRes = ApiOk<{ items: ParticipantsItem[] }> | ApiErr;
+type ParticipantsResponse =
+  | {
+      ok: true;
+      items: ParticipantItem[];
+      roles?: string[];
+      grouped?: Record<string, ParticipantItem[]>;
+    }
+  | { ok: false; error: string };
 
-/* ------------------------ Helpers (UI) ------------------------ */
-
-function formatDateTime(iso: string | null) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, {
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDuration(mins: number | null | undefined) {
-  if (!mins && mins !== 0) return "—";
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
-}
-
-function StatusPill({ status }: { status?: string | null }) {
-  const s = (status || "").toUpperCase();
-  const color =
-    s === "CONFIRMED"
-      ? "bg-green-100 text-green-800 ring-green-200"
-      : s === "CANCELED"
-      ? "bg-gray-100 text-gray-700 ring-gray-200"
-      : s === "PENDING"
-      ? "bg-amber-100 text-amber-800 ring-amber-200"
-      : "bg-slate-100 text-slate-800 ring-slate-200";
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ring-1 ${color}`}
-    >
-      {s || "UNKNOWN"}
-    </span>
-  );
-}
-
-function InviteStatusPill({ s }: { s: string | null }) {
-  const v = (s || "").toUpperCase();
-  const color =
-    v === "ACCEPTED"
-      ? "bg-green-100 text-green-800 ring-green-200"
-      : v === "DECLINED"
-      ? "bg-rose-100 text-rose-800 ring-rose-200"
-      : v === "CANCELED"
-      ? "bg-gray-100 text-gray-700 ring-gray-200"
-      : "bg-amber-100 text-amber-800 ring-amber-200"; // PENDING/unknown
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ring-1 ${color}`}
-    >
-      {v || "PENDING"}
-    </span>
-  );
-}
-
-/* ----------------------- Server fetchers ---------------------- */
-
-function currentOrigin() {
-  const h = headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const proto = h.get("x-forwarded-proto") ?? "http";
-  return `${proto}://${host}`;
-}
-
-function authCookiesHeader() {
-  return cookies()
-    .getAll()
-    .map(({ name, value }) => `${name}=${value}`)
-    .join("; ");
-}
-
-async function fetchBooking(id: string): Promise<{
-  ok: boolean;
-  data?: BookingDTO;
-  error?: string;
-  status: number;
-}> {
-  const origin = currentOrigin();
-  const res = await fetch(`${origin}/api/bookings/${encodeURIComponent(id)}`, {
-    cache: "no-store",
-    headers: { cookie: authCookiesHeader() },
-  });
-
-  let json: ApiOk<{ booking: BookingDTO }> | ApiErr | undefined;
-  try {
-    json = (await res.json()) as any;
-  } catch {
-    // no-op
-  }
-
-  if (!res.ok || !json || !("ok" in json) || !json.ok) {
-    const message =
-      (json && "error" in json && json.error) ||
-      (res.status === 401 && "Unauthorized") ||
-      (res.status === 403 && "Forbidden") ||
-      (res.status === 404 && "Not found") ||
-      "Failed to load";
-    return { ok: false, error: message, status: res.status };
-  }
-  return { ok: true, data: (json as any).booking, status: res.status };
-}
-
-async function fetchParticipants(id: string): Promise<{
-  ok: boolean;
-  items?: ParticipantsItem[];
-  error?: string;
-  status: number;
-}> {
-  const origin = currentOrigin();
-  const res = await fetch(
-    `${origin}/api/bookings/${encodeURIComponent(id)}/participants`,
-    { cache: "no-store", headers: { cookie: authCookiesHeader() } }
-  );
-
-  let json: ParticipantsRes | undefined;
-  try {
-    json = (await res.json()) as any;
-  } catch {
-    // no-op
-  }
-
-  if (!res.ok || !json || !("ok" in json) || !json.ok) {
-    const message =
-      (json && "error" in json && json.error) ||
-      (res.status === 401 && "Unauthorized") ||
-      (res.status === 403 && "Forbidden") ||
-      (res.status === 404 && "Not found") ||
-      "Failed to load";
-    return { ok: false, error: message, status: res.status };
-  }
-
-  return { ok: true, items: (json as any).items, status: res.status };
-}
-
-/* --------------------------- Page ---------------------------- */
-
-export default async function BookingViewPage({
-  params,
+/* ------------------------- Access summary helpers ------------------------- */
+function FieldRow({
+  label,
+  value,
 }: {
-  params: { id: string };
+  label: string;
+  value?: React.ReactNode;
 }) {
-  const [bookingRes, participantsRes] = await Promise.all([
-    fetchBooking(params.id),
-    fetchParticipants(params.id),
-  ]);
+  if (value === null || value === undefined || value === "") return null;
+  return (
+    <div className="flex items-start gap-3">
+      <span className="w-28 shrink-0 text-sm text-gray-500">{label}</span>
+      <div className="min-w-0 text-sm text-gray-900">{value}</div>
+    </div>
+  );
+}
 
-  // Error & empty states for booking (primary)
-  if (!bookingRes.ok) {
-    const { status, error } = bookingRes;
-    const isNoOrg =
-      status === 403 && (error || "").toLowerCase().includes("no org");
-    const isUnauthorized = status === 401;
+function kvFallback(config: unknown) {
+  try {
+    return JSON.stringify(config, null, 2);
+  } catch {
+    return String(config ?? "");
+  }
+}
 
+function ModeAccessSummary({ config }: { config: any }) {
+  if (!config) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-8">
-        <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-xl font-semibold">Booking</h1>
-          <Link
-            href="/modules/booking/view"
-            className="rounded border px-3 py-1 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            ← Back to list
-          </Link>
-        </div>
-
-        {isUnauthorized ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
-            You need to{" "}
-            <Link href="/auth/signin" className="underline">
-              sign in
-            </Link>{" "}
-            to view this booking.
-          </div>
-        ) : isNoOrg ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
-            No organization selected. Go to{" "}
-            <Link href="/modules/settings" className="underline">
-              Settings
-            </Link>{" "}
-            to pick an organization.
-          </div>
-        ) : status === 404 ? (
-          <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-gray-700">
-            Booking not found or you don’t have access.
-          </div>
-        ) : (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
-            {error || "Something went wrong. Try again."}
-          </div>
-        )}
+      <div className="rounded-md border border-dashed p-3 text-sm text-gray-500">
+        No booking-level access provided.
       </div>
     );
   }
 
-  const b = bookingRes.data!;
-  const pOk = participantsRes.ok;
-  const items = participantsRes.items ?? [];
-  const pError = participantsRes.error;
+  const modeLabel =
+    config.modeLabel ??
+    config.mode?.label ??
+    config.mode ??
+    (typeof config.mode?.slot === "number"
+      ? `Mode #${config.mode.slot}`
+      : null) ??
+    (typeof config.modeSlot === "number" ? `Mode #${config.modeSlot}` : null);
 
-  // Group participants by role label (fallback to Role X)
-  const byRole = new Map<string, ParticipantsItem[]>();
-  if (pOk) {
-    for (const it of items) {
-      const label =
-        (it.roleLabel && it.roleLabel.trim()) ||
-        (typeof it.roleSlot === "number" ? `Role ${it.roleSlot}` : "Role");
-      const arr = byRole.get(label) || [];
-      arr.push(it);
-      byRole.set(label, arr);
-    }
-  }
+  const presetKey =
+    config.presetKey ?? config.accessPresetKey ?? config.preset ?? null;
+
+  const accessLabel =
+    config.accessLabel ?? config.access?.label ?? config.label ?? null;
+
+  const accessDetails =
+    config.accessDetails ?? config.access?.details ?? config.details ?? null;
+
+  const location =
+    config.location ??
+    config.access?.location ??
+    config.address ??
+    config.url ??
+    null;
+
+  const nothing =
+    !modeLabel && !presetKey && !accessLabel && !accessDetails && !location;
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-8">
-      {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
+    <div className="rounded-md border p-3">
+      {nothing ? (
+        <pre className="whitespace-pre-wrap break-words text-xs text-gray-600">
+          {kvFallback(config)}
+        </pre>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <FieldRow label="Mode" value={modeLabel} />
+          <FieldRow label="Preset" value={presetKey} />
+          <FieldRow label="Label" value={accessLabel} />
+          <FieldRow label="Details" value={accessDetails} />
+          <FieldRow label="Location" value={location} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ Main page ------------------------------ */
+export default function BookingViewPage() {
+  const router = useRouter();
+  const params = useParams<{ id: string }>();
+  const bookingId = String(params?.id ?? "");
+
+  const [loading, setLoading] = React.useState(true);
+  const [err, setErr] = React.useState<string | null>(null);
+  const [detail, setDetail] = React.useState<BookingDetail | null>(null);
+  const [participants, setParticipants] = React.useState<ParticipantsResponse>({
+    ok: true,
+    items: [],
+    grouped: {},
+    roles: [],
+  } as any);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      setLoading(true);
+      setErr(null);
+      try {
+        // Booking core
+        const r = await fetch(`/api/bookings/${bookingId}`, {
+          cache: "no-store",
+          credentials: "include",
+        });
+        const j = (await r.json().catch(() => ({}))) as any;
+        if (!r.ok) throw new Error(j?.error || `Failed to load booking`);
+        const b: BookingDetail = {
+          id: j?.booking?.id ?? j?.id ?? bookingId,
+          subject: j?.booking?.subject ?? j?.subject ?? null,
+          newsroomName: j?.booking?.newsroomName ?? j?.newsroomName ?? null,
+          // Only render Program name if backend returns it
+          programName: j?.booking?.programName ?? j?.programName ?? undefined,
+          startAt: (j?.booking?.startAt ?? j?.startAt) || null,
+          durationMins:
+            j?.booking?.durationMins ?? j?.durationMins ?? undefined,
+          talkingPoints:
+            j?.booking?.talkingPoints ?? j?.talkingPoints ?? undefined,
+          modeLevel:
+            j?.booking?.modeLevel ?? j?.modeLevel ?? ("BOOKING" as ModeLevel),
+          accessConfig:
+            j?.booking?.accessConfig ?? j?.accessConfig ?? j?.access,
+          access: j?.booking?.access ?? undefined,
+        };
+        if (!cancelled) setDetail(b);
+
+        // Participants
+        const rp = await fetch(`/api/bookings/${bookingId}/participants`, {
+          cache: "no-store",
+          credentials: "include",
+        });
+        const jp = (await rp.json().catch(() => ({}))) as ParticipantsResponse;
+        if (!cancelled) {
+          if (!rp.ok || !("ok" in jp) || !jp.ok) {
+            setParticipants({
+              ok: false,
+              error: (jp as any)?.error || "Error",
+            });
+          } else {
+            setParticipants(jp);
+          }
+        }
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message || "Failed to load booking");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    if (bookingId) run();
+    return () => {
+      cancelled = true;
+    };
+  }, [bookingId]);
+
+  const modeLevel: ModeLevel | null = (detail?.modeLevel as ModeLevel) ?? null;
+
+  const grouped =
+    (participants as any)?.grouped &&
+    typeof (participants as any).grouped === "object"
+      ? (participants as any).grouped
+      : (() => {
+          const m: Record<string, ParticipantItem[]> = {};
+          if ((participants as any)?.items?.length) {
+            for (const it of (participants as any).items as ParticipantItem[]) {
+              const key =
+                (it.roleLabel && it.roleLabel.trim()) ||
+                (typeof it.roleSlot === "number"
+                  ? `Role ${it.roleSlot}`
+                  : "Participants");
+              (m[key] ||= []).push(it);
+            }
+          }
+          return m;
+        })();
+
+  const roleKeys = Object.keys(grouped ?? {});
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-6">
+      {/* Top-level errors / loading */}
+      {loading ? (
+        <div className="text-sm text-gray-500">Loading booking…</div>
+      ) : null}
+      {err ? <UIAlert kind="error">{err}</UIAlert> : null}
+
+      {/* Basic Info */}
+      <section className="rounded-md border p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-medium">Basic Info</h2>
+          {/* subtle section meta could go here in future */}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {/* Program name replaces Subject. Fallback to subject so old payloads still show. */}
+          <label className="block space-y-1">
+            <span className="text-sm">Program name</span>
+            <input
+              value={detail?.programName ?? detail?.subject ?? ""}
+              readOnly
+              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+            />
+          </label>
+
+          <label className="block space-y-1">
+            <span className="text-sm">Newsroom name</span>
+            <input
+              value={detail?.newsroomName ?? ""}
+              readOnly
+              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+            />
+          </label>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block space-y-1">
+            <span className="text-sm">Duration (mins)</span>
+            <input
+              value={
+                typeof detail?.durationMins === "number"
+                  ? String(detail.durationMins)
+                  : ""
+              }
+              readOnly
+              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+            />
+          </label>
+        </div>
+
+        <label className="block space-y-1">
+          <span className="text-sm">Start at</span>
+          <input
+            type="datetime-local"
+            value={toDatetimeLocalValue(detail?.startAt ?? null)}
+            readOnly
+            className="w-full rounded-md border bg-gray-50 px-3 py-2"
+          />
+        </label>
+
+        {/* Talking points */}
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">
-            {b.subject || "Untitled booking"}
-          </h1>
-          <p className="text-sm text-gray-600">
-            <StatusPill status={b.status} /> <span className="mx-2">•</span>{" "}
-            {formatDateTime(b.startAt)} <span className="mx-2">•</span>{" "}
-            {formatDuration(b.durationMins)}
-          </p>
-        </div>
-
-        <Link
-          href="/modules/booking/view"
-          className="rounded border px-3 py-1 text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        >
-          ← Back to list
-        </Link>
-      </div>
-
-      {/* Details */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="rounded-xl border bg-white p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-700">Basics</h2>
-          <dl className="space-y-2 text-sm">
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Appearance</dt>
-              <dd className="text-gray-900">{b.appearanceType || "—"}</dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Duration</dt>
-              <dd className="text-gray-900">
-                {formatDuration(b.durationMins)}
-              </dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Created</dt>
-              <dd className="text-gray-900">{formatDateTime(b.createdAt)}</dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Updated</dt>
-              <dd className="text-gray-900">{formatDateTime(b.updatedAt)}</dd>
-            </div>
-          </dl>
-        </div>
-
-        <div className="rounded-xl border bg-white p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-700">
-            Location & Access
-          </h2>
-          <dl className="space-y-2 text-sm">
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Location name</dt>
-              <dd className="text-gray-900">{b.locationName || "—"}</dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Address</dt>
-              <dd className="text-gray-900">{b.locationAddress || "—"}</dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">URL</dt>
-              <dd className="text-gray-900">
-                {b.locationUrl ? (
-                  <a
-                    href={b.locationUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-indigo-600 underline break-words"
-                  >
-                    {b.locationUrl}
-                  </a>
-                ) : (
-                  "—"
-                )}
-              </dd>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <dt className="text-gray-500">Dial info</dt>
-              <dd className="text-gray-900 break-words whitespace-pre-wrap">
-                {b.dialInfo || "—"}
-              </dd>
-            </div>
-          </dl>
-        </div>
-
-        {/* Participants */}
-        <div className="rounded-xl border bg-white p-4 md:col-span-2">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-medium text-gray-700">Participants</h2>
-            {/* Future: Add/Edit buttons (out of scope now) */}
+          <span className="text-sm">Talking points</span>
+          <div className="rounded-md border bg-white">
+            <div
+              className={clsx(
+                "min-h-[120px] max-h-[320px] overflow-auto px-3 py-2 prose prose-sm",
+                !detail?.talkingPoints && "italic text-gray-500"
+              )}
+              // eslint-disable-next-line react/no-danger
+              dangerouslySetInnerHTML={{
+                __html:
+                  (detail?.talkingPoints &&
+                    String(detail.talkingPoints).trim()) ||
+                  "No talking points.",
+              }}
+            />
           </div>
+        </div>
+      </section>
 
-          {!pOk ? (
-            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-              {pError || "Failed to load participants"}
-            </div>
-          ) : items.length === 0 ? (
-            <p className="text-sm text-gray-600">No participants yet.</p>
+      {/* Mode & Access */}
+      <section className="rounded-md border p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-medium">Mode &amp; Access</h2>
+        </div>
+
+        <div className="space-y-3">
+          <label className="block space-y-1">
+            <span className="text-sm">Mode Level</span>
+            <select
+              value={modeLevel ?? ""}
+              disabled
+              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+            >
+              <option value="">—</option>
+              <option value="BOOKING">Booking</option>
+              <option value="PARTICIPANT">Participant</option>
+            </select>
+          </label>
+
+          {modeLevel === "BOOKING" ? (
+            <ModeAccessSummary
+              config={detail?.accessConfig ?? detail?.access ?? null}
+            />
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {Array.from(byRole.entries()).map(([role, list]) => (
-                <div key={role} className="rounded-lg border p-3">
-                  <div className="mb-2 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold">{role}</h3>
-                    <span className="text-xs text-gray-500">
-                      {list.length} {list.length === 1 ? "person" : "people"}
-                    </span>
-                  </div>
-                  <ul className="space-y-2">
-                    {list.map((p) => (
-                      <li
-                        key={p.id}
-                        className="flex items-center justify-between text-sm"
-                      >
-                        <span className="truncate">{p.displayName || "—"}</span>
-                        <InviteStatusPill s={p.inviteStatus} />
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+            <div className="rounded-md border border-dashed p-3 text-sm text-gray-600">
+              Participant-level access — see each participant below.
             </div>
           )}
         </div>
+      </section>
+
+      {/* Participants */}
+      <section className="rounded-md border p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-medium">Participants</h2>
+        </div>
+
+        {("ok" in participants && participants.ok && roleKeys.length === 0) ||
+        (!("ok" in participants) && !roleKeys.length) ? (
+          <div className="rounded-md border border-dashed p-3 text-sm text-gray-500">
+            No participants found.
+          </div>
+        ) : null}
+
+        {"ok" in participants && !participants.ok ? (
+          <UIAlert kind="error">{participants.error}</UIAlert>
+        ) : null}
+
+        {roleKeys.length > 0 && (
+          <div className="space-y-4">
+            {roleKeys.map((role) => {
+              const rows: ParticipantItem[] = grouped[role] ?? [];
+              return (
+                <div key={role} className="space-y-2">
+                  <div className="text-sm font-medium">{role}</div>
+                  <div className="space-y-2">
+                    {rows.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-center justify-between rounded-md border px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">
+                            {p.displayName ?? "Unnamed"}
+                          </span>
+                          {typeof p.roleSlot === "number" ? (
+                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
+                              #{p.roleSlot}
+                            </span>
+                          ) : null}
+                        </div>
+                        <span
+                          className={clsx(
+                            "rounded px-1.5 py-0.5 text-[10px]",
+                            p.inviteStatus === "ACCEPTED"
+                              ? "bg-green-100 text-green-800"
+                              : p.inviteStatus === "DECLINED"
+                              ? "bg-red-100 text-red-800"
+                              : "bg-gray-100 text-gray-700"
+                          )}
+                        >
+                          {p.inviteStatus ?? "PENDING"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Footer actions */}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="rounded-md border px-3 py-2 hover:bg-gray-50"
+        >
+          Back
+        </button>
+        <UIButton asChild>
+          <a href="/modules/booking/new">New booking</a>
+        </UIButton>
       </div>
     </div>
   );

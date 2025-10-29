@@ -11,6 +11,9 @@
  * Layout (this slice):
  *  - Each top-level section is its own container (rounded + border + p-4).
  *  - Internal spacing normalized to space-y-4 for section body, space-y-3 for field stacks.
+ *
+ * NOTE (compat): We’re removing “Subject” from the UI.
+ * Until the API/DB switch over, we send subject = programName so nothing breaks.
  */
 
 import * as React from "react";
@@ -41,9 +44,9 @@ const clsx = (...xs: any[]) => xs.filter(Boolean).join(" ");
 const pad = (n: number) => String(n).padStart(2, "0");
 const toDatetimeLocalValue = (iso: string) => {
   const d = new Date(iso);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${d.getMonth() + 1 <= 9 ? "0" : ""}${
+    d.getMonth() + 1
+  }-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 function nextFullHourLocalISO(): string {
   const d = new Date();
@@ -519,18 +522,16 @@ export default function NewBookingPage() {
   const effectiveOrgId =
     session.kind === "ready" ? session.user?.orgId ?? null : null;
 
-  // Core booking fields
+  // Core booking fields (Subject removed; Program name is the primary)
   const [form, setForm] = React.useState<{
-    subject: string;
-    newsroomName: string;
     programName: string;
+    newsroomName: string;
     talkingPoints: string;
     startAt: string; // ISO
     durationMins: number;
   }>({
-    subject: "",
-    newsroomName: "",
     programName: "",
+    newsroomName: "",
     talkingPoints: "",
     startAt: nextFullHourLocalISO(),
     durationMins: 30,
@@ -655,7 +656,7 @@ export default function NewBookingPage() {
   const participantsValid =
     modeLevel !== "PARTICIPANT" ||
     people.every((p) => participantMA[p.userId]?.valid ?? true);
-  const formValid = bookingValid && participantsValid;
+  const formValid = bookingValid && participantsValid && !!form.programName;
 
   // ---------- Submit ----------
   const [submitting, setSubmitting] = React.useState(false);
@@ -678,23 +679,11 @@ export default function NewBookingPage() {
     }
     if (!formValid) return;
 
-    const participantsAccess =
-      modeLevel === "PARTICIPANT"
-        ? people
-            .map((p) => ({
-              userId: p.userId,
-              accessConfig: participantMA[p.userId]?.access,
-            }))
-            .filter(
-              (x): x is { userId: string; accessConfig: BookingAccessConfig } =>
-                !!x.accessConfig
-            )
-        : undefined;
-
+    // Build booking payload (Subject removed; we bridge subject = programName)
     const payload: any = {
-      subject: form.subject,
-      newsroomName: form.newsroomName,
+      subject: form.programName || undefined, // compat shim
       programName: form.programName || undefined,
+      newsroomName: form.newsroomName,
       talkingPoints: form.talkingPoints || undefined,
       startAt: new Date(form.startAt).toISOString(),
       durationMins: Number(form.durationMins),
@@ -702,14 +691,14 @@ export default function NewBookingPage() {
       ...(modeLevel === "BOOKING" && bookingAccess
         ? { accessConfig: bookingAccess }
         : {}),
-      ...(modeLevel === "PARTICIPANT" && participantsAccess?.length
-        ? { participantsAccess }
-        : {}),
+      // participant-level access is handled in a later slice
     };
 
     try {
       setSubmitting(true);
-      const res = await fetch("/api/bookings", {
+
+      // 1) Create the booking
+      const createRes = await fetch("/api/bookings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -720,14 +709,42 @@ export default function NewBookingPage() {
         credentials: "include",
         body: JSON.stringify(payload),
       });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || "Failed to create booking");
-      const bookingId: string = j.booking?.id ?? j?.id;
-      if (bookingId) {
-        router.push(`/modules/booking/${bookingId}`);
-      } else {
-        router.push(`/modules/booking`);
+      const createJson = await createRes.json().catch(() => ({}));
+      if (!createRes.ok)
+        throw new Error(createJson?.error || "Failed to create booking");
+
+      const bookingId: string = createJson.booking?.id ?? createJson?.id;
+      if (!bookingId) throw new Error("Booking created without id.");
+
+      // 2) If we picked people, add them as participants
+      if (people.length > 0) {
+        const participantsPayload = {
+          participants: people.map((p) => ({
+            userId: p.userId,
+            // Host = 1, Reporter(Producer) = 2, Expert = 3
+            roleSlot: p.isHost ? 1 : p.kind === "REPORTER" ? 2 : 3,
+          })),
+        };
+
+        const partRes = await fetch(`/api/bookings/${bookingId}/participants`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(participantsPayload),
+        });
+
+        if (!partRes.ok) {
+          const pj = await partRes.json().catch(() => ({}));
+          console.error("Participants add failed:", pj);
+          setError(
+            (pj as any)?.error ||
+              "Booking created, but adding participants failed."
+          );
+        }
       }
+
+      // 3) Go to the single booking view
+      window.location.assign(`/modules/booking/${bookingId}`);
     } catch (err: any) {
       setError(err?.message || "Failed to create booking");
     } finally {
@@ -747,13 +764,15 @@ export default function NewBookingPage() {
       {/* Basic Info (container) */}
       <section className="rounded-md border p-4 space-y-4">
         <h2 className="text-lg font-medium">Basic Info</h2>
-        <div className="space-y-3">
+
+        {/* Top row: Program name (replaces Subject) + Newsroom name */}
+        <div className="grid gap-3 sm:grid-cols-2">
           <label className="block space-y-1">
-            <span className="text-sm">Subject</span>
+            <span className="text-sm">Program name</span>
             <input
-              value={form.subject}
+              value={form.programName}
               onChange={(e) =>
-                setForm((f) => ({ ...f, subject: e.target.value }))
+                setForm((f) => ({ ...f, programName: e.target.value }))
               }
               required
               className="w-full rounded-md border px-3 py-2"
@@ -771,55 +790,54 @@ export default function NewBookingPage() {
               className="w-full rounded-md border px-3 py-2"
             />
           </label>
+        </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block space-y-1">
-              <span className="text-sm">Start at</span>
-              <input
-                type="datetime-local"
-                value={toDatetimeLocalValue(form.startAt)}
-                onChange={(e) =>
-                  setForm((f) => ({
-                    ...f,
-                    startAt: new Date(e.target.value).toISOString(),
-                  }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-              />
-            </label>
-
-            <label className="block space-y-1">
-              <span className="text-sm">Duration (mins)</span>
-              <input
-                type="number"
-                min={5}
-                step={5}
-                value={form.durationMins}
-                onChange={(e) =>
-                  setForm((f) => ({
-                    ...f,
-                    durationMins: Number(e.target.value),
-                  }))
-                }
-                required
-                className="w-full rounded-md border px-3 py-2"
-              />
-            </label>
-          </div>
-
-          {/* Talking points (rich text) */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-sm">Talking points</span>
-            </div>
-            <RichTextEditor
-              value={form.talkingPoints}
-              onChange={(html) =>
-                setForm((f) => ({ ...f, talkingPoints: html }))
+        {/* Time row: Start at + Duration */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block space-y-1">
+            <span className="text-sm">Start at</span>
+            <input
+              type="datetime-local"
+              value={toDatetimeLocalValue(form.startAt)}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  startAt: new Date(e.target.value).toISOString(),
+                }))
               }
+              required
+              className="w-full rounded-md border px-3 py-2"
             />
+          </label>
+
+          <label className="block space-y-1">
+            <span className="text-sm">Duration (mins)</span>
+            <input
+              type="number"
+              min={5}
+              step={5}
+              value={form.durationMins}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  durationMins: Number(e.target.value),
+                }))
+              }
+              required
+              className="w-full rounded-md border px-3 py-2"
+            />
+          </label>
+        </div>
+
+        {/* Talking points (rich text) */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="text-sm">Talking points</span>
           </div>
+          <RichTextEditor
+            value={form.talkingPoints}
+            onChange={(html) => setForm((f) => ({ ...f, talkingPoints: html }))}
+          />
         </div>
       </section>
 
