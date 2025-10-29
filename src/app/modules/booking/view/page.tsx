@@ -11,7 +11,6 @@ import { useEffect, useMemo, useState } from "react";
  */
 type BookingListItem = {
   id: string;
-  subject: string | null;
   startAt: string; // ISO
   durationMins: number;
   appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE" | null;
@@ -295,7 +294,7 @@ export default function BookingsViewPage() {
               {/* Whole card is a link → VIEW page */}
               <div className="mb-1 flex items-center justify-between">
                 <h2 className="text-base font-medium">
-                  {b.subject || "(no subject)"}
+                  {b.programName ?? "(no title)"}
                 </h2>
                 {ap && (
                   <span className="rounded-md border px-2 py-0.5 text-xs">

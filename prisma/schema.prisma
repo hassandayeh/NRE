@@ -368,38 +368,38 @@ model OrganizationAccessPreset {
  * =========================
  */
 model Booking {
-    /// New — replacing “Subject” in the UI (will become canonical soon)
-  programName   String?        @db.VarChar(200)
-  /// New — rich text HTML from the editor
-  talkingPoints String?        @db.Text
-  id           String        @id @default(cuid())
-  orgId        String
-  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  subject      String        @db.VarChar(300)
-  status       BookingStatus @default(PENDING)
+  id              String   @id @default(cuid())
+  orgId           String
+  organization    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
-  startAt      DateTime
-  durationMins Int
+  // Canonical title + rich text
+  programName     String?  @db.VarChar(200)
+  talkingPoints   String?  @db.Text
 
+  status          BookingStatus @default(PENDING)
+  startAt         DateTime
+  durationMins    Int
   appearanceType  AppearanceType?
   locationUrl     String?
-  locationName    String?         @db.VarChar(300)
+  locationName    String?  @db.VarChar(300)
   locationAddress String?
   dialInfo        String?
+
   /// Stores New-page access knobs (scopes/provisioning/unified type/default link)
   accessConfig    Json?
+
   /// Optional newsroom label shown in New page's "What" section
   newsroomName    String?
 
-  participants BookingParticipant[]
-  notes        BookingNote[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  participants    BookingParticipant[]
+  notes           BookingNote[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([orgId])
   @@index([startAt])
 }
+
 
 model BookingParticipant {
   id        String  @id @default(cuid())

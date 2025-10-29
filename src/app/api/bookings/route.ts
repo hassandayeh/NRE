@@ -13,14 +13,9 @@ import { authOptions } from "../../../lib/auth";
 
 /* ========================= helpers & types ========================= */
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
 type BookingRow = {
   id: string;
   orgId: string;
-  subject: string;
   programName: string | null; // NEW
   talkingPoints: string | null; // NEW (HTML)
   status: BookingStatus;
@@ -41,8 +36,7 @@ function shapeBooking(b: BookingRow) {
   return {
     id: b.id,
     orgId: b.orgId,
-    // Program name is now canonical; keep subject for back-compat readers
-    subject: b.subject,
+
     programName: b.programName ?? null, // NEW
     talkingPoints: b.talkingPoints ?? null, // NEW
     status: b.status,
@@ -147,7 +141,7 @@ export async function GET(req: NextRequest) {
       select: {
         id: true,
         orgId: true,
-        subject: true,
+
         programName: true, // NEW
         talkingPoints: true, // NEW
         status: true,
@@ -195,8 +189,6 @@ export async function POST(req: NextRequest) {
 
       // New canonical field shown in UI
       programName: string | null; // NEW
-      // Back-compat: still accepted if sent by older clients
-      subject: string | null;
 
       // Rich text HTML from the editor
       talkingPoints: string | null; // NEW
@@ -213,7 +205,8 @@ export async function POST(req: NextRequest) {
       newsroomName: string | null;
 
       // JSON access knobs from Mode & Access control
-      accessConfig: Record<string, unknown>;
+      accessConfig: unknown;
+
       // Legacy “guests” persistence (kept as-is)
       guests: Array<{
         userId: string | null;
@@ -254,12 +247,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Canonical title: programName — but keep subject bridge for now.
+    // Canonical title: programName
     const programName =
       typeof body.programName === "string" ? body.programName.trim() : "";
-    const subjectRaw =
-      typeof body.subject === "string" ? body.subject.trim() : "";
-    const subject = subjectRaw || programName; // bridge
 
     const startAtRaw = body.startAt;
     const startAt =
@@ -276,13 +266,16 @@ export async function POST(req: NextRequest) {
         : undefined;
 
     if (
-      !subject ||
+      !programName ||
       !startAt ||
       Number.isNaN(startAt.getTime()) ||
       !durationMins
     ) {
       return NextResponse.json(
-        { ok: false, error: "subject, startAt, and durationMins are required" },
+        {
+          ok: false,
+          error: "programName, startAt, and durationMins are required",
+        },
         { status: 400 }
       );
     }
@@ -296,20 +289,18 @@ export async function POST(req: NextRequest) {
           : (body.talkingPoints as string | null)
         : null;
 
-    // Normalize accessConfig: only include when it's a plain object.
-    // (Avoid passing `null` to JSON column to satisfy Prisma's input type.)
+    // Accept accessConfig as-is (including null, arrays, objects, scalars)
     let accessConfigData: PrismaNS.InputJsonValue | undefined = undefined;
-    if (isPlainObject(body.accessConfig)) {
-      accessConfigData =
-        body.accessConfig as unknown as PrismaNS.InputJsonValue;
+    if (body.accessConfig !== undefined) {
+      accessConfigData = body.accessConfig as PrismaNS.InputJsonValue;
     }
 
     const created = await prisma.booking.create({
       data: {
         orgId,
-        // Back-compat & canonical
-        subject,
-        programName: programName || null, // NEW
+
+        programName: programName || null,
+
         talkingPoints, // NEW
 
         startAt,
@@ -347,7 +338,6 @@ export async function POST(req: NextRequest) {
       select: {
         id: true,
         orgId: true,
-        subject: true,
         programName: true, // NEW
         talkingPoints: true, // NEW
         status: true,

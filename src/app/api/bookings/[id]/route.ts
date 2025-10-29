@@ -4,45 +4,15 @@ import prisma from "../../../../lib/prisma";
 import { resolveViewerFromRequest } from "../../../../lib/viewer";
 import { hasCan } from "../../../../lib/access/permissions";
 
-/** shallow-deep merge for plain objects (arrays replaced, not merged) */
-function deepMerge<T extends Record<string, unknown>>(
-  base: T,
-  patch: Partial<T>
-): T {
-  const out: any = Array.isArray(base) ? [...base] : { ...base };
-  if (!patch || typeof patch !== "object") return out;
-  for (const [k, v] of Object.entries(patch)) {
-    const bv = out[k];
-    if (
-      v &&
-      typeof v === "object" &&
-      !Array.isArray(v) &&
-      bv &&
-      typeof bv === "object" &&
-      !Array.isArray(bv)
-    ) {
-      out[k] = deepMerge(bv as any, v as any);
-    } else {
-      out[k] = v as any;
-    }
-  }
-  return out;
-}
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-/** Loosened to `any` to tolerate prisma type-gen lag after new fields */
+/** Shape response — tolerates prisma type-gen lag via `any`. */
 function shapeBooking(b: any) {
   return {
     id: b.id,
     orgId: b.orgId,
 
-    // Canonical title (kept subject for back-compat)
-    subject: b.subject,
-    programName: b.programName ?? null, // NEW
-    talkingPoints: b.talkingPoints ?? null, // NEW (HTML)
+    // Canonical title
+    programName: b.programName ?? null, // canonical title
+    talkingPoints: b.talkingPoints ?? null, // HTML
 
     status: b.status,
     startAt: new Date(b.startAt).toISOString(),
@@ -56,7 +26,7 @@ function shapeBooking(b: any) {
 
     newsroomName: b.newsroomName ?? null,
 
-    // Access knobs blob
+    // Access config (stored JSON)
     accessConfig: b.accessConfig ?? null,
 
     createdAt: new Date(b.createdAt).toISOString(),
@@ -70,7 +40,6 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
-    // fetch full row (no select) to avoid stale BookingSelect type issues
     const booking = await prisma.booking.findUnique({
       where: { id: params.id },
     });
@@ -108,7 +77,7 @@ export async function PATCH(
       );
     }
 
-    // load existing (no select) so we can merge accessConfig regardless of type-gen timing
+    // Load existing row (no select)
     const existing = (await prisma.booking.findUnique({
       where: { id: params.id },
     })) as any;
@@ -133,12 +102,11 @@ export async function PATCH(
     }
 
     const body = (await req.json().catch(() => ({}))) as Partial<{
-      // Titles
-      subject: string | null;
-      programName: string | null; // NEW
+      // Canonical title
+      programName: string | null;
 
       // Rich text
-      talkingPoints: string | null; // NEW
+      talkingPoints: string | null;
 
       // Core timing/status
       status: string; // BookingStatus as string
@@ -155,26 +123,20 @@ export async function PATCH(
       // Misc
       newsroomName: string | null;
 
-      // Access
-      accessConfig: Record<string, unknown>;
+      // Access (any JSON)
+      accessConfig: unknown;
     }>;
 
     const data: any = {};
 
-    // subject (back-compat)
-    if (body.subject === null || typeof body.subject === "string") {
-      const v = typeof body.subject === "string" ? body.subject.trim() : null;
-      data.subject = v && v.length ? v : null;
-    }
-
-    // NEW: programName (canonical)
+    // programName (canonical)
     if (body.programName === null || typeof body.programName === "string") {
       const v =
         typeof body.programName === "string" ? body.programName.trim() : null;
       data.programName = v && v.length ? v : null;
     }
 
-    // NEW: talkingPoints (HTML string or null)
+    // talkingPoints (HTML string or null)
     if (body.talkingPoints === null || typeof body.talkingPoints === "string") {
       const v =
         typeof body.talkingPoints === "string"
@@ -227,15 +189,12 @@ export async function PATCH(
       data.newsroomName = v && v.length ? v : null;
     }
 
-    // Deep-merge accessConfig if provided
-    if (isPlainObject(body.accessConfig)) {
-      const current = isPlainObject(existing.accessConfig)
-        ? (existing.accessConfig as Record<string, unknown>)
-        : {};
-      data.accessConfig = deepMerge(current, body.accessConfig!);
+    // Access config — accept any JSON as-is (replace)
+    if (body.accessConfig !== undefined) {
+      data.accessConfig = body.accessConfig as any;
     }
 
-    // update and return full row (no select) to dodge stale type errors
+    // Update and return full row (no select)
     const updated = await prisma.booking.update({
       where: { id: params.id },
       data,
