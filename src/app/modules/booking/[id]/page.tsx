@@ -2,22 +2,26 @@
 "use client";
 
 /**
- * Single Booking — mirrors the "New" page layout (containers & spacing)
- * Sections:
- *  - Basic Info (read-only)
- *  - Mode & Access (read-only; BOOKING-level summary or participant-level note)
- *  - Participants (grouped by role)
+ * Single Booking — mirrors "New" layout
  *
- * Notes:
- *  - Fresh build (no legacy).
- *  - Defensive to partial payloads — hides unknown/empty rows.
- *  - Containers match New: rounded + border + p-4, space-y-4.
+ * UI/UX in this drop:
+ * - Standardized buttons (matches New).
+ * - Extra top margin for the first container.
+ * - "New booking" → "Edit booking" (link: /modules/booking/[id]/edit).
+ * - Participants: render group headers, but map "Expert" → "Guest".
+ * - Talking points: collapsible with Read more / Read less.
+ *
+ * NOTE about names:
+ * - Participants API enriches from `user.displayName/email`. For public experts
+ *   without user records, this returns null → "Unnamed" here.
+ * - I’ll patch the API to also enrich from the public expert profile once you
+ *   share the schema + /api/experts/search route so I don’t guess.
  */
 
 import * as React from "react";
 import { useRouter, useParams } from "next/navigation";
 
-/* ---------- Small UI helpers ---------- */
+/* ---------- Small helpers ---------- */
 const clsx = (...xs: any[]) => xs.filter(Boolean).join(" ");
 const pad = (n: number) => String(n).padStart(2, "0");
 const toDatetimeLocalValue = (iso?: string | null) => {
@@ -34,24 +38,18 @@ import * as ButtonModule from "../../../../components/ui/Button";
 const UIButton: React.ElementType =
   (ButtonModule as any).Button ?? (ButtonModule as any).default;
 
-import * as AlertModule from "../../../../components/ui/Alert";
-const UIAlert: React.ElementType =
-  (AlertModule as any).Alert ?? (AlertModule as any).default;
-
 /* ---------- Types (tolerant) ---------- */
 type ModeLevel = "BOOKING" | "PARTICIPANT";
 
 type BookingDetail = {
   id: string;
-  subject?: string | null;
+  programName?: string | null;
   newsroomName?: string | null;
-  programName?: string | null; // optional: only render if exists
   startAt?: string | null;
   durationMins?: number | null;
-  talkingPoints?: string | null; // HTML saved by New
+  talkingPoints?: string | null; // HTML
   modeLevel?: ModeLevel | null;
   accessConfig?: any;
-  access?: any;
 };
 
 type ParticipantItem = {
@@ -75,22 +73,6 @@ type ParticipantsResponse =
   | { ok: false; error: string };
 
 /* ------------------------- Access summary helpers ------------------------- */
-function FieldRow({
-  label,
-  value,
-}: {
-  label: string;
-  value?: React.ReactNode;
-}) {
-  if (value === null || value === undefined || value === "") return null;
-  return (
-    <div className="flex items-start gap-3">
-      <span className="w-28 shrink-0 text-sm text-gray-500">{label}</span>
-      <div className="min-w-0 text-sm text-gray-900">{value}</div>
-    </div>
-  );
-}
-
 function kvFallback(config: unknown) {
   try {
     return JSON.stringify(config, null, 2);
@@ -102,7 +84,7 @@ function kvFallback(config: unknown) {
 function ModeAccessSummary({ config }: { config: any }) {
   if (!config) {
     return (
-      <div className="rounded-md border border-dashed p-3 text-sm text-gray-500">
+      <div className="rounded-md border p-3 text-sm text-gray-600">
         No booking-level access provided.
       </div>
     );
@@ -122,7 +104,6 @@ function ModeAccessSummary({ config }: { config: any }) {
 
   const accessLabel =
     config.accessLabel ?? config.access?.label ?? config.label ?? null;
-
   const accessDetails =
     config.accessDetails ?? config.access?.details ?? config.details ?? null;
 
@@ -137,18 +118,43 @@ function ModeAccessSummary({ config }: { config: any }) {
     !modeLabel && !presetKey && !accessLabel && !accessDetails && !location;
 
   return (
-    <div className="rounded-md border p-3">
+    <div className="rounded-md border p-3 text-sm">
       {nothing ? (
-        <pre className="whitespace-pre-wrap break-words text-xs text-gray-600">
+        <pre className="whitespace-pre-wrap text-gray-600">
           {kvFallback(config)}
         </pre>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <FieldRow label="Mode" value={modeLabel} />
-          <FieldRow label="Preset" value={presetKey} />
-          <FieldRow label="Label" value={accessLabel} />
-          <FieldRow label="Details" value={accessDetails} />
-          <FieldRow label="Location" value={location} />
+        <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+          {modeLabel && (
+            <div>
+              <div className="text-xs text-gray-500">Mode</div>
+              <div className="font-medium">{modeLabel}</div>
+            </div>
+          )}
+          {presetKey && (
+            <div>
+              <div className="text-xs text-gray-500">Preset</div>
+              <div className="font-medium">{presetKey}</div>
+            </div>
+          )}
+          {accessLabel && (
+            <div>
+              <div className="text-xs text-gray-500">Label</div>
+              <div className="font-medium">{accessLabel}</div>
+            </div>
+          )}
+          {accessDetails && (
+            <div className="sm:col-span-2">
+              <div className="text-xs text-gray-500">Details</div>
+              <div className="font-medium break-words">{accessDetails}</div>
+            </div>
+          )}
+          {location && (
+            <div className="sm:col-span-2">
+              <div className="text-xs text-gray-500">Location</div>
+              <div className="font-medium break-words">{location}</div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -164,15 +170,12 @@ export default function BookingViewPage() {
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState<string | null>(null);
   const [detail, setDetail] = React.useState<BookingDetail | null>(null);
-  const [participants, setParticipants] = React.useState<ParticipantsResponse>({
-    ok: true,
-    items: [],
-    grouped: {},
-    roles: [],
-  } as any);
+  const [participants, setParticipants] =
+    React.useState<ParticipantsResponse | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
+
     async function run() {
       setLoading(true);
       setErr(null);
@@ -184,22 +187,17 @@ export default function BookingViewPage() {
         });
         const j = (await r.json().catch(() => ({}))) as any;
         if (!r.ok) throw new Error(j?.error || `Failed to load booking`);
+
         const b: BookingDetail = {
           id: j?.booking?.id ?? j?.id ?? bookingId,
-          subject: j?.booking?.subject ?? j?.subject ?? null,
+          programName: j?.booking?.programName ?? j?.programName ?? null,
           newsroomName: j?.booking?.newsroomName ?? j?.newsroomName ?? null,
-          // Only render Program name if backend returns it
-          programName: j?.booking?.programName ?? j?.programName ?? undefined,
           startAt: (j?.booking?.startAt ?? j?.startAt) || null,
-          durationMins:
-            j?.booking?.durationMins ?? j?.durationMins ?? undefined,
-          talkingPoints:
-            j?.booking?.talkingPoints ?? j?.talkingPoints ?? undefined,
+          durationMins: j?.booking?.durationMins ?? j?.durationMins ?? null,
+          talkingPoints: j?.booking?.talkingPoints ?? j?.talkingPoints ?? null,
           modeLevel:
             j?.booking?.modeLevel ?? j?.modeLevel ?? ("BOOKING" as ModeLevel),
-          accessConfig:
-            j?.booking?.accessConfig ?? j?.accessConfig ?? j?.access,
-          access: j?.booking?.access ?? undefined,
+          accessConfig: j?.booking?.accessConfig ?? j?.accessConfig ?? null,
         };
         if (!cancelled) setDetail(b);
 
@@ -225,6 +223,7 @@ export default function BookingViewPage() {
         if (!cancelled) setLoading(false);
       }
     }
+
     if (bookingId) run();
     return () => {
       cancelled = true;
@@ -233,135 +232,157 @@ export default function BookingViewPage() {
 
   const modeLevel: ModeLevel | null = (detail?.modeLevel as ModeLevel) ?? null;
 
-  const grouped =
-    (participants as any)?.grouped &&
-    typeof (participants as any).grouped === "object"
-      ? (participants as any).grouped
-      : (() => {
-          const m: Record<string, ParticipantItem[]> = {};
-          if ((participants as any)?.items?.length) {
-            for (const it of (participants as any).items as ParticipantItem[]) {
-              const key =
-                (it.roleLabel && it.roleLabel.trim()) ||
-                (typeof it.roleSlot === "number"
-                  ? `Role ${it.roleSlot}`
-                  : "Participants");
-              (m[key] ||= []).push(it);
-            }
-          }
-          return m;
-        })();
+  // Build grouped map if API didn't provide it
+  const grouped: Record<string, ParticipantItem[]> = React.useMemo(() => {
+    const p = participants;
+    if (!p || ("ok" in p && !p.ok)) return {};
+    const items = "ok" in p && p.ok && Array.isArray(p.items) ? p.items : [];
+    const m: Record<string, ParticipantItem[]> = {};
+    for (const it of items) {
+      const raw =
+        (it.roleLabel && it.roleLabel.trim()) ||
+        (typeof it.roleSlot === "number"
+          ? `Role ${it.roleSlot}`
+          : "Participants");
+      // UI copy rule: show "Guest" instead of "Expert"
+      const label = raw.toLowerCase() === "expert" ? "Guest" : raw;
+      (m[label] ||= []).push(it);
+    }
+    return m;
+  }, [participants]);
 
-  const roleKeys = Object.keys(grouped ?? {});
+  const roleKeys = Object.keys(grouped);
+
+  /* ---------- Read more for talking points ---------- */
+  const [tpExpanded, setTpExpanded] = React.useState(false);
+  const hasTalkingPoints = (detail?.talkingPoints ?? "").trim().length > 0;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      {/* Top-level errors / loading */}
-      {loading ? (
-        <div className="text-sm text-gray-500">Loading booking…</div>
-      ) : null}
-      {err ? <UIAlert kind="error">{err}</UIAlert> : null}
+    <div className="mx-auto max-w-4xl p-4">
+      {/* Header row */}
+      <div className="mb-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+        >
+          ← Back
+        </button>
+
+        <div className="flex items-center gap-2">
+          <a
+            href={`/modules/booking/${bookingId}/edit`}
+            className="rounded-md bg-black px-4 py-2 text-sm text-white"
+          >
+            Edit booking
+          </a>
+        </div>
+      </div>
+
+      {/* Loading / Error */}
+      {loading && (
+        <div className="rounded-md border p-4 text-sm">Loading booking…</div>
+      )}
+      {err && (
+        <div className="mt-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+          {err}
+        </div>
+      )}
 
       {/* Basic Info */}
-      <section className="rounded-md border p-4 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">Basic Info</h2>
-          {/* subtle section meta could go here in future */}
-        </div>
+      <section className="mt-6 rounded-md border p-4">
+        <h2 className="text-lg font-medium">Basic Info</h2>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          {/* Program name replaces Subject. Fallback to subject so old payloads still show. */}
-          <label className="block space-y-1">
-            <span className="text-sm">Program name</span>
+        <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="block text-sm">
+            <span className="text-gray-700">Program name</span>
             <input
-              value={detail?.programName ?? detail?.subject ?? ""}
               readOnly
-              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+              value={detail?.programName ?? ""}
+              className="mt-1 w-full cursor-default rounded-md border bg-gray-50 px-3 py-2"
             />
           </label>
 
-          <label className="block space-y-1">
-            <span className="text-sm">Newsroom name</span>
+          <label className="block text-sm">
+            <span className="text-gray-700">Newsroom name</span>
             <input
+              readOnly
               value={detail?.newsroomName ?? ""}
-              readOnly
-              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+              className="mt-1 w-full cursor-default rounded-md border bg-gray-50 px-3 py-2"
             />
           </label>
-        </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block space-y-1">
-            <span className="text-sm">Duration (mins)</span>
+          <label className="block text-sm">
+            <span className="text-gray-700">Duration (mins)</span>
             <input
-              value={
-                typeof detail?.durationMins === "number"
-                  ? String(detail.durationMins)
-                  : ""
-              }
               readOnly
-              className="w-full rounded-md border bg-gray-50 px-3 py-2"
+              value={detail?.durationMins ?? ""}
+              className="mt-1 w-full cursor-default rounded-md border bg-gray-50 px-3 py-2"
+            />
+          </label>
+
+          <label className="block text-sm">
+            <span className="text-gray-700">Start at</span>
+            <input
+              readOnly
+              type="datetime-local"
+              value={toDatetimeLocalValue(detail?.startAt)}
+              className="mt-1 w-full cursor-default rounded-md border bg-gray-50 px-3 py-2"
             />
           </label>
         </div>
-
-        <label className="block space-y-1">
-          <span className="text-sm">Start at</span>
-          <input
-            type="datetime-local"
-            value={toDatetimeLocalValue(detail?.startAt ?? null)}
-            readOnly
-            className="w-full rounded-md border bg-gray-50 px-3 py-2"
-          />
-        </label>
 
         {/* Talking points */}
-        <div className="space-y-1">
-          <span className="text-sm">Talking points</span>
-          <div className="rounded-md border bg-white">
-            <div
-              className={clsx(
-                "min-h-[120px] max-h-[320px] overflow-auto px-3 py-2 prose prose-sm",
-                !detail?.talkingPoints && "italic text-gray-500"
+        <div className="mt-4">
+          <div className="text-sm text-gray-700">Talking points</div>
+
+          {!hasTalkingPoints ? (
+            <div className="mt-1 rounded-md border p-3 text-sm text-gray-500">
+              No talking points.
+            </div>
+          ) : (
+            <div className="relative mt-1">
+              <div
+                className={clsx(
+                  "rounded-md border p-3 text-sm prose prose-sm max-w-none",
+                  !tpExpanded && "max-h-40 overflow-hidden"
+                )}
+                // HTML saved by New
+                dangerouslySetInnerHTML={{ __html: detail!.talkingPoints! }}
+              />
+              {!tpExpanded && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-10 h-10 bg-gradient-to-t from-white to-transparent" />
               )}
-              // eslint-disable-next-line react/no-danger
-              dangerouslySetInnerHTML={{
-                __html:
-                  (detail?.talkingPoints &&
-                    String(detail.talkingPoints).trim()) ||
-                  "No talking points.",
-              }}
-            />
-          </div>
+              <div className="mt-2 text-right">
+                <UIButton
+                  type="button"
+                  onClick={() => setTpExpanded((v: boolean) => !v)}
+                  className="rounded-md border px-3 py-1 text-sm"
+                >
+                  {tpExpanded ? "Read less" : "Read more"}
+                </UIButton>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 
       {/* Mode & Access */}
-      <section className="rounded-md border p-4 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">Mode &amp; Access</h2>
-        </div>
+      <section className="mt-6 rounded-md border p-4">
+        <h2 className="text-lg font-medium">Mode &amp; Access</h2>
 
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-sm">Mode Level</span>
-            <select
-              value={modeLevel ?? ""}
-              disabled
-              className="w-full rounded-md border bg-gray-50 px-3 py-2"
-            >
-              <option value="">—</option>
-              <option value="BOOKING">Booking</option>
-              <option value="PARTICIPANT">Participant</option>
-            </select>
-          </label>
+        <div className="mt-3 text-sm text-gray-700">
+          <div className="mb-3">
+            <span className="text-gray-500">Mode Level — </span>
+            <span className="font-medium">
+              {modeLevel === "PARTICIPANT" ? "Participant" : "Booking"}
+            </span>
+          </div>
 
           {modeLevel === "BOOKING" ? (
-            <ModeAccessSummary
-              config={detail?.accessConfig ?? detail?.access ?? null}
-            />
+            <ModeAccessSummary config={detail?.accessConfig} />
           ) : (
-            <div className="rounded-md border border-dashed p-3 text-sm text-gray-600">
+            <div className="rounded-md border p-3 text-sm text-gray-600">
               Participant-level access — see each participant below.
             </div>
           )}
@@ -369,60 +390,48 @@ export default function BookingViewPage() {
       </section>
 
       {/* Participants */}
-      <section className="rounded-md border p-4 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">Participants</h2>
-        </div>
+      <section className="mt-6 rounded-md border p-4">
+        <h2 className="text-lg font-medium">Participants</h2>
 
-        {("ok" in participants && participants.ok && roleKeys.length === 0) ||
-        (!("ok" in participants) && !roleKeys.length) ? (
-          <div className="rounded-md border border-dashed p-3 text-sm text-gray-500">
-            No participants found.
+        {participants && "ok" in participants && !participants.ok ? (
+          <div className="mt-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            {participants.error}
           </div>
         ) : null}
 
-        {"ok" in participants && !participants.ok ? (
-          <UIAlert kind="error">{participants.error}</UIAlert>
-        ) : null}
-
-        {roleKeys.length > 0 && (
-          <div className="space-y-4">
+        {roleKeys.length === 0 ? (
+          <div className="mt-3 rounded-md border p-3 text-sm text-gray-600">
+            No participants found.
+          </div>
+        ) : (
+          <div className="mt-3 space-y-4">
             {roleKeys.map((role) => {
-              const rows: ParticipantItem[] = grouped[role] ?? [];
+              const rows = grouped[role] ?? [];
               return (
-                <div key={role} className="space-y-2">
-                  <div className="text-sm font-medium">{role}</div>
-                  <div className="space-y-2">
-                    {rows.map((p) => (
-                      <div
-                        key={p.id}
-                        className="flex items-center justify-between rounded-md border px-3 py-2"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium">
-                            {p.displayName ?? "Unnamed"}
-                          </span>
-                          {typeof p.roleSlot === "number" ? (
-                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">
-                              #{p.roleSlot}
-                            </span>
-                          ) : null}
-                        </div>
-                        <span
-                          className={clsx(
-                            "rounded px-1.5 py-0.5 text-[10px]",
-                            p.inviteStatus === "ACCEPTED"
-                              ? "bg-green-100 text-green-800"
-                              : p.inviteStatus === "DECLINED"
-                              ? "bg-red-100 text-red-800"
-                              : "bg-gray-100 text-gray-700"
-                          )}
-                        >
-                          {p.inviteStatus ?? "PENDING"}
-                        </span>
-                      </div>
-                    ))}
+                <div key={role} className="rounded-md border">
+                  <div className="flex items-center justify-between border-b p-2">
+                    <div className="text-sm font-medium">{role}</div>
                   </div>
+                  {rows.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between px-3 py-2 text-sm"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">
+                          {p.displayName ?? "Unnamed"}
+                        </div>
+                        {typeof p.roleSlot === "number" && (
+                          <div className="text-[11px] text-gray-500">
+                            #{p.roleSlot}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-[11px]">
+                        {p.inviteStatus ?? "PENDING"}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               );
             })}
@@ -431,16 +440,13 @@ export default function BookingViewPage() {
       </section>
 
       {/* Footer actions */}
-      <div className="flex items-center justify-end gap-2">
-        <button
+      <div className="mt-6 flex items-center justify-end">
+        <UIButton
           type="button"
-          onClick={() => router.back()}
-          className="rounded-md border px-3 py-2 hover:bg-gray-50"
+          onClick={() => router.push("/modules/booking/view")}
+          className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
         >
           Back
-        </button>
-        <UIButton asChild>
-          <a href="/modules/booking/new">New booking</a>
         </UIButton>
       </div>
     </div>

@@ -17,7 +17,7 @@ export default function NewBookingSegmentLayout({
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <h1 className="text-lg font-semibold">New Booking</h1>
           <Link
-            href="/modules/booking"
+            href="/modules/booking/view"
             className="rounded-xl border px-3 py-1.5 text-sm hover:bg-gray-50"
           >
             ← Back to bookings

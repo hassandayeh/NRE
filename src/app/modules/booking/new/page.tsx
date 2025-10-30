@@ -4,16 +4,14 @@
 /**
  * New Booking — People picker + Mode Level (Booking | Participant)
  *
- * Uses reusable <ModeAccessControl /> for:
- *  - Booking-level Mode & Access (when modeLevel = BOOKING)
- *  - Per-participant Mode & Access (when modeLevel = PARTICIPANT)
+ * This drop focuses on UI/UX polish (no API regressions):
+ * - Buttons standardized (primary/secondary).
+ * - "Use access presets" defaults to ON.
+ * - Extra top margin above the first container.
+ * - Cancel warns about unsaved changes (modal, mirrors Guest Profile UX).
+ * - "Back to bookings" now navigates to /modules/booking/view.
  *
- * Layout (this slice):
- *  - Each top-level section is its own container (rounded + border + p-4).
- *  - Internal spacing normalized to space-y-4 for section body, space-y-3 for field stacks.
- *
- * NOTE (compat): We’re removing “Subject” from the UI.
- * Until the API/DB switch over, we send subject = programName so nothing breaks.
+ * Compatibility: Subject is removed from UI. We still send subject = programName.
  */
 
 import * as React from "react";
@@ -95,6 +93,7 @@ function useSessionIdentity() {
       cancelled = true;
     };
   }, []);
+
   return state;
 }
 
@@ -121,7 +120,7 @@ type SelectedPerson = {
 
 /* ===============================================================
    Unified People Picker (Org | Public | Both)
-   ===============================================================*/
+===============================================================*/
 function PeoplePicker(props: {
   startAtISO: string;
   durationMins: number;
@@ -130,14 +129,12 @@ function PeoplePicker(props: {
   orgId?: string | null;
 }) {
   const { startAtISO, durationMins, onPick, existingIds, orgId } = props;
-
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
   const [visibility, setVisibility] = React.useState<"org" | "public" | "all">(
     "org"
   );
   const [onlyAvailable, setOnlyAvailable] = React.useState(false);
-
   const [items, setItems] = React.useState<DirectoryItem[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -202,6 +199,7 @@ function PeoplePicker(props: {
       sp.set("durationMins", String(durationMins));
     }
     if (orgId) sp.set("orgId", orgId);
+
     const res = await fetch(`/api/directory/org?${sp.toString()}`, {
       credentials: "include",
       headers: { ...(orgId ? { "x-org-id": orgId } : {}) },
@@ -215,6 +213,7 @@ function PeoplePicker(props: {
       : Array.isArray(j.users)
       ? j.users
       : [];
+
     const hasBookable = (arr as any[]).some((u) =>
       Object.prototype.hasOwnProperty.call(u ?? {}, "bookable")
     );
@@ -229,6 +228,7 @@ function PeoplePicker(props: {
       : hasInviteable
       ? (arr as any[]).filter((u) => u?.inviteable === true)
       : (arr as any[] as any[]);
+
     let rows = mapOrgRows(base);
     if (onlyAvailable && haveWindow) {
       rows = rows.filter((r) => r.availability?.status === "AVAILABLE");
@@ -315,7 +315,7 @@ function PeoplePicker(props: {
   }
 
   return (
-    <div className="space-y-2">
+    <div className="mt-2">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -325,9 +325,9 @@ function PeoplePicker(props: {
       </button>
 
       {open && (
-        <div className="space-y-3 rounded-md border p-3">
+        <div className="mt-2 space-y-2">
           {/* Controls */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2">
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -343,8 +343,8 @@ function PeoplePicker(props: {
             />
             {(["org", "public", "all"] as const).map((v) => (
               <button
-                key={v}
                 type="button"
+                key={v}
                 onClick={() => setVisibility(v)}
                 className={clsx(
                   "rounded-md border px-2 py-1 text-xs capitalize",
@@ -355,22 +355,23 @@ function PeoplePicker(props: {
                 {v === "all" ? "Both" : v}
               </button>
             ))}
-            <label className="flex items-center gap-2 text-sm">
+
+            <label className="flex items-center gap-2 text-xs">
               <input
                 type="checkbox"
-                checked={!!onlyAvailable}
+                checked={onlyAvailable}
                 onChange={(e) => setOnlyAvailable(e.target.checked)}
               />
-              Only available
+              <span>Only available</span>
             </label>
           </div>
 
           {/* Results */}
-          <div className="space-y-2">
-            {loading && <div className="text-sm text-gray-500">Loading…</div>}
-            {error && <div className="text-sm text-red-700">{error}</div>}
+          <div className="rounded-md border divide-y">
+            {loading && <div className="p-3 text-sm">Loading…</div>}
+            {error && <div className="p-3 text-sm text-red-600">{error}</div>}
             {!loading && !error && items.length === 0 && (
-              <div className="text-sm text-gray-500">No matches.</div>
+              <div className="p-3 text-sm text-gray-600">No matches.</div>
             )}
             {items.map((p) => {
               const disabled = props.existingIds.includes(p.id);
@@ -383,37 +384,36 @@ function PeoplePicker(props: {
                   : "bg-gray-100 text-gray-700";
               return (
                 <button
+                  type="button"
                   key={p.id}
                   disabled={disabled}
                   onClick={() => !disabled && props.onPick(p)}
                   className={clsx(
-                    "w-full rounded-md border px-3 py-2 text-left hover:bg-gray-50",
+                    "w-full rounded-md border-0 px-3 py-2 text-left hover:bg-gray-50",
                     disabled && "opacity-50"
                   )}
                 >
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-2">
                     <div className="font-medium">{p.name || "Unnamed"}</div>
-                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] tracking-wide">
+                    <span className="text-[10px] rounded px-1.5 py-0.5 border">
                       {p.source.toUpperCase()}
                     </span>
                     {p.kind && (
                       <span
                         className={clsx(
-                          "rounded px-1.5 py-0.5 text-[10px]",
+                          "text-[10px] rounded px-1.5 py-0.5",
                           kindBadge
                         )}
                       >
                         {p.kind}
                       </span>
                     )}
-                    <span className="text-xs text-gray-500">
+                    <span className="text-[10px] text-gray-500 ml-auto">
                       {status ?? "UNKNOWN"}
                     </span>
-                    {p.city && (
-                      <span className="text-xs text-gray-500">{p.city}</span>
-                    )}
+                    {p.city && <span className="text-[10px]">{p.city}</span>}
                     {p.countryCode && (
-                      <span className="text-xs text-gray-400">
+                      <span className="text-[10px] text-gray-500">
                         ({p.countryCode})
                       </span>
                     )}
@@ -443,7 +443,7 @@ function RtButton({
       type="button"
       onClick={onClick}
       title={title}
-      className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
+      className="rounded-md border px-2 py-1 text-xs"
     >
       {children}
     </button>
@@ -476,19 +476,24 @@ function RichTextEditor({
 
   return (
     <div className="rounded-md border">
-      <div className="flex items-center gap-1 border-b p-1">
+      <div className="flex items-center gap-2 border-b p-2">
         <RtButton onClick={() => exec("bold")} title="Bold">
-          <span className="font-bold">B</span>
+          B
         </RtButton>
         <RtButton onClick={() => exec("italic")} title="Italic">
-          <span className="italic">I</span>
+          I
         </RtButton>
         <RtButton onClick={() => exec("underline")} title="Underline">
-          <span className="underline">U</span>
+          U
         </RtButton>
-        <RtButton onClick={() => exec("removeFormat")} title="Clear formatting">
-          Clear format
-        </RtButton>
+        <div className="ml-auto">
+          <RtButton
+            onClick={() => exec("removeFormat")}
+            title="Clear formatting"
+          >
+            Clear format
+          </RtButton>
+        </div>
       </div>
 
       <div
@@ -507,7 +512,7 @@ function RichTextEditor({
 
 /* ===============================================================
    Page
-   ===============================================================*/
+===============================================================*/
 export default function NewBookingPage() {
   const router = useRouter();
 
@@ -519,6 +524,7 @@ export default function NewBookingPage() {
       session.identity !== "staff" ||
       !session.user.orgId ||
       session.user.orgId === null);
+
   const effectiveOrgId =
     session.kind === "ready" ? session.user?.orgId ?? null : null;
 
@@ -598,7 +604,11 @@ export default function NewBookingPage() {
   const [bookingAccess, setBookingAccess] = React.useState<
     BookingAccessConfig | undefined
   >(undefined);
-  const [bookingValid, setBookingValid] = React.useState<boolean>(true);
+  const [bookingValid, setBookingValid] = React.useState(true);
+  // Guard readiness & skip switches
+  const [maReady, setMaReady] = React.useState(false); // ModeAccessControl fired once
+  const [baselineSet, setBaselineSet] = React.useState(false); // baseline snapshot established
+  const skipGuardsRef = React.useRef(false); // set true during programmatic navigations (save/redirect)
 
   function onBookingMAChange(
     _state: ModeAccessState,
@@ -607,13 +617,15 @@ export default function NewBookingPage() {
   ) {
     setBookingAccess(derived.accessConfig);
     setBookingValid(derived.valid);
+    // First onChange from ModeAccessControl indicates its initial state is ready.
+    // We only need to set this once.
+    setMaReady((was) => (was ? was : true));
   }
 
-  /* ---------- Per-participant Mode & Access (via component) ---------- */
+  /* ---------- Per-participant Mode & Access (future slice) ---------- */
   const [participantMA, setParticipantMA] = React.useState<
     Record<string, { access?: BookingAccessConfig; valid: boolean }>
   >({});
-
   function onParticipantMAChange(
     userId: string,
     _state: ModeAccessState,
@@ -658,7 +670,133 @@ export default function NewBookingPage() {
     people.every((p) => participantMA[p.userId]?.valid ?? true);
   const formValid = bookingValid && participantsValid && !!form.programName;
 
-  // ---------- Submit ----------
+  /* ---------- Unsaved changes (modal guard) ---------- */
+  const [leaveOpen, setLeaveOpen] = React.useState(false);
+  const [leaveBusy, setLeaveBusy] = React.useState(false);
+  const [pendingHref, setPendingHref] = React.useState<string | null>(null);
+  const baselineRef = React.useRef<string>("");
+
+  // Establish baseline once the page is stable:
+  // - session is resolved (so orgId doesn’t flip later),
+  // - ModeAccessControl has emitted its initial state (when modeLevel === 'BOOKING').
+  // If user chooses PARTICIPANT, we don't wait for bookingAccess.
+  React.useEffect(() => {
+    const sessionReady = session.kind === "ready";
+    const maIsNeeded = modeLevel === "BOOKING";
+    const stable = sessionReady && (!maIsNeeded || maReady);
+
+    if (!baselineSet && stable) {
+      baselineRef.current = JSON.stringify({
+        form,
+        people,
+        modeLevel,
+        bookingAccess: maIsNeeded ? bookingAccess : undefined,
+      });
+      setBaselineSet(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    session.kind,
+    maReady,
+    modeLevel,
+    baselineSet,
+    form,
+    people,
+    bookingAccess,
+  ]);
+
+  const dirty = React.useMemo(() => {
+    if (!baselineSet) return false;
+    try {
+      const snap = JSON.stringify({
+        form,
+        people,
+        modeLevel,
+        bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+      });
+      return snap !== baselineRef.current;
+    } catch {
+      return false;
+    }
+  }, [baselineSet, form, people, modeLevel, bookingAccess]);
+
+  // native refresh/close
+  React.useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!dirty || skipGuardsRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
+  // in-app links
+  React.useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (!dirty) return;
+      if (e.defaultPrevented) return;
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+        return;
+      const target = e.target as Element | null;
+      if (!target) return;
+      const a = target.closest("a") as HTMLAnchorElement | null;
+      if (!a) return;
+      if (a.dataset && (a.dataset as any).bypassUnsaved === "true") return;
+
+      const raw = a.getAttribute("href") || a.href;
+      if (!raw) return;
+      let dest: string | null = null;
+      if (raw.startsWith("/")) {
+        dest = raw;
+      } else {
+        try {
+          const u = new URL(raw);
+          if (u.host === window.location.host)
+            dest = u.pathname + u.search + u.hash;
+          else return;
+        } catch {
+          return;
+        }
+      }
+      if (dest && dest.startsWith("#")) return;
+
+      e.preventDefault();
+      setPendingHref(dest);
+      setLeaveOpen(true);
+    };
+
+    window.addEventListener("click", onClick, true);
+    return () => window.removeEventListener("click", onClick, true);
+  }, [dirty]);
+
+  async function leaveViaSave() {
+    if (leaveBusy) return;
+    setLeaveBusy(true);
+    const ok = await saveAndStay(); // light client-side save (same as Create payload but no redirect)
+    setLeaveBusy(false);
+    if (ok) {
+      const dest = pendingHref ?? "/modules/booking/view";
+      skipGuardsRef.current = true;
+      baselineRef.current = JSON.stringify({
+        form,
+        people,
+        modeLevel,
+        bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+      });
+      setLeaveOpen(false);
+      setPendingHref(null);
+      router.push(dest);
+    }
+  }
+  function leaveDiscard() {
+    const dest = pendingHref ?? "/modules/booking/view";
+    setLeaveOpen(false);
+    setPendingHref(null);
+    router.push(dest);
+  }
+
+  /* ---------- Submit ---------- */
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -666,14 +804,14 @@ export default function NewBookingPage() {
     e.preventDefault();
     setError(null);
 
-    const blocked =
+    const blockedNow =
       session.kind === "ready" &&
       (!session.user ||
         session.identity !== "staff" ||
         !session.user.orgId ||
         session.user.orgId === null);
 
-    if (blocked) {
+    if (blockedNow) {
       setError("You don’t have permission to create bookings.");
       return;
     }
@@ -691,7 +829,6 @@ export default function NewBookingPage() {
       ...(modeLevel === "BOOKING" && bookingAccess
         ? { accessConfig: bookingAccess }
         : {}),
-      // participant-level access is handled in a later slice
     };
 
     try {
@@ -725,14 +862,12 @@ export default function NewBookingPage() {
             roleSlot: p.isHost ? 1 : p.kind === "REPORTER" ? 2 : 3,
           })),
         };
-
         const partRes = await fetch(`/api/bookings/${bookingId}/participants`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify(participantsPayload),
         });
-
         if (!partRes.ok) {
           const pj = await partRes.json().catch(() => ({}));
           console.error("Participants add failed:", pj);
@@ -744,6 +879,13 @@ export default function NewBookingPage() {
       }
 
       // 3) Go to the single booking view
+      skipGuardsRef.current = true; // prevent unload prompt
+      baselineRef.current = JSON.stringify({
+        form,
+        people,
+        modeLevel,
+        bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+      });
       window.location.assign(`/modules/booking/${bookingId}`);
     } catch (err: any) {
       setError(err?.message || "Failed to create booking");
@@ -752,50 +894,100 @@ export default function NewBookingPage() {
     }
   }
 
+  // lightweight save used by the modal’s “Save and leave”
+  async function saveAndStay(): Promise<boolean> {
+    if (!formValid) return false;
+    try {
+      const payload: any = {
+        subject: form.programName || undefined,
+        programName: form.programName || undefined,
+        newsroomName: form.newsroomName,
+        talkingPoints: form.talkingPoints || undefined,
+        startAt: new Date(form.startAt).toISOString(),
+        durationMins: Number(form.durationMins),
+        modeLevel,
+        ...(modeLevel === "BOOKING" && bookingAccess
+          ? { accessConfig: bookingAccess }
+          : {}),
+      };
+      const res = await fetch("/api/bookings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   /* ---------------------------- Render ---------------------------- */
   return (
-    <form className="mx-auto max-w-3xl space-y-6" onSubmit={onSubmit}>
-      {/* Access gate + errors */}
-      {session.kind === "loading" ? (
-        <div className="text-sm text-gray-500">Checking your access…</div>
-      ) : null}
-      {error && <UIAlert kind="error">{error}</UIAlert>}
+    <form onSubmit={onSubmit} className="mx-auto max-w-4xl p-4">
+      {/* Header row */}
+      <div className="mb-4 flex items-center justify-between">
+        <a
+          href="/modules/booking/view"
+          className="rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+        >
+          ← Back to bookings
+        </a>
+        <div className="flex items-center gap-2">
+          <UIButton
+            type="button"
+            onClick={() => {
+              if (dirty) {
+                setPendingHref("/modules/booking/view");
+                setLeaveOpen(true);
+                return;
+              }
+              router.push("/modules/booking/view");
+            }}
+            className="rounded-md border px-4 py-2"
+          >
+            Cancel
+          </UIButton>
+          <UIButton
+            type="submit"
+            disabled={!formValid || submitting || blocked}
+            className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+          >
+            {submitting ? "Creating…" : "Create booking"}
+          </UIButton>
+        </div>
+      </div>
 
-      {/* Basic Info (container) */}
-      <section className="rounded-md border p-4 space-y-4">
+      {/* Basic Info (extra margin to the top) */}
+      <section className="mt-6 rounded-md border p-4">
         <h2 className="text-lg font-medium">Basic Info</h2>
-
-        {/* Top row: Program name (replaces Subject) + Newsroom name */}
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block space-y-1">
-            <span className="text-sm">Program name</span>
+        <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="block text-sm">
+            <span className="text-gray-700">Program name</span>
             <input
               value={form.programName}
               onChange={(e) =>
                 setForm((f) => ({ ...f, programName: e.target.value }))
               }
-              required
-              className="w-full rounded-md border px-3 py-2"
+              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder=""
             />
           </label>
 
-          <label className="block space-y-1">
-            <span className="text-sm">Newsroom name</span>
+          <label className="block text-sm">
+            <span className="text-gray-700">Newsroom name</span>
             <input
               value={form.newsroomName}
               onChange={(e) =>
                 setForm((f) => ({ ...f, newsroomName: e.target.value }))
               }
-              required
-              className="w-full rounded-md border px-3 py-2"
+              className="mt-1 w-full rounded-md border px-3 py-2"
+              placeholder=""
             />
           </label>
-        </div>
 
-        {/* Time row: Start at + Duration */}
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block space-y-1">
-            <span className="text-sm">Start at</span>
+          <label className="block text-sm">
+            <span className="text-gray-700">Start at</span>
             <input
               type="datetime-local"
               value={toDatetimeLocalValue(form.startAt)}
@@ -805,13 +997,12 @@ export default function NewBookingPage() {
                   startAt: new Date(e.target.value).toISOString(),
                 }))
               }
-              required
-              className="w-full rounded-md border px-3 py-2"
+              className="mt-1 w-full rounded-md border px-3 py-2"
             />
           </label>
 
-          <label className="block space-y-1">
-            <span className="text-sm">Duration (mins)</span>
+          <label className="block text-sm">
+            <span className="text-gray-700">Duration (mins)</span>
             <input
               type="number"
               min={5}
@@ -820,146 +1011,190 @@ export default function NewBookingPage() {
               onChange={(e) =>
                 setForm((f) => ({
                   ...f,
-                  durationMins: Number(e.target.value),
+                  durationMins: Number(e.target.value || 0),
                 }))
               }
-              required
-              className="w-full rounded-md border px-3 py-2"
+              className="mt-1 w-full rounded-md border px-3 py-2"
             />
           </label>
         </div>
 
-        {/* Talking points (rich text) */}
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <span className="text-sm">Talking points</span>
-          </div>
-          <RichTextEditor
-            value={form.talkingPoints}
-            onChange={(html) => setForm((f) => ({ ...f, talkingPoints: html }))}
-          />
+        <div className="mt-4">
+          <label className="block text-sm">
+            <span className="text-gray-700">Talking points</span>
+            <div className="mt-1">
+              <RichTextEditor
+                value={form.talkingPoints}
+                onChange={(html) =>
+                  setForm((f) => ({ ...f, talkingPoints: html }))
+                }
+              />
+            </div>
+          </label>
         </div>
       </section>
 
-      {/* Mode & Access (container) */}
-      <section className="rounded-md border p-4 space-y-4">
+      {/* Mode & Access */}
+      <section className="mt-6 rounded-md border p-4">
         <h2 className="text-lg font-medium">Mode &amp; Access</h2>
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-sm">Mode Level</span>
+        <div className="mt-3 grid grid-cols-1 gap-4">
+          <label className="block text-sm">
+            <span className="text-gray-700">Mode Level</span>
             <select
               value={modeLevel}
               onChange={(e) => setModeLevel(e.target.value as ModeLevel)}
-              className="w-full rounded-md border px-3 py-2"
+              className="mt-1 w-full rounded-md border px-3 py-2"
             >
               <option value="BOOKING">Booking</option>
               <option value="PARTICIPANT">Participant</option>
             </select>
           </label>
 
-          {modeLevel === "BOOKING" && (
+          {/* Booking-level MA (presets default ON) */}
+          <div className="rounded-md border p-3">
             <ModeAccessControl
               scope="BOOKING"
               modes={modes}
               presets={presets}
+              initial={{ usePresets: true }}
+              disabled={modeLevel !== "BOOKING"}
               onChange={onBookingMAChange}
             />
-          )}
+          </div>
         </div>
       </section>
 
-      {/* Participants (container) */}
-      <section className="rounded-md border p-4 space-y-4">
+      {/* Participants */}
+      <section className="mt-6 rounded-md border p-4">
         <h2 className="text-lg font-medium">Participants</h2>
 
-        <PeoplePicker
-          startAtISO={form.startAt}
-          durationMins={form.durationMins}
-          onPick={(row) => addPersonFromDirectory(row)}
-          existingIds={existingIds}
-          orgId={
-            session.kind === "ready"
-              ? session.user?.orgId ?? undefined
-              : undefined
-          }
-        />
+        <div className="mt-2">
+          <PeoplePicker
+            startAtISO={form.startAt}
+            durationMins={form.durationMins}
+            existingIds={existingIds}
+            onPick={addPersonFromDirectory}
+            orgId={effectiveOrgId ?? undefined}
+          />
+        </div>
 
-        {people.length === 0 && (
-          <div className="rounded-md border border-dashed p-3 text-sm text-gray-500">
+        {people.length === 0 ? (
+          <div className="mt-3 rounded-md border p-3 text-sm text-gray-600">
             No participants yet. Use “Find” to add people.
           </div>
-        )}
-
-        <div className="space-y-3">
-          {people.map((p, idx) => {
-            return (
-              <div key={p.userId} className="rounded-md border p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="font-medium">
-                      #{idx + 1}&nbsp;&nbsp;{p.name}{" "}
-                    </div>
-                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] tracking-wide">
-                      {p.source.toUpperCase()}
+        ) : (
+          <div className="mt-3 space-y-2">
+            {people.map((p, i) => (
+              <div
+                key={p.userId}
+                className="flex items-center justify-between rounded-md border p-2"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="truncate font-medium">{p.name}</span>
+                  <span className="text-[10px] rounded px-1.5 py-0.5 border">
+                    {p.source.toUpperCase()}
+                  </span>
+                  {p.kind && (
+                    <span className="text-[10px] rounded bg-gray-100 px-1.5 py-0.5">
+                      {p.kind}
                     </span>
-                    {p.kind && (
-                      <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] text-purple-800">
-                        {p.kind}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={!!p.isHost}
-                        onChange={(e) => toggleHost(idx, e.target.checked)}
-                      />
-                      Host
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => removePerson(idx)}
-                      className="rounded-md border px-2 py-1 text-xs text-red-700 hover:bg-red-50"
-                      title="Remove"
-                    >
-                      Remove
-                    </button>
-                  </div>
+                  )}
                 </div>
-
-                {modeLevel === "PARTICIPANT" && (
-                  <div className="mt-3">
-                    <ModeAccessControl
-                      scope="PARTICIPANT"
-                      modes={modes}
-                      presets={presets}
-                      onChange={(s, d, e) =>
-                        onParticipantMAChange(p.userId, s, d, e)
-                      }
+                <div className="flex items-center gap-2">
+                  <label className="text-xs flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={p.isHost}
+                      onChange={(e) => toggleHost(i, e.target.checked)}
                     />
-                  </div>
-                )}
+                    <span>Host</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => removePerson(i)}
+                    className="rounded-md border px-2 py-1 text-xs"
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      {/* Footer actions (containerless) */}
-      <div className="flex items-center justify-end gap-2">
-        <button
+      {/* Footer buttons (duplicated for long forms) */}
+      <div className="mt-6 flex items-center justify-end gap-2">
+        <UIButton
           type="button"
-          onClick={() => router.back()}
-          className="rounded-md border px-3 py-2 hover:bg-gray-50"
+          onClick={() => {
+            if (dirty) {
+              setPendingHref("/modules/booking/view");
+              setLeaveOpen(true);
+              return;
+            }
+            router.push("/modules/booking/view");
+          }}
+          className="rounded-md border px-4 py-2"
         >
           Cancel
-        </button>
-        <UIButton type="submit" disabled={submitting || !formValid}>
+        </UIButton>
+        <UIButton
+          type="submit"
+          disabled={!formValid || submitting || blocked}
+          className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+        >
           {submitting ? "Creating…" : "Create booking"}
         </UIButton>
       </div>
+
+      {/* Errors */}
+      {error && (
+        <div className="mt-3">
+          <UIAlert severity="error">{error}</UIAlert>
+        </div>
+      )}
+
+      {/* Unsaved changes modal */}
+      {leaveOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4"
+        >
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-lg">
+            <h3 className="text-lg font-semibold">Unsaved changes</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              You have unsaved changes. What would you like to do?
+            </p>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setLeaveOpen(false)}
+                className="rounded-md border px-4 py-2"
+              >
+                Stay
+              </button>
+              <button
+                type="button"
+                onClick={leaveDiscard}
+                className="rounded-md border px-4 py-2"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                onClick={leaveViaSave}
+                disabled={!formValid || leaveBusy}
+                className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+              >
+                {leaveBusy ? "Saving…" : "Save & leave"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </form>
   );
 }
