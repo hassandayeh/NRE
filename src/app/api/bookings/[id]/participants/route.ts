@@ -247,10 +247,11 @@ export async function GET(
     >();
     if (fallbackIds.size) {
       try {
-        const gpRows: any[] = await (prisma as any).guestProfileV2.findMany({
+        const gpRows = await prisma.guestProfile.findMany({
           where: { id: { in: Array.from(fallbackIds) } },
-          select: { id: true, displayName: true, name: true, fullName: true },
+          select: { id: true, displayName: true },
         });
+
         for (const g of gpRows || []) gpMap.set(String(g.id), g);
       } catch {
         // If guestProfileV2 doesn't exist, we just keep staff names.

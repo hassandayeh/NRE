@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 type BookingListItem = {
   id: string;
   startAt: string; // ISO
+  createdAt?: string; // ISO (optional: shown/used when present)
   durationMins: number;
   appearanceType?: "ONLINE" | "IN_PERSON" | "PHONE" | null;
   expertName?: string | null;
@@ -103,6 +104,8 @@ export default function BookingsViewPage() {
   const [loading, setLoading] = useState(true); // bookings loading
   const [err, setErr] = useState<string | null>(null);
   const [items, setItems] = useState<BookingListItem[]>([]);
+  // List sort mode: "booking" (by startAt, ascending) or "created" (by createdAt, descending)
+  const [sortMode, setSortMode] = useState<"booking" | "created">("booking");
   // IMPORTANT: undefined = not loaded yet, null = loaded + no session
   const [sessionObj, setSessionObj] = useState<any | undefined>(undefined);
 
@@ -212,19 +215,130 @@ export default function BookingsViewPage() {
   // Spinner logic: show while session OR bookings are loading
   const showSpinner = !sessionReady || loading;
 
+  // Does the payload include createdAt?
+  const hasCreatedAt = useMemo(
+    () =>
+      items.some(
+        (i) => typeof (i as any).createdAt === "string" && (i as any).createdAt
+      ),
+    [items]
+  );
+
+  // Group + sort helpers (memoized)
+  const groups = useMemo(() => {
+    if (!items.length)
+      return [] as Array<{
+        key: string;
+        label: string;
+        items: BookingListItem[];
+      }>;
+
+    const getDate = (b: BookingListItem) => {
+      const iso =
+        sortMode === "created"
+          ? ((b as any).createdAt as string | undefined) || b.startAt
+          : b.startAt;
+      const d = iso ? new Date(iso) : null;
+      return d && isFinite(d.valueOf()) ? d : null;
+    };
+
+    // Sort: booking → ascending; created → descending
+    const sorted = [...items].sort((a, b) => {
+      const da = getDate(a);
+      const db = getDate(b);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return sortMode === "created"
+        ? db.getTime() - da.getTime()
+        : da.getTime() - db.getTime();
+    });
+
+    // Group by day (YYYY-MM-DD) of the active date
+    const toKey = (d: Date) => d.toISOString().slice(0, 10);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const labelFor = (key: string) => {
+      if (key === "unknown") return "Other";
+      const d = new Date(key + "T00:00:00");
+      const diffDays = Math.round((d.getTime() - today.getTime()) / 86400000);
+      if (diffDays === 0) return "Today";
+      if (diffDays === 1) return "Tomorrow";
+      if (diffDays === -1) return "Yesterday";
+      return d.toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: d.getFullYear() !== today.getFullYear() ? "numeric" : undefined,
+      });
+    };
+
+    const map = new Map<string, BookingListItem[]>();
+    for (const it of sorted) {
+      const d = getDate(it);
+      const key = d ? toKey(d) : "unknown";
+      (map.get(key) ?? map.set(key, []).get(key)!).push(it);
+    }
+
+    return Array.from(map.entries()).map(([key, arr]) => ({
+      key,
+      label: labelFor(key),
+      items: arr,
+    }));
+  }, [items, sortMode]);
+
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Bookings</h1>
 
-        {/* Essentials: always show the button; server enforces permissions on /modules/booking/new */}
-        <Link
-          href="/modules/booking/new"
-          className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50"
-        >
-          New booking
-        </Link>
+        <div className="flex items-center gap-3">
+          {/* Sort toggle */}
+          <div
+            role="tablist"
+            aria-label="Sort bookings"
+            className="inline-flex overflow-hidden rounded-lg border"
+          >
+            <button
+              role="tab"
+              aria-selected={sortMode === "booking"}
+              onClick={() => setSortMode("booking")}
+              className={`px-3 py-1.5 text-sm ${
+                sortMode === "booking"
+                  ? "bg-gray-100 font-medium"
+                  : "hover:bg-gray-50"
+              }`}
+            >
+              Booking date
+            </button>
+            <button
+              role="tab"
+              aria-selected={sortMode === "created"}
+              onClick={() => hasCreatedAt && setSortMode("created")}
+              disabled={!hasCreatedAt}
+              className={`border-l px-3 py-1.5 text-sm ${
+                sortMode === "created"
+                  ? "bg-gray-100 font-medium"
+                  : "hover:bg-gray-50"
+              } ${!hasCreatedAt ? "cursor-not-allowed opacity-50" : ""}`}
+              title={
+                hasCreatedAt ? "" : "Created date not present in this dataset"
+              }
+            >
+              Created
+            </button>
+          </div>
+
+          {/* New booking */}
+          <Link
+            href="/modules/booking/new"
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50"
+          >
+            New booking
+          </Link>
+        </div>
       </div>
 
       {/* Success banner (after edit/save flows that redirect with ?updated=1) */}
@@ -280,75 +394,94 @@ export default function BookingsViewPage() {
       {/* List */}
       {!showSpinner &&
         effectiveOrgId &&
-        items.map((b) => {
-          const ap = b.appearanceType;
-          const multiHost =
-            typeof b.hostsCount === "number" && b.hostsCount > 1;
+        groups.map((g) => (
+          <div key={g.key} className="mb-4">
+            <div className="mb-2 rounded-md bg-gray-50 px-2 py-1 text-sm font-medium text-gray-600">
+              {g.label}
+            </div>
 
-          return (
-            <Link
-              key={b.id}
-              href={`/modules/booking/${b.id}`}
-              className="mb-3 block rounded-xl border bg-white p-4 hover:bg-gray-50"
-            >
-              {/* Whole card is a link → VIEW page */}
-              <div className="mb-1 flex items-center justify-between">
-                <h2 className="text-base font-medium">
-                  {b.programName ?? "(no title)"}
-                </h2>
-                {ap && (
-                  <span className="rounded-md border px-2 py-0.5 text-xs">
-                    {ap === "IN_PERSON"
-                      ? "IN PERSON"
-                      : ap === "ONLINE"
-                      ? "ONLINE"
-                      : "PHONE"}
-                  </span>
-                )}
-              </div>
+            {g.items.map((b) => {
+              const ap = b.appearanceType;
+              const multiHost =
+                typeof b.hostsCount === "number" && b.hostsCount > 1;
 
-              <div className="mb-1 text-sm text-gray-600">
-                {fmtDate(b.startAt)} • {b.durationMins}m
-                {multiHost && (
-                  <span className="ml-2 rounded-md border px-1.5 py-0.5 text-xs">
-                    Hosts ×{b.hostsCount}
-                  </span>
-                )}
-              </div>
+              return (
+                <Link
+                  key={b.id}
+                  href={`/modules/booking/${b.id}`}
+                  className="mb-3 block rounded-xl border bg-white p-4 hover:bg-gray-50"
+                >
+                  {/* Whole card is a link → VIEW page */}
+                  <div className="mb-1 flex items-center justify-between">
+                    <h2 className="text-base font-medium">
+                      {b.programName ?? "(no title)"}
+                    </h2>
+                    {ap && (
+                      <span className="rounded-md border px-2 py-0.5 text-xs">
+                        {ap === "IN_PERSON"
+                          ? "IN PERSON"
+                          : ap === "ONLINE"
+                          ? "ONLINE"
+                          : "PHONE"}
+                      </span>
+                    )}
+                  </div>
 
-              {(b.expertName || b.newsroomName) && (
-                <div className="text-sm text-gray-600">
-                  <span className="font-medium">Expert:</span>{" "}
-                  {b.expertName ?? "—"}{" "}
-                  <span className="mx-1.5 text-gray-400">•</span>{" "}
-                  <span className="font-medium">Newsroom:</span>{" "}
-                  {b.newsroomName ?? "—"}
-                </div>
-              )}
+                  <div className="mb-1 text-sm text-gray-600">
+                    {fmtDate(b.startAt)} • {b.durationMins}m
+                    {multiHost && (
+                      <span className="ml-2 rounded-md border px-1.5 py-0.5 text-xs">
+                        Hosts ×{b.hostsCount}
+                      </span>
+                    )}
+                  </div>
+                  {sortMode === "created" && (
+                    <div className="text-xs text-gray-500">
+                      Created{" "}
+                      {fmtDate(
+                        ((b as any).createdAt as string | undefined) ??
+                          b.startAt
+                      )}
+                    </div>
+                  )}
 
-              {(b.programName || b.hostName) && (
-                <div className="text-sm text-gray-600">
-                  <span className="font-medium">Program:</span>{" "}
-                  {b.programName ?? "—"}{" "}
-                  <span className="mx-1.5 text-gray-400">•</span>{" "}
-                  <span className="font-medium">Host:</span> {b.hostName ?? "—"}
-                </div>
-              )}
+                  {(b.expertName || b.newsroomName) && (
+                    <div className="text-sm text-gray-600">
+                      <span className="font-medium">Expert:</span>{" "}
+                      {b.expertName ?? "—"}{" "}
+                      <span className="mx-1.5 text-gray-400">•</span>{" "}
+                      <span className="font-medium">Newsroom:</span>{" "}
+                      {b.newsroomName ?? "—"}
+                    </div>
+                  )}
 
-              {ap === "IN_PERSON" && (b.locationName || b.locationAddress) && (
-                <div className="mt-1 text-sm text-gray-600">
-                  <span className="font-medium">Location:</span>{" "}
-                  {b.locationName ?? ""}{" "}
-                  {b.locationAddress ? (
-                    <span className="text-gray-500">
-                      {` — ${b.locationAddress}`}
-                    </span>
-                  ) : null}
-                </div>
-              )}
-            </Link>
-          );
-        })}
+                  {(b.programName || b.hostName) && (
+                    <div className="text-sm text-gray-600">
+                      <span className="font-medium">Program:</span>{" "}
+                      {b.programName ?? "—"}{" "}
+                      <span className="mx-1.5 text-gray-400">•</span>{" "}
+                      <span className="font-medium">Host:</span>{" "}
+                      {b.hostName ?? "—"}
+                    </div>
+                  )}
+
+                  {ap === "IN_PERSON" &&
+                    (b.locationName || b.locationAddress) && (
+                      <div className="mt-1 text-sm text-gray-600">
+                        <span className="font-medium">Location:</span>{" "}
+                        {b.locationName ?? ""}{" "}
+                        {b.locationAddress ? (
+                          <span className="text-gray-500">
+                            {` — ${b.locationAddress}`}
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
     </div>
   );
 }
