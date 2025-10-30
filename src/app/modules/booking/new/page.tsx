@@ -705,6 +705,7 @@ export default function NewBookingPage() {
     form,
     people,
     bookingAccess,
+    participantMA,
   ]);
 
   const dirty = React.useMemo(() => {
@@ -722,7 +723,7 @@ export default function NewBookingPage() {
     } catch {
       return false;
     }
-  }, [baselineSet, form, people, modeLevel, bookingAccess]);
+  }, [baselineSet, form, people, modeLevel, bookingAccess, participantMA]);
 
   // native refresh/close
   React.useEffect(() => {
