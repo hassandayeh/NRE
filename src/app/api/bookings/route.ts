@@ -114,6 +114,13 @@ export async function GET(req: NextRequest) {
     );
     const skip = Math.max(parseInt(searchParams.get("skip") || "0", 10), 0);
 
+    // server-side sort: "booking" (default) or "created"
+    const sortMode = (searchParams.get("sort") || "booking").toLowerCase();
+    const orderBy =
+      sortMode === "created"
+        ? [{ createdAt: "desc" as const }, { startAt: "desc" as const }]
+        : [{ startAt: "desc" as const }, { createdAt: "desc" as const }];
+
     if (!orgId) {
       return NextResponse.json(
         { ok: false, error: "orgId is required" },
@@ -159,10 +166,97 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    return NextResponse.json(
-      { ok: true, bookings: rows.map(shapeBooking as any) },
-      { status: 200 }
-    );
+    if (!rows.length) {
+      return NextResponse.json({ ok: true, bookings: [] }, { status: 200 });
+    }
+
+    // ---------- Enrich with participant names (Host/Expert) ----------
+    const bookingIds = rows.map((r) => r.id);
+
+    // Pull minimal participant info + staff user names
+    const parts = await prisma.bookingParticipant.findMany({
+      where: { bookingId: { in: bookingIds } },
+      select: {
+        bookingId: true,
+        userId: true,
+        roleSlot: true,
+        roleLabelSnapshot: true,
+        notes: true,
+        user: { select: { displayName: true, email: true } },
+      },
+      orderBy: [{ roleSlot: "asc" }, { id: "asc" }],
+    });
+
+    // Collect guest-profile ids for public participants (gp:<id> in notes)
+    const fallbackIds = new Set<string>();
+    for (const p of parts) {
+      const hasStaffName = p?.user?.displayName || p?.user?.email;
+      if (!hasStaffName && typeof p.notes === "string" && p.notes) {
+        const m = /^gp:(.+)$/.exec(p.notes.trim());
+        if (m && m[1]) fallbackIds.add(m[1]);
+      }
+    }
+
+    // Batch fetch GuestProfile names (fail-soft)
+    const gpMap = new Map<string, { displayName: string | null }>();
+    if (fallbackIds.size) {
+      try {
+        const gpRows = await (prisma as any).guestProfile.findMany({
+          where: { id: { in: Array.from(fallbackIds) } },
+          select: { id: true, displayName: true },
+        });
+        for (const g of gpRows || []) {
+          gpMap.set(String(g.id), { displayName: g.displayName ?? null });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Group participants by bookingId
+    const byBooking = new Map<string, typeof parts>();
+    for (const p of parts) {
+      (
+        byBooking.get(p.bookingId) ??
+        byBooking.set(p.bookingId, []).get(p.bookingId)!
+      ).push(p);
+    }
+
+    // Helper to render a participant display name
+    const nameOf = (p: (typeof parts)[number]): string | null => {
+      const u = p.user;
+      let label =
+        (u?.displayName && u.displayName.trim()) ||
+        (u?.email && u.email.trim()) ||
+        null;
+      if (!label && typeof p.notes === "string" && p.notes) {
+        const m = /^gp:(.+)$/.exec(p.notes.trim());
+        if (m && m[1]) {
+          const g = gpMap.get(m[1]);
+          label = g?.displayName ?? null;
+        }
+      }
+      return label;
+    };
+
+    const enriched = rows.map((b) => {
+      const pb = byBooking.get(b.id) || [];
+      const hosts = pb.filter((p) => (p.roleSlot ?? 0) === 1);
+      const experts = pb.filter((p) => (p.roleSlot ?? 0) === 3);
+
+      const hostName = hosts.map(nameOf).find(Boolean) || null;
+      const expertName = experts.map(nameOf).find(Boolean) || null;
+      const hostsCount = hosts.length;
+
+      const shaped = shapeBooking(b as any) as any;
+      if (hostName) shaped.hostName = hostName;
+      if (expertName) shaped.expertName = expertName;
+      if (hostsCount > 0) shaped.hostsCount = hostsCount;
+
+      return shaped;
+    });
+
+    return NextResponse.json({ ok: true, bookings: enriched }, { status: 200 });
   } catch (err) {
     console.error("GET /api/bookings error:", err);
     return NextResponse.json(

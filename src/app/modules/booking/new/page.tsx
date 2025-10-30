@@ -691,7 +691,9 @@ export default function NewBookingPage() {
         people,
         modeLevel,
         bookingAccess: maIsNeeded ? bookingAccess : undefined,
+        participantMA: !maIsNeeded ? participantMA : undefined,
       });
+
       setBaselineSet(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -713,7 +715,9 @@ export default function NewBookingPage() {
         people,
         modeLevel,
         bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+        participantMA: modeLevel === "PARTICIPANT" ? participantMA : undefined,
       });
+
       return snap !== baselineRef.current;
     } catch {
       return false;
@@ -783,7 +787,9 @@ export default function NewBookingPage() {
         people,
         modeLevel,
         bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+        participantMA: modeLevel === "PARTICIPANT" ? participantMA : undefined,
       });
+
       setLeaveOpen(false);
       setPendingHref(null);
       router.push(dest);
@@ -856,12 +862,20 @@ export default function NewBookingPage() {
       // 2) If we picked people, add them as participants
       if (people.length > 0) {
         const participantsPayload = {
-          participants: people.map((p) => ({
-            userId: p.userId,
-            // Host = 1, Reporter(Producer) = 2, Expert = 3
-            roleSlot: p.isHost ? 1 : p.kind === "REPORTER" ? 2 : 3,
-          })),
+          participants: people.map((p) => {
+            const acc =
+              modeLevel === "PARTICIPANT"
+                ? participantMA[p.userId]?.access
+                : undefined;
+            return {
+              userId: p.userId,
+              // Host = 1, Reporter(Producer) = 2, Expert = 3
+              roleSlot: p.isHost ? 1 : p.kind === "REPORTER" ? 2 : 3,
+              ...(acc ? { accessConfig: acc } : {}),
+            };
+          }),
         };
+
         const partRes = await fetch(`/api/bookings/${bookingId}/participants`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -885,7 +899,9 @@ export default function NewBookingPage() {
         people,
         modeLevel,
         bookingAccess: modeLevel === "BOOKING" ? bookingAccess : undefined,
+        participantMA: modeLevel === "PARTICIPANT" ? participantMA : undefined,
       });
+
       window.location.assign(`/modules/booking/${bookingId}`);
     } catch (err: any) {
       setError(err?.message || "Failed to create booking");
@@ -1051,16 +1067,17 @@ export default function NewBookingPage() {
           </label>
 
           {/* Booking-level MA (presets default ON) */}
-          <div className="rounded-md border p-3">
-            <ModeAccessControl
-              scope="BOOKING"
-              modes={modes}
-              presets={presets}
-              initial={{ usePresets: true }}
-              disabled={modeLevel !== "BOOKING"}
-              onChange={onBookingMAChange}
-            />
-          </div>
+          {modeLevel === "BOOKING" && (
+            <div className="rounded-md border p-3">
+              <ModeAccessControl
+                scope="BOOKING"
+                modes={modes}
+                presets={presets}
+                initial={{ usePresets: true }}
+                onChange={onBookingMAChange}
+              />
+            </div>
+          )}
         </div>
       </section>
 
@@ -1085,38 +1102,54 @@ export default function NewBookingPage() {
         ) : (
           <div className="mt-3 space-y-2">
             {people.map((p, i) => (
-              <div
-                key={p.userId}
-                className="flex items-center justify-between rounded-md border p-2"
-              >
-                <div className="flex min-w-0 items-center gap-3">
-                  <span className="truncate font-medium">{p.name}</span>
-                  <span className="text-[10px] rounded px-1.5 py-0.5 border">
-                    {p.source.toUpperCase()}
-                  </span>
-                  {p.kind && (
-                    <span className="text-[10px] rounded bg-gray-100 px-1.5 py-0.5">
-                      {p.kind}
+              <div key={p.userId} className="rounded-md border p-2">
+                {/* Row header */}
+                <div className="flex items-center justify-between">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="truncate font-medium">{p.name}</span>
+                    <span className="text-[10px] rounded px-1.5 py-0.5 border">
+                      {p.source.toUpperCase()}
                     </span>
-                  )}
+                    {p.kind && (
+                      <span className="text-[10px] rounded bg-gray-100 px-1.5 py-0.5">
+                        {p.kind}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={p.isHost}
+                        onChange={(e) => toggleHost(i, e.target.checked)}
+                      />
+                      <span>Host</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => removePerson(i)}
+                      className="rounded-md border px-2 py-1 text-xs"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <label className="text-xs flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      checked={p.isHost}
-                      onChange={(e) => toggleHost(i, e.target.checked)}
+
+                {/* Participant-level Mode & Access */}
+                {modeLevel === "PARTICIPANT" && (
+                  <div className="mt-2">
+                    <ModeAccessControl
+                      scope="PARTICIPANT"
+                      modes={modes}
+                      presets={presets}
+                      initial={{ usePresets: true }}
+                      disabled={false}
+                      onChange={(state, derived, errors) =>
+                        onParticipantMAChange(p.userId, state, derived, errors)
+                      }
                     />
-                    <span>Host</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => removePerson(i)}
-                    className="rounded-md border px-2 py-1 text-xs"
-                  >
-                    Remove
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
